@@ -988,17 +988,27 @@ export default function VerbatimReader() {
        헤더까지 걸린 시간(q)은 같은 조건에서 1.5~1.9배로만 흔들린다 — 배정받기까지의
        시간이라 질문 내용과 거의 무관하다. 그래서 혼잡 판정은 q 로만 한다. */
     const qNow = st.q == null ? elapsed : st.q;   // 헤더가 아직이면 지금 이 순간 전부가 대기다
-    if (qNow < QUEUE_BAD) return null;            // 배정은 빨랐다 = 질문이 무거운 것이지 막힌 게 아니다
+    const congested = qNow >= QUEUE_BAD;
 
+    /* 배정이 빨랐는데도 답이 안 나오는 경우가 있다 — 실측으로 Nemotron 이 "7+8은?" 에
+       배정 0.5초 뒤 44초를 침묵하고 90초 상한에 걸렸다. 이건 줄이 아니라 그 모델이
+       그 순간 맛이 간 것이므로, 이미 정체 경고가 떠 있으면 그때도 갈아타기를 권한다. */
+    const stalled = st.phase === "stream"
+      ? Date.now() - (st.at || st.t0) >= STALL_GAP
+      : elapsed >= STALL_WAIT;
+    if (!congested && !stalled) return null;      // 아직은 그냥 무거운 질문일 뿐이다
+
+    // 막힌 경우엔 지금보다 확실히 나은 놈을, 멈춘 경우엔 평소 잘 붙는 놈을 고른다.
+    const limit = congested ? qNow * 0.4 : 3_000;
     let best = null;
     for (const m of models) {
       if (m.id === cur) continue;
       const s = mStats[m.id];
       if (!s || s.n < SUGGEST_MIN_N || !Number.isFinite(s.q)) continue;
-      if (s.q > qNow * 0.4) continue;             // 눈에 띄게 잘 붙을 때만 권한다
+      if (s.q > limit) continue;
       if (!best || s.q < best.q) best = { id: m.id, label: m.label, q: s.q, n: s.n };
     }
-    return best && { ...best, qNow };
+    return best && { ...best, qNow, congested };
   }, [aiStat, statTick, mStats, models, cfg.askModel, defModel]);
 
   const statView = useMemo(() => {
@@ -2944,8 +2954,10 @@ export default function VerbatimReader() {
                   {statView && suggestion && (
                     <div className="vb-swap">
                       <span className="vb-swaptx">
-                        지금 모델은 배정까지 {Math.round(suggestion.qNow / 100) / 10}초 —
-                        {" "}{suggestion.label} 은(는) 최근 {suggestion.n}회 평균 {Math.round(suggestion.q / 100) / 10}초
+                        {suggestion.congested
+                          ? `지금 모델은 배정까지 ${Math.round(suggestion.qNow / 100) / 10}초 걸렸습니다`
+                          : "이 모델이 응답을 멈춘 것 같습니다"} —
+                        {" "}{suggestion.label} 은(는) 최근 {suggestion.n}회 평균 {Math.round(suggestion.q / 100) / 10}초 만에 붙습니다
                       </span>
                       <button className="vb-swapbtn" onClick={() => retryWith(suggestion.id)}>
                         바꿔서 다시
