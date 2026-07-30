@@ -441,7 +441,7 @@ const CSS = `
 `;
 
 /* ───────────────── AI 호출 (Claude → Gemini) ───────────────── */
-async function readSSE(res, pick, onDelta) {
+async function readSSE(res, pick, onDelta, onThink) {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("event-stream")) {
     const j = await res.json();
@@ -466,14 +466,21 @@ async function readSSE(res, pick, onDelta) {
       try { j = JSON.parse(raw); } catch { continue; }
       const t = pick.delta(j);
       if (t) { out += t; onDelta(t); }
+      // 추론 모델의 속생각. 화면에는 안 쓰지만 "살아 있다"는 유일한 증거다.
+      const k = pick.think?.(j);
+      if (k) onThink?.(k);
     }
   }
   return out;
 }
 
-/* 서버는 프로바이더와 무관하게 항상 OpenAI 형식 SSE 로 응답한다. */
+/* 서버는 프로바이더와 무관하게 항상 OpenAI 형식 SSE 로 응답한다.
+   reasoning_content 는 Nemotron 같은 추론 모델이 답 이전에 흘리는 속생각이다.
+   답(content)과 섞으면 안 되지만(실측 Nemotron: 생각 879자 → 답 862자),
+   버리기만 하면 그동안 화면이 비어 멈춘 것처럼 보인다 — 상태줄에서만 쓴다. */
 const PICK_OPENAI = {
   delta: (j) => j.choices?.[0]?.delta?.content || "",
+  think: (j) => j.choices?.[0]?.delta?.reasoning_content || "",
   whole: (j) => j.choices?.[0]?.message?.content || "",
 };
 
@@ -511,10 +518,15 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
      그래서 상태만 알리고 끊는 판단은 사람에게 맡긴다. */
   opts.onPhase?.("wait", { engine, model });
   let first = true;
+  let think = 0;
   const text = await readSSE(res, PICK_OPENAI, (c) => {
     if (first) { first = false; opts.onPhase?.("stream", { engine, model }); }
     opts.onPhase?.("tick");
     onDelta(c);
+  }, (k) => {
+    // 속생각이 흐르는 동안은 답이 한 글자도 안 나온다. 그래도 모델은 일하고 있다.
+    think += k.length;
+    opts.onPhase?.("think", { engine, model, think });
   });
   return { text, engine, model };
 }
@@ -867,7 +879,11 @@ export default function VerbatimReader() {
      그래서 절대 자동으로 끊지 않는다 — 어느 단계에서 몇 초째인지만 보여 주고 판단은 사람이 한다.
      [중단]을 누르면 fetch 를 abort 하고, 서버는 res 의 'close' 를 보고 업스트림 fetch 까지
      함께 끊는다. 그래야 붙잡고 있던 스트림과 커넥션이 바로 풀린다. */
-  const STALL_WAIT = 25_000;  // 첫 글자를 이만큼 못 받으면 경고색 (콜드스타트가 여기까지 온다)
+  /* 경고선은 "정상적으로 오래 걸리는 경우"보다 넉넉해야 오경보가 안 난다.
+     실측(2026-07-30): MiniMax M3 는 속생각을 안 흘리면서 첫 글자까지 40.9초가 걸린다.
+     25초로 뒀더니 멀쩡한 요청에 경고가 떴다. 콜드스타트는 52초까지 가지만 그건
+     "모델이 식었으면 1분까지" 라고 문구로 안내한다. */
+  const STALL_WAIT = 45_000;  // 첫 글자를 이만큼 못 받으면 경고색
   const STALL_GAP = 12_000;   // 흐르던 스트림이 이만큼 끊기면 경고색
   const jobRef = useRef(null);          // 지금 도는 질문 탭 요청 { ac, sid }
   const statRef = useRef(null);
@@ -898,8 +914,15 @@ export default function VerbatimReader() {
   const isCur = (ac) => jobRef.current?.ac === ac;
   const phaseHook = (ac, getChars) => (p, info) => {
     if (!isCur(ac)) return;
-    if (p === "tick") bumpStat({ at: Date.now(), chars: getChars?.() ?? 0 });
-    else setStat({ phase: p, at: Date.now(), ...info });
+    if (p === "tick") { bumpStat({ at: Date.now(), chars: getChars?.() ?? 0 }); return; }
+    if (p === "think") {
+      // 속생각도 토큰 단위로 쏟아진다 — 단계가 처음 바뀔 때만 그리고, 나머지는 ref 만 민다.
+      const was = statRef.current?.phase;
+      bumpStat({ at: Date.now(), think: info.think, engine: info.engine, model: info.model });
+      if (was !== "think") setStat({ phase: "think" });
+      return;
+    }
+    setStat({ phase: p, at: Date.now(), ...info });
   };
 
   const startJob = (sid, step) => {
@@ -924,6 +947,13 @@ export default function VerbatimReader() {
     const who = st.engine ? `${st.engine}${st.model ? " " + st.model.split("/").pop() : ""}` : "";
     const step = st.step ? `${st.step} · ` : "";
     if (st.phase === "send") return { text: `${step}서버에 요청하는 중 · ${sec}초`, warn: false };
+    /* 속생각이 흐르는 동안은 답이 한 글자도 안 나오지만 모델은 분명히 살아 있다.
+       여기서만은 "느리다"와 "죽었다"를 구분할 수 있으므로 절대 경고하지 않는다. */
+    if (st.phase === "think")
+      return {
+        text: `${step}생각하는 중 · ${st.think || 0}자 · ${sec}초${who ? ` · ${who}` : ""}`,
+        warn: false,
+      };
     if (st.phase === "wait") {
       const warn = sec * 1000 >= STALL_WAIT;
       return {
