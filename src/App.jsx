@@ -304,6 +304,31 @@ const CSS = `
 .vb-bubble{position:absolute;z-index:38;padding:9px 15px;border-radius:10px;background:var(--mark);
   color:#241F00;font-size:13.5px;font-weight:650;box-shadow:0 4px 14px rgba(0,0,0,.4);white-space:nowrap}
 
+/* ── 영역 캡처 ──
+   오버레이는 .vb-view 의 실측 사각형에 position:fixed 로 맞춘다. .vb-body 안에
+   절대배치하면 목차 패널까지 덮거나 패널 폭(400/272)을 또 하드코딩해야 한다. */
+/* 오버레이 자체는 투명하다 — 딤은 .vb-capsel 의 box-shadow 한 곳에서만 만든다.
+   둘 다 깔면 선택 안쪽까지 어두워져서 정작 오릴 글자가 잘 안 보인다. */
+.vb-cap{position:fixed;z-index:42;touch-action:none;cursor:crosshair;
+  background:transparent;-webkit-user-select:none;user-select:none}
+.vb-cap.busy{cursor:progress}
+.vb-capsel{position:absolute;border:1.5px solid var(--mark);background:rgba(255,216,77,.10);
+  box-shadow:0 0 0 9999px rgba(20,19,18,.42);cursor:move}
+.vb-caph{position:absolute;width:22px;height:22px;border-radius:50%;background:var(--mark);
+  border:2px solid #241F00;touch-action:none}
+.vb-caphint{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:43;
+  padding:8px 14px;border-radius:10px;background:rgba(20,19,18,.9);border:1px solid var(--line);
+  color:#D9D5CC;font-size:13px;white-space:nowrap;pointer-events:none}
+.vb-capmenu{position:absolute;z-index:43;display:flex;gap:6px;padding:6px;border-radius:12px;
+  background:var(--desk2);border:1px solid var(--line);box-shadow:0 6px 20px rgba(0,0,0,.5)}
+.vb-capbtn{min-height:40px;padding:0 15px;border-radius:9px;background:var(--mark);color:#241F00;
+  font-size:14px;font-weight:650;white-space:nowrap;touch-action:manipulation}
+.vb-capbtn.ghost{background:transparent;border:1px solid var(--line);color:#CFCBC2;font-weight:500}
+.vb-capbtn:disabled{opacity:.45}
+/* 질문 탭에 붙는 캡처 썸네일 */
+.vb-msgimg{display:block;max-width:min(100%,320px);border-radius:9px;border:1px solid var(--line);
+  margin:2px 0 8px;background:#fff}
+
 @media (prefers-reduced-motion:reduce){.vb-root *{transition:none!important;animation:none!important}}
 `;
 
@@ -355,6 +380,8 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       system, user,
+      // 영역 캡처 이미지(base64 JPEG). 있으면 서버가 비전 모델 체인으로 보낸다.
+      image: opts.image || "",
       maxTokens: opts.ask ? 1400 : 1000,
       forceGemini: !!cfg.forceGemini,
       ask: !!opts.ask,
@@ -414,6 +441,29 @@ const SYS_ASK = `너는 한국 대학생이 읽고 있는 문서를 함께 보�
 주어진 본문(책 전체 또는 표시된 범위)을 근거로 한국어로 답한다. 짧고 정확하게, 필요하면 원문 표현을 쪽수와 함께 인용한다.
 독자가 지금 보고 있는 쪽과 방금 짚은 문장이 표시되어 있으면 그 맥락을 우선 고려한다.
 본문에 없는 내용은 추측이라고 밝힌다. 인사말 없이 바로 답한다.`;
+
+/* ── 영역 캡처 프롬프트 ──
+   "해석"은 비전 모델이 한 번에 처리하고, "문제풀이"는 두 단계로 나눈다:
+   비전 모델이 눈 역할로 옮겨적고(SYS_CAP_OCR), 실제 추론은 질문 탭 모델(DeepSeek 등)이 한다.
+   비전 모델은 글자를 잘 읽지만 추론은 텍스트 전용 모델이 더 낫기 때문이다. */
+const SYS_CAP_READ = `너는 한국 대학생이 읽는 원서·교재의 한 부분을 함께 보는 번역·해설자다.
+주어진 이미지는 지금 읽고 있는 쪽에서 오려낸 영역이다. 이미지에 보이는 것만 근거로 삼는다.
+먼저 보이는 본문을 자연스러운 한국어로 옮기고, 이어서 이해에 필요한 만큼만 짧게 풀어 설명한다.
+수식·기호·표는 읽은 그대로 옮기고 각 기호가 무엇을 뜻하는지 밝힌다.
+전문 용어는 원어를 괄호로 병기한다. 인사말·마무리 문장·마크다운 기호 금지.
+이미지가 흐리거나 글자를 알아볼 수 없으면 추측하지 말고 그 사실을 먼저 밝힌다.`;
+
+const SYS_CAP_OCR = `이미지에 보이는 내용을 있는 그대로 옮겨 적는다. 번역·해설·풀이를 하지 않는다.
+수식은 한 줄로 읽을 수 있는 형태로 옮긴다(예: (A+B)' = A'B').
+표는 행마다 줄을 나눠 옮기고, 그림·회로도는 [그림: 무엇이 있는지 한 줄]로 적는다.
+문제 번호와 보기 기호(①, (a) 등)를 빠뜨리지 않는다. 알아볼 수 없는 글자는 [?]로 표시한다.
+옮긴 내용만 출력한다.`;
+
+const SYS_CAP_SOLVE = `너는 한국 대학생의 문제풀이 조교다. 주어진 문제를 한국어로 푼다.
+답만 던지지 말고 풀이 과정을 단계로 나눠 보여주되, 군더더기 없이 짧게.
+근거가 되는 정의·법칙은 이름을 밝힌다(예: 드모르간 법칙).
+마지막 줄에 "답: "으로 시작하는 한 줄로 최종 답을 적는다.
+문제가 불완전해서 풀 수 없으면 무엇이 빠졌는지 밝힌다. 인사말·마크다운 기호 금지.`;
 
 /* ───────────────── 컴포넌트 ───────────────── */
 export default function VerbatimReader() {
@@ -1449,6 +1499,221 @@ export default function VerbatimReader() {
     }
   };
 
+  /* ── 영역 캡처 ──
+     모드에 들어가면 .vb-view 위에 오버레이가 덮이고 입력을 독점한다. 그래서 탭 판정·핀치·
+     스크롤 핸들러와 경쟁하지 않고, 텍스트 레이어의 data-off 오프셋 기계도 건드리지 않는다
+     (픽셀만 읽으므로 스캔 PDF 처럼 텍스트가 없는 문서에서도 그대로 동작한다).
+     좌표는 오버레이 기준(capSel)으로 두고, 자를 때만 페이지 실측 사각형으로 환산한다. */
+  const CAP_TARGET = 1400;      // 크롭 긴 변 목표 픽셀 — 작은 수식도 읽히도록
+  const CAP_MAXPX = 4_000_000;  // 아이패드 사파리가 캔버스를 조용히 비우지 않도록 총 픽셀 상한
+  const CAP_MIN = 16;           // 이보다 작으면 스친 것으로 보고 선택을 버린다
+  const [capMode, setCapMode] = useState(false);
+  const [capBox, setCapBox] = useState(null); // 오버레이 위치 = .vb-view 실측 사각형
+  const [capSel, setCapSel] = useState(null); // {x,y,w,h} 오버레이 기준
+  const [capBusy, setCapBusy] = useState("");
+  const capDragRef = useRef(null);
+  const capAbort = useRef(null);
+
+  const measureCap = () => {
+    const r = viewRef.current?.getBoundingClientRect();
+    if (r) setCapBox({ left: r.left, top: r.top, width: r.width, height: r.height });
+  };
+  /* NIM 모델은 한동안 안 쓰면 콜드스타트가 있다 — 실측으로 식었을 때 비전 52초·질문 탭 44초,
+     데워지면 각각 2.3초·1초대. 모드에 들어가면 사용자가 영역을 그리는 몇 초가 생기므로
+     그 사이에 미리 깨운다. 문제풀이는 비전 → 질문 탭 모델을 연달아 쓰므로 둘 다 건드린다.
+     실패해도 무시한다(어차피 본 요청이 다시 시도한다). */
+  const warmRef = useRef(0);
+  const warmModels = () => {
+    if (Date.now() - warmRef.current < 5 * 60 * 1000) return;
+    warmRef.current = Date.now();
+    const cv = document.createElement("canvas");
+    cv.width = cv.height = 1;
+    const c = cv.getContext("2d");
+    c.fillStyle = "#fff";
+    c.fillRect(0, 0, 1, 1);
+    const poke = (body) =>
+      fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ system: "ok", user: ".", maxTokens: 1, ...body }),
+      }).then((r) => r.body?.cancel()).catch(() => {});
+    poke({ image: cv.toDataURL("image/jpeg").split(",")[1] }); // 비전 모델
+    poke({ ask: true, model: cfgRef.current.askModel || "" }); // 풀이 담당 모델
+  };
+  const enterCap = () => {
+    measureCap(); setCapSel(null); setCapBusy(""); setCapMode(true);
+    warmModels();
+  };
+  const exitCap = () => {
+    capAbort.current?.abort();
+    setCapMode(false); setCapSel(null); setCapBusy("");
+    capDragRef.current = null;
+  };
+  // 모드 중에 창이 바뀌면 오버레이도 따라가야 한다. Escape 로 빠져나온다.
+  useEffect(() => {
+    if (!capMode) return;
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); exitCap(); } };
+    window.addEventListener("resize", measureCap);
+    window.addEventListener("orientationchange", measureCap);
+    window.addEventListener("keydown", onKey, true); // 캡처 단계에서 먼저 먹는다
+    return () => {
+      window.removeEventListener("resize", measureCap);
+      window.removeEventListener("orientationchange", measureCap);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [capMode]);
+
+  const capDown = (e) => {
+    if (capBusy || !capBox) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const x = e.clientX - capBox.left, y = e.clientY - capBox.top;
+    const h = e.target.dataset?.caph;
+    if (h && capSel) capDragRef.current = { mode: h, x, y, orig: { ...capSel } };
+    else if (e.target.classList?.contains("vb-capsel") && capSel)
+      capDragRef.current = { mode: "move", x, y, orig: { ...capSel } };
+    else { capDragRef.current = { mode: "new", x, y }; setCapSel({ x, y, w: 0, h: 0 }); }
+  };
+  const capMove = (e) => {
+    const d = capDragRef.current;
+    if (!d || !capBox) return;
+    const x = Math.max(0, Math.min(capBox.width, e.clientX - capBox.left));
+    const y = Math.max(0, Math.min(capBox.height, e.clientY - capBox.top));
+    if (d.mode === "new") {
+      setCapSel({ x: Math.min(d.x, x), y: Math.min(d.y, y), w: Math.abs(x - d.x), h: Math.abs(y - d.y) });
+      return;
+    }
+    const o = d.orig;
+    if (d.mode === "move") {
+      setCapSel({
+        x: Math.max(0, Math.min(capBox.width - o.w, o.x + (x - d.x))),
+        y: Math.max(0, Math.min(capBox.height - o.h, o.y + (y - d.y))),
+        w: o.w, h: o.h,
+      });
+      return;
+    }
+    // 네 꼭지점 — 잡은 반대쪽 모서리를 고정하고 다시 그린다
+    const l = d.mode.includes("w") ? x : o.x;
+    const r = d.mode.includes("e") ? x : o.x + o.w;
+    const t = d.mode.includes("n") ? y : o.y;
+    const b = d.mode.includes("s") ? y : o.y + o.h;
+    setCapSel({ x: Math.min(l, r), y: Math.min(t, b), w: Math.abs(r - l), h: Math.abs(b - t) });
+  };
+  const capUp = () => {
+    const d = capDragRef.current;
+    capDragRef.current = null;
+    if (d?.mode === "new") setCapSel((s) => (s && (s.w < CAP_MIN || s.h < CAP_MIN) ? null : s));
+  };
+
+  /* 선택과 가장 많이 겹치는 페이지를 고른다. 페이지 사이 여백에 걸쳐도 안전하다.
+     v1 은 한 페이지로 자른다 — 여러 페이지 합성은 다음 단계. */
+  const capPage = (sel) => {
+    if (!capBox) return null;
+    const L = capBox.left + sel.x, T = capBox.top + sel.y;
+    const R = L + sel.w, B = T + sel.h;
+    let best = null, bestA = 0;
+    pagesRef.current.forEach((el, i) => {
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const w = Math.min(R, r.right) - Math.max(L, r.left);
+      const h = Math.min(B, r.bottom) - Math.max(T, r.top);
+      if (w > 0 && h > 0 && w * h > bestA) { bestA = w * h; best = { n: i + 1, r }; }
+    });
+    return best;
+  };
+
+  /* 화면 캔버스를 확대하면 흐려서 모델이 글자를 놓친다.
+     그래서 그 영역만 pdf.js 로 고배율 재렌더해서 자른다. */
+  const cropRegion = async (sel) => {
+    const hit = capPage(sel);
+    const pdf = pdfRef.current;
+    if (!hit || !pdf) throw new Error("영역이 페이지 위에 없습니다.");
+    const { n, r } = hit;
+    const L = Math.max(capBox.left + sel.x, r.left), T = Math.max(capBox.top + sel.y, r.top);
+    const R = Math.min(capBox.left + sel.x + sel.w, r.right), B = Math.min(capBox.top + sel.y + sel.h, r.bottom);
+    const fx = (L - r.left) / r.width, fy = (T - r.top) / r.height;
+    const fw = (R - L) / r.width, fh = (B - T) / r.height;
+    if (fw <= 0 || fh <= 0) throw new Error("영역이 페이지 위에 없습니다.");
+
+    const page = await pdf.getPage(n);
+    const v1 = page.getViewport({ scale: 1 });
+    const cw = v1.width * fw, ch = v1.height * fh;
+    let hi = Math.min(8, Math.max(1, CAP_TARGET / Math.max(cw, ch)));
+    if (cw * ch * hi * hi > CAP_MAXPX) hi = Math.sqrt(CAP_MAXPX / (cw * ch));
+    const vp = page.getViewport({ scale: hi });
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round(vp.width * fw));
+    cv.height = Math.max(1, Math.round(vp.height * fh));
+    const ctx = cv.getContext("2d", { alpha: false });
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    await page.render({
+      canvasContext: ctx, viewport: vp,
+      transform: [1, 0, 0, 1, -vp.width * fx, -vp.height * fy],
+    }).promise;
+    return { page: n, url: cv.toDataURL("image/jpeg", 0.85) };
+  };
+
+  /* kind: "read" = 해석(비전 모델 한 번) / "solve" = 문제풀이(옮겨적기 → 질문 탭 모델이 풀이) */
+  const runCapture = async (kind) => {
+    if (!capSel || capBusy) return;
+    setCapBusy(kind);
+    let shot;
+    try {
+      shot = await cropRegion(capSel);
+    } catch (e) {
+      setCapBusy("");
+      setAskLog((l) => [...l, { role: "ai", text: "", live: false, err: e.message }]);
+      setTab("ask"); setSheetOpen(true);
+      return;
+    }
+    const b64 = shot.url.split(",")[1];
+    exitCap();
+    setTab("ask");
+    setSheetOpen(true);
+
+    capAbort.current?.abort();
+    const ac = new AbortController();
+    capAbort.current = ac;
+    const label = kind === "solve" ? "문제풀이" : "해석";
+    const idx = askLog.length + 1;
+    setAskLog((l) => [
+      ...l,
+      { role: "me", text: `${shot.page}쪽 영역 — ${label}`, img: shot.url },
+      { role: "ai", text: "", live: true },
+    ]);
+    const put = (t, extra) =>
+      setAskLog((l) => l.map((m, i) => (i === idx ? { ...m, text: t, ...extra } : m)));
+
+    setAsking(true);
+    try {
+      if (kind === "read") {
+        let buf = "";
+        await ask(SYS_CAP_READ,
+          `[문서: ${docName || "제목 없음"} — ${shot.page}쪽에서 오려낸 영역]\n이 영역을 해석해 달라.`,
+          (c) => { buf += c; put(buf); }, ac.signal, { image: b64 });
+        put(buf, { live: false });
+      } else {
+        // 1단계: 비전 모델이 눈 역할 — 옮겨적기. 읽은 내용을 그대로 보여줘서
+        // 모델이 수식을 잘못 읽었을 때 사용자가 바로 알아챌 수 있게 한다.
+        let ocr = "";
+        await ask(SYS_CAP_OCR, `[${shot.page}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
+          (c) => { ocr += c; put(`[읽은 내용]\n${ocr}`); }, ac.signal, { image: b64 });
+        if (!ocr.trim()) throw new Error("이미지에서 글자를 읽지 못했습니다.");
+        const head = `[읽은 내용]\n${ocr.trim()}\n\n`;
+        put(head + "풀이 중…");
+        // 2단계: 추론은 질문 탭 모델(기본 DeepSeek)이 한다 — 이미지 없이 텍스트로.
+        let buf = "";
+        await ask(SYS_CAP_SOLVE,
+          `[문서: ${docName || "제목 없음"} / ${shot.page}쪽에서 오려낸 문제]\n${ocr.trim()}\n\n위 문제를 풀어라.`,
+          (c) => { buf += c; put(head + buf); }, ac.signal, { ask: true });
+        put(head + buf, { live: false });
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") put("", { live: false, err: e.message });
+    } finally {
+      setAsking(false);
+    }
+  };
+
   const readFile = (f) => {
     const r = new FileReader();
     r.onload = async () => {
@@ -1618,6 +1883,12 @@ export default function VerbatimReader() {
         <span className={"vb-eng" + (engine === "NIM" ? " c" : engine === "Gemini" ? " g" : "")}>
           {engine || "대기"}
         </span>
+        {numPages > 0 && (
+          <button className={"vb-tool" + (capMode ? " on" : "")} onClick={() => (capMode ? exitCap() : enterCap())}
+            aria-label="영역 캡처">
+            <svg viewBox="0 0 24 24"><path d="M3 8V4h4M21 8V4h-4M3 16v4h4M21 16v4h-4" /><rect x="8" y="8" width="8" height="8" strokeDasharray="2.5 2" /></svg>
+          </button>
+        )}
         <button className="vb-tool" onClick={() => zoomBy(1 / 1.2)} aria-label="축소">−</button>
         <button className="vb-tool" onClick={() => zoomBy(1.2)} aria-label="확대">+</button>
         <button className="vb-tool" onClick={() => setSetOpen(true)} aria-label="설정">
@@ -1919,6 +2190,7 @@ export default function VerbatimReader() {
                 </div>
                 {askLog.map((m, i) => (
                   <div key={i} className={"vb-msg " + m.role + (m.live ? " vb-cur" : "")}>
+                    {m.img && <img className="vb-msgimg" src={m.img} alt="오려낸 영역" />}
                     {m.err ? <span className="vb-err">답을 받지 못했습니다 — {m.err}</span> : m.text}
                   </div>
                 ))}
@@ -1992,6 +2264,41 @@ export default function VerbatimReader() {
           </div>
         )}
       </div>
+
+      {/* 영역 캡처 오버레이 — .vb-root 직속이라 position:fixed 가 뷰포트 기준으로 잡힌다 */}
+      {capMode && capBox && (
+        <div className={"vb-cap" + (capBusy ? " busy" : "")}
+          style={{ left: capBox.left, top: capBox.top, width: capBox.width, height: capBox.height }}
+          onPointerDown={capDown} onPointerMove={capMove}
+          onPointerUp={capUp} onPointerCancel={capUp}>
+          {!capSel && <div className="vb-caphint">읽고 싶은 부분을 드래그해서 감싸세요 · Escape 로 나가기</div>}
+          {capSel && (
+            <>
+              <div className="vb-capsel"
+                style={{ left: capSel.x, top: capSel.y, width: capSel.w, height: capSel.h }} />
+              {[["nw", 0, 0], ["ne", 1, 0], ["sw", 0, 1], ["se", 1, 1]].map(([k, cx, cy]) => (
+                <div key={k} className="vb-caph" data-caph={k}
+                  style={{ left: capSel.x + capSel.w * cx - 11, top: capSel.y + capSel.h * cy - 11 }} />
+              ))}
+              <div className="vb-capmenu"
+                style={{
+                  left: Math.max(4, Math.min((capBox.width || 0) - 250, capSel.x + capSel.w / 2 - 125)),
+                  top: capSel.y > 62 ? capSel.y - 58 : capSel.y + capSel.h + 10,
+                }}
+                onPointerDown={(e) => e.stopPropagation()}>
+                <button className="vb-capbtn" disabled={!!capBusy} onClick={() => runCapture("read")}>
+                  {capBusy === "read" ? "읽는 중…" : "해석"}
+                </button>
+                <button className="vb-capbtn" disabled={!!capBusy} onClick={() => runCapture("solve")}>
+                  {capBusy === "solve" ? "읽는 중…" : "문제풀이"}
+                </button>
+                <button className="vb-capbtn ghost" disabled={!!capBusy} onClick={() => setCapSel(null)}>다시</button>
+                <button className="vb-capbtn ghost" disabled={!!capBusy} onClick={exitCap}>닫기</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <input ref={fileRef} type="file" accept="application/pdf" style={{ display: "none" }}
         onChange={(e) => { const f = e.target.files?.[0]; if (f) readFile(f); e.target.value = ""; }} />

@@ -31,6 +31,18 @@ const ASK_MODELS = [
 const ASK_MODEL_IDS = new Set(ASK_MODELS.map((m) => m.id));
 const NIM_ASK_MODEL = process.env.NIM_ASK_MODEL || "deepseek-ai/deepseek-v4-pro";
 
+/* 영역 캡처(이미지)를 읽는 비전 모델. ASK_MODELS 는 전부 텍스트 전용이라 이미지를 못 받는다.
+   2026-07-30 에 실제 이미지를 던져 실측한 결과(표지 썸네일, 한국어 프롬프트):
+     google/gemma-4-31b-it                    3.6초, 모든 글자 정확 + 한국어 자연스러움  ← 채택
+     meta/llama-3.2-90b-vision-instruct      13.7초, 정확하지만 느리고 장황            ← 폴백
+     nvidia/nemotron-nano-12b-v2-vl           2.1초, 제목만 읽고 나머지 놓침
+     meta/llama-3.2-11b-vision-instruct       8.3초, 같은 구절 무한 반복 (실격)
+   DeepSeek 은 NIM 에 비전 버전이 없다(v4-pro·v4-flash·coder 전부 텍스트 전용).
+   카탈로그에 있어도 계정에서 404 나는 것들: gemma-3-12b-it, phi-3-vision, cosmos-reason2-8b. */
+const NIM_VISION_MODEL = process.env.NIM_VISION_MODEL || "google/gemma-4-31b-it";
+const VISION_CHAIN = [NIM_VISION_MODEL, "meta/llama-3.2-90b-vision-instruct"]
+  .filter((m, i, a) => a.indexOf(m) === i);
+
 if (!APP_PASSWORD || !SESSION_SECRET) {
   console.error("[여백] APP_PASSWORD 와 SESSION_SECRET 을 .env 에 설정하세요.");
   process.exit(1);
@@ -43,7 +55,9 @@ if (!NIM_KEY && !GEMINI_KEY) {
 const app = express();
 app.disable("x-powered-by");
 app.set("trust proxy", 1);
-app.use(express.json({ limit: "1mb" }));
+// 영역 캡처는 base64 JPEG 를 본문에 담아 보낸다 (1400px 크롭이면 대략 200~600KB).
+// 1mb 로는 큰 크롭에서 413 이 나므로 여유를 둔다.
+app.use(express.json({ limit: "4mb" }));
 
 /* ───────────────── 세션 (단일 비밀번호) ───────────────── */
 const COOKIE = "yb_sess";
@@ -300,8 +314,13 @@ function sseChunk(text) {
   return `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
 }
 
-async function callNIM({ system, user, maxTokens, signal, model }) {
+async function callNIM({ system, user, image, maxTokens, signal, model }) {
   if (!NIM_KEY) throw new Error("NIM 키 없음");
+  // 이미지가 있으면 content 를 배열로 보낸다 (OpenAI 표준 멀티모달 형식).
+  const content = image
+    ? [{ type: "text", text: user },
+       { type: "image_url", image_url: { url: `data:image/jpeg;base64,${image}` } }]
+    : user;
   const res = await fetch(`${NIM_BASE}/chat/completions`, {
     method: "POST",
     signal,
@@ -310,7 +329,7 @@ async function callNIM({ system, user, maxTokens, signal, model }) {
       model: model || NIM_MODEL,
       messages: [
         { role: "system", content: system },
-        { role: "user", content: user },
+        { role: "user", content },
       ],
       max_tokens: maxTokens,
       temperature: 0.3,
@@ -324,18 +343,20 @@ async function callNIM({ system, user, maxTokens, signal, model }) {
   return res; // 이미 OpenAI 형식 SSE — 그대로 통과시킨다
 }
 
-async function callGemini({ system, user, maxTokens, signal }) {
+async function callGemini({ system, user, image, maxTokens, signal }) {
   if (!GEMINI_KEY) throw new Error("Gemini 키 없음");
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}` +
     `:streamGenerateContent?alt=sse`;
+  const parts = [{ text: user }];
+  if (image) parts.push({ inlineData: { mimeType: "image/jpeg", data: image } });
   const res = await fetch(url, {
     method: "POST",
     signal,
     headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: "user", parts: [{ text: user }] }],
+      contents: [{ role: "user", parts }],
       generationConfig: { maxOutputTokens: maxTokens, temperature: 0.3 },
     }),
   });
@@ -375,7 +396,7 @@ async function pipeGemini(upstream, res) {
 let nimDownUntil = 0;
 
 app.post("/api/chat", requireAuth, async (req, res) => {
-  const { system = "", user = "", maxTokens = 1000, forceGemini = false, ask = false, model = "" } = req.body || {};
+  const { system = "", user = "", image = "", maxTokens = 1000, forceGemini = false, ask = false, model = "" } = req.body || {};
   if (!user) return res.status(400).json({ error: "user 가 비었습니다." });
 
   const ac = new AbortController();
@@ -385,13 +406,18 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
   // 프로바이더가 응답하지 않을 때 탭이 영원히 멈추지 않도록 상한을 둔다.
   const signal = AbortSignal.any([ac.signal, AbortSignal.timeout(90_000)]);
-  const args = { system, user, maxTokens: Math.min(Number(maxTokens) || 1000, 4000), signal };
+  const args = { system, user, image, maxTokens: Math.min(Number(maxTokens) || 1000, 4000), signal };
 
   // 질문 탭은 더 좋은 모델을 쓴다. 클라이언트가 보낸 모델은 허용 목록에 있을 때만 받는다.
   // 그 모델이 죽어 있어도 단어·문장 탭까지 Gemini 로 끌려가지 않도록,
   // 먼저 기본 NIM_MODEL 로 한 번 더 시도한 뒤에 폴백한다.
+  // 영역 캡처(image)는 비전 모델 체인을 따로 탄다 — 텍스트 모델은 이미지를 못 받는다.
+  // 이 체인에는 NIM_MODEL 이 없으므로, 비전 모델이 죽어도 서킷 브레이커가 돌지 않는다
+  // (= 단어·문장 탭이 3분간 Gemini 로 끌려가는 일이 없다).
   const picked = ask ? (ASK_MODEL_IDS.has(model) ? model : NIM_ASK_MODEL) : NIM_MODEL;
-  const chain = picked === NIM_MODEL ? [NIM_MODEL] : [picked, NIM_MODEL];
+  const chain = image
+    ? VISION_CHAIN
+    : picked === NIM_MODEL ? [NIM_MODEL] : [picked, NIM_MODEL];
 
   let upstream = null;
   let engine = "";
@@ -461,4 +487,5 @@ app.get("*", (_req, res) => res.sendFile(path.join(ROOT, "dist", "index.html")))
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[여백] http://0.0.0.0:${PORT}  엔진: ${NIM_KEY ? NIM_MODEL : "(NIM 없음)"} → ${GEMINI_KEY ? GEMINI_MODEL : "(Gemini 없음)"}`);
   console.log(`[여백] 질문 탭 기본 모델: ${NIM_ASK_MODEL}${ASK_MODEL_IDS.has(NIM_ASK_MODEL) ? "" : "  ← 허용 목록에 없음(ASK_MODELS 확인)"}`);
+  console.log(`[여백] 영역 캡처 비전 모델: ${VISION_CHAIN.join(" → ")}`);
 });
