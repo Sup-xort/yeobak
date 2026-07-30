@@ -1660,7 +1660,8 @@ export default function VerbatimReader() {
     try {
       shot = await cropRegion(capSel);
     } catch (e) {
-      setCapBusy("");
+      // 오버레이(z42)가 시트(z35)를 가리므로, 모드에서 나온 뒤에 알린다
+      exitCap();
       setAskLog((l) => [...l, { role: "ai", text: "", live: false, err: e.message }]);
       setTab("ask"); setSheetOpen(true);
       return;
@@ -1683,22 +1684,51 @@ export default function VerbatimReader() {
     const put = (t, extra) =>
       setAskLog((l) => l.map((m, i) => (i === idx ? { ...m, text: t, ...extra } : m)));
 
+    /* 모델이 식어 있으면 첫 토큰까지 1분 가까이 걸린다(실측 52초). 그동안 빈 칸이면
+       고장으로 보이므로, 6초까지 아무것도 안 오면 기다리는 중이라고 알린다. */
+    const waking = (onFirst) => {
+      let woke = false;
+      const t = setTimeout(() => {
+        if (!woke) put("모델을 깨우는 중… (처음 한 번은 1분까지 걸릴 수 있습니다)");
+      }, 6000);
+      return (c) => {
+        if (!woke) { woke = true; clearTimeout(t); }
+        onFirst(c);
+      };
+    };
+
     setAsking(true);
     try {
       if (kind === "read") {
         let buf = "";
         await ask(SYS_CAP_READ,
           `[문서: ${docName || "제목 없음"} — ${shot.page}쪽에서 오려낸 영역]\n이 영역을 해석해 달라.`,
-          (c) => { buf += c; put(buf); }, ac.signal, { image: b64 });
+          waking((c) => { buf += c; put(buf); }), ac.signal, { image: b64 });
         put(buf, { live: false });
       } else {
         // 1단계: 비전 모델이 눈 역할 — 옮겨적기. 읽은 내용을 그대로 보여줘서
         // 모델이 수식을 잘못 읽었을 때 사용자가 바로 알아챌 수 있게 한다.
         let ocr = "";
         await ask(SYS_CAP_OCR, `[${shot.page}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
-          (c) => { ocr += c; put(`[읽은 내용]\n${ocr}`); }, ac.signal, { image: b64 });
+          waking((c) => { ocr += c; put(`[읽은 내용]\n${ocr}`); }), ac.signal, { image: b64 });
         if (!ocr.trim()) throw new Error("이미지에서 글자를 읽지 못했습니다.");
         const head = `[읽은 내용]\n${ocr.trim()}\n\n`;
+
+        /* 회로도·그래프는 옮겨적기에서 [그림: …] 한 줄로 줄어든다. 그대로 2단계로 넘기면
+           풀이를 맡은 텍스트 모델은 그림을 못 본 채 답하게 된다. 그럴 때는 2단계를 건너뛰고
+           그림을 볼 수 있는 비전 모델에게 직접 풀린다. */
+        const hasFig = /\[그림\s*:/.test(ocr);
+        if (hasFig) {
+          const note = "(그림이 있어 그림을 볼 수 있는 모델이 직접 풉니다)\n\n";
+          put(head + note + "푸는 중…");
+          let buf = "";
+          await ask(SYS_CAP_SOLVE,
+            `[문서: ${docName || "제목 없음"} / ${shot.page}쪽에서 오려낸 문제]\n이 이미지의 문제를 풀어라.`,
+            waking((c) => { buf += c; put(head + note + buf); }), ac.signal, { image: b64 });
+          put(head + note + buf, { live: false });
+          return;
+        }
+
         put(head + "풀이 중…");
         // 2단계: 추론은 질문 탭 모델(기본 DeepSeek)이 한다 — 이미지 없이 텍스트로.
         let buf = "";
