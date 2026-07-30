@@ -97,8 +97,15 @@ const CSS = `
   -webkit-user-select:text;user-select:text;-webkit-touch-callout:none}
 .vb-tl .it{position:absolute;white-space:pre;transform-origin:0 0;cursor:text}
 .vb-tl .w{border-radius:2px}
-.vb-tl .w.hit{background:var(--mark);box-shadow:0 0 0 1px var(--mark)}
-.vb-tl .w.sent{background:rgba(111,211,192,.55)}
+/* 탭한 단어 / 문장 하이라이트 — 글자는 텍스트 레이어(color:transparent)가 아니라 캔버스에 있다.
+   그래서 글자 위에 색을 깔면 무조건 글자를 가린다:
+   불투명하면 통째로 사라지고, 반투명하면 검정이 뿌옇게 뜬다.
+   mix-blend-mode:multiply 로 곱하면 이론상 딱 맞지만 iOS 사파리가 스크롤 컨테이너의
+   합성 레이어 경계를 넘어 블렌딩을 못 해서 실기기에서 그냥 무시된다(isolation:isolate 도 소용없었다).
+   그래서 글자 위는 아예 비우고 아래쪽에 형광펜 획만 긋는다 — 검정이 100% 그대로 남는다. */
+.vb-tl .vb-hl{position:absolute;pointer-events:none;border-radius:1px;
+  background:linear-gradient(to top,var(--mark) 0 3px,transparent 3px)}
+.vb-tl .vb-hl.sent{background:linear-gradient(to top,var(--mark2) 0 3px,transparent 3px)}
 .vb-root ::selection{background:rgba(255,216,77,.55)}
 
 .vb-zoompill{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:36;
@@ -192,7 +199,11 @@ const CSS = `
 /* 좁은 화면에서는 엔진 배지를 숨겨 툴바 숨통을 틔운다 */
 .vb-root:not(.wide) .vb-eng{display:none}
 
-.vb-sheet{position:absolute;left:0;right:0;bottom:0;z-index:35;background:var(--desk2);
+/* 풀이창은 반투명 — 가려진 본문 단어가 비쳐 보이도록.
+   블러는 아주 약하게만 걸어 뒤 글자 형태는 알아볼 수 있게 둔다.
+   backdrop-filter 미지원 브라우저에서도 알파값만으로 비치므로 폴백은 두지 않는다. */
+.vb-sheet{position:absolute;left:0;right:0;bottom:0;z-index:35;background:rgba(42,41,38,.70);
+  -webkit-backdrop-filter:blur(2px) saturate(1.1);backdrop-filter:blur(2px) saturate(1.1);
   border-top:1px solid var(--line);border-radius:18px 18px 0 0;display:flex;flex-direction:column;
   transform:translateY(100%);transition:transform .26s cubic-bezier(.3,.85,.35,1);
   box-shadow:0 -8px 34px rgba(0,0,0,.4)}
@@ -414,6 +425,53 @@ function sentenceAt(text, off) {
   if (e < text.length) e++;
   return { text: text.slice(s, e).replace(/\s+/g, " ").trim(), start: s, end: e };
 }
+/* 화면 세로좌표 y 아래에 있는 페이지 번호(1-based).
+   페이지는 세로 한 줄로 쌓이므로 rect.top 이 인덱스에 대해 단조 증가한다 — 이진 탐색으로 찾는다.
+   curRef 가 얼마나 어긋나 있든 답이 옳다는 게 핵심이다. 예전엔 curRef 주변 ±10쪽만 훑어서,
+   핀치나 빠른 스크롤로 curRef 가 멀어지면 창 안에서 아무것도 못 찾고 그대로 굳었다.
+   그 결과 쪽번호가 실제 화면과 어긋나고, prune 이 보고 있는 페이지를 지워 흰 화면이 뜨고,
+   핀치 앵커가 엉뚱한 페이지를 가리켜 이상한 곳으로 넘어갔다.
+   변환(핀치 중 CSS scale)이 걸려 있어도 getBoundingClientRect 는 변환 후 좌표라 그대로 쓴다. */
+const pageAt = (pages, y) => {
+  const n = pages.length;
+  if (!n) return 1;
+  let lo = 0, hi = n - 1, below = -1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    const r = pages[m]?.getBoundingClientRect();
+    if (!r) break;
+    if (y < r.top) { below = m; hi = m - 1; }
+    else if (y > r.bottom) lo = m + 1;
+    else return m + 1;
+  }
+  return below >= 0 ? below + 1 : n; // 페이지 사이 여백이면 바로 아래 페이지
+};
+
+/* 하이라이트 박스를 .vb-tl 바로 아래에 깐다.
+   .w 스팬 자체에 배경을 주면 안 되는 이유: 부모 .it 에는 폭 보정용 transform 이 걸려 있고,
+   transform 은 블렌딩을 격리시켜서 mix-blend-mode 가 그 아래 캔버스에 닿지 못한다.
+   (translateZ(0) 로 mix-blend-mode 를 가두는 우회법이 바로 이 성질을 쓰는 것)
+   그래서 transform 이 없는 .vb-tl 의 자식으로 박스를 만들어 multiply 로 곱한다 —
+   흰 종이는 형광색으로, 검은 획은 검정 원색 그대로 남는다.
+   좌표는 getBoundingClientRect 차이로 잡으므로 .it 의 transform 이 이미 반영돼 있다. */
+const markSpans = (els, cls) => {
+  for (const el of els) {
+    const layer = el.closest(".vb-tl");
+    if (!layer) continue;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const lr = layer.getBoundingClientRect();
+    const hl = document.createElement("i");
+    hl.className = "vb-hl" + (cls ? " " + cls : "");
+    /* 아래로 4px 더 키운다 — 형광펜 획이 그 여유 안에 들어가서 g·j·p 같은
+       내림자를 가로지르지 않고 글자 밑을 지나간다 */
+    hl.style.left = r.left - lr.left - 1 + "px";
+    hl.style.top = r.top - lr.top + "px";
+    hl.style.width = r.width + 2 + "px";
+    hl.style.height = r.height + 4 + "px";
+    layer.prepend(hl);
+  }
+};
 const fmtSize = (b) =>
   b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
 const fmtDate = (t) => {
@@ -535,6 +593,10 @@ export default function VerbatimReader() {
   const extractingRef = useRef(false);
   const delTimer = useRef(null);              // 두 번 눌러 삭제 타이머
   const layoutKeyRef = useRef({ cw: 0, zoom: 0 }); // 마지막 배치에 쓴 폭·배율 — 같으면 relayout 을 건너뛴다
+  // 지금 하이라이트된 구간 {page, start, end, cls}. DOM 이 아니라 오프셋으로 들고 있어야
+  // relayout 이 텍스트 레이어를 걷어내고 다시 그려도 하이라이트가 살아남는다.
+  const markRef = useRef(null);
+  const gestureRef = useRef(false);           // 핀치·트랙패드 줌이 진행 중인가
 
   useEffect(() => { cfgRef.current = cfg; }, [cfg]);
   useEffect(() => { layoutRef.current = { sheetOpen, outOpen }; }, [sheetOpen, outOpen]);
@@ -932,6 +994,7 @@ export default function VerbatimReader() {
       layer.className = "vb-tl";
       el.appendChild(layer);
       await buildTextLayer(page, vp, layer, n);
+      if (markRef.current?.page === n) applyMarks(); // 재배치로 지워진 하이라이트 복원
       renderedRef.current.add(n);
     } catch (e) {
       console.error("page " + n, e);
@@ -954,18 +1017,31 @@ export default function VerbatimReader() {
     }
   };
 
+  /* 현재 페이지 = 뷰포트 세로 중앙에 걸린 페이지.
+     예전에는 IntersectionObserver 의 intersectionRatio 로 정했는데, root 에
+     rootMargin:1000px 이 걸려 있어서 화면 밖 페이지도 비율이 0.35 를 쉽게 넘겼다.
+     observe() 직후처럼 모든 페이지가 한꺼번에 보고될 때는 엔트리 순서에 따라
+     화면 밖 페이지가 마지막에 이겨서 curRef 가 엉뚱한 곳을 가리켰고,
+     그 뒤 relayout(keep=curRef) 이 그리로 스크롤해 "풀이창을 닫으면 앞 페이지로
+     튄다"가 됐다. 이제 실제 화면 좌표로 판정한다. */
+  const pickCur = () => {
+    const view = viewRef.current;
+    const pages = pagesRef.current;
+    // 제스처 중에는 건드리지 않는다 — 임시 CSS scale 때문에 좌표가 계속 흔들리고,
+    // 그 사이 prune 이 보고 있는 페이지를 지워 버릴 수 있다.
+    if (!view || !pages.length || gestureRef.current) return;
+    const vr = view.getBoundingClientRect();
+    const n = pageAt(pages, vr.top + vr.height / 2);
+    if (n !== curRef.current) { curRef.current = n; setCurPage(n); }
+  };
+
   const observe = () => {
     ioRef.current?.disconnect();
     ioRef.current = new IntersectionObserver((ents) => {
-      for (const e of ents) {
-        const n = +e.target.dataset.n;
-        if (e.isIntersecting) {
-          renderPage(n);
-          if (e.intersectionRatio > 0.35) { curRef.current = n; setCurPage(n); }
-        }
-      }
+      for (const e of ents) if (e.isIntersecting) renderPage(+e.target.dataset.n);
+      pickCur();
       prune();
-    }, { root: viewRef.current, rootMargin: "1000px 0px", threshold: [0, 0.35] });
+    }, { root: viewRef.current, rootMargin: "1000px 0px", threshold: 0 });
     pagesRef.current.forEach((el) => el && ioRef.current.observe(el));
   };
 
@@ -1118,6 +1194,18 @@ export default function VerbatimReader() {
     setCurPage(n);
   };
 
+  /* 화면 좌표 (x,y) 아래의 페이지와 페이지 내 상대좌표.
+     transform 이 걸린 상태에서도 getBoundingClientRect 는 변환 후 좌표를 주므로 그대로 쓴다.
+     핀치 줌과 트랙패드 줌이 함께 쓴다. */
+  const findAnchor = useCallback((x, y) => {
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const page = pageAt(pagesRef.current, y);
+    const r = pagesRef.current[page - 1]?.getBoundingClientRect();
+    return r
+      ? { page, fx: clamp01((x - r.left) / r.width), fy: clamp01((y - r.top) / r.height), sx: x, sy: y }
+      : { page, fx: 0.5, fy: 0, sx: x, sy: y };
+  }, []);
+
   /* anchor 가 있으면(핀치 줌) 그 지점(페이지 내 fx/fy)이 화면의 같은 자리(sx/sy)로 돌아오게 복원한다 */
   const relayout = useCallback(async (keepPage, anchor) => {
     const pdf = pdfRef.current;
@@ -1188,6 +1276,23 @@ export default function VerbatimReader() {
     };
   }, [relayout]);
 
+  /* IntersectionObserver 는 페이지가 1000px 여유를 드나들 때만 깨어나므로
+     쪽 번호가 뒤늦게 바뀐다. 스크롤 중에도 rAF 로 한 번씩 현재 페이지를 다시 잡는다
+     (pickCur 은 이진 탐색이라 1000쪽짜리도 프레임당 rect 10번 남짓이다). */
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    let raf = 0;
+    const on = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; pickCur(); });
+    };
+    view.addEventListener("scroll", on, { passive: true });
+    return () => { view.removeEventListener("scroll", on); cancelAnimationFrame(raf); };
+    // pickCur 은 ref 만 읽으므로 첫 렌더의 클로저를 그대로 써도 안전하다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const goDest = async (dest) => {
     try {
       const pdf = pdfRef.current;
@@ -1199,8 +1304,30 @@ export default function VerbatimReader() {
     } catch (e) { console.warn(e); }
   };
 
+  /* markRef 의 오프셋 구간을 해당 페이지에 다시 그린다.
+     renderPage 가 텍스트 레이어를 새로 만들 때마다 호출되므로,
+     확대/축소나 풀이창 여닫기로 재배치가 일어나도 하이라이트가 유지된다. */
+  const applyMarks = () => {
+    const m = markRef.current;
+    if (!m) return;
+    const pd = dataRef.current[m.page - 1];
+    const el = pagesRef.current[m.page - 1];
+    if (!pd || !el) return;
+    el.querySelectorAll(".vb-hl").forEach((h) => h.remove());
+    markSpans(pd.words.filter((w) => {
+      const o = +w.dataset.off;
+      return o >= m.start && o < m.end;
+    }), m.cls);
+  };
+
+  const setMark = (page, start, end, cls) => {
+    markRef.current = { page, start, end, cls };
+    applyMarks();
+  };
+
   const clearMarks = () => {
-    viewRef.current?.querySelectorAll(".w.hit,.w.sent").forEach((e) => e.classList.remove("hit", "sent"));
+    markRef.current = null;
+    viewRef.current?.querySelectorAll(".vb-hl").forEach((e) => e.remove());
   };
 
   /* ── 단어 / 문장 ── */
@@ -1314,16 +1441,13 @@ export default function VerbatimReader() {
       if (dbl) {
         wAbort.current?.abort();
         clearMarks();
-        for (const w of pd.words) {
-          const o = +w.dataset.off;
-          if (o >= s.start && o < s.end) w.classList.add("sent");
-        }
+        setMark(n, s.start, s.end, "sent");
         setSheetOpen(true);
         setTab("sent");
         runSentence(s.text);
       } else {
         clearMarks();
-        el.classList.add("hit");
+        setMark(n, off, off + el.textContent.length, "");
         setSheetOpen(true);
         setTab("word");
         runWord(wordAt(pd.text, off), s.text);
@@ -1357,33 +1481,16 @@ export default function VerbatimReader() {
     let pinching = false, startD = 0, startZoom = 1, factor = 1, lastMid = null;
     const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
     const mid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
-    const clamp01 = (v) => Math.max(0, Math.min(1, v));
     const reset = () => {
       stage.style.transform = "";
       stage.style.transformOrigin = "";
       setZoomPill(null);
     };
-    // 화면 좌표 (x,y) 아래의 페이지와 페이지 내 상대좌표. transform 이 걸린
-    // 상태에서도 getBoundingClientRect 는 변환 후 좌표를 주므로 그대로 쓴다.
-    const findAnchor = (x, y) => {
-      const cur = curRef.current;
-      for (let i = Math.max(0, cur - 9); i < Math.min(pagesRef.current.length, cur + 9); i++) {
-        const el = pagesRef.current[i];
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        if (y >= r.top && y <= r.bottom)
-          return { page: i + 1, fx: clamp01((x - r.left) / r.width), fy: clamp01((y - r.top) / r.height), sx: x, sy: y };
-      }
-      const el = pagesRef.current[cur - 1];
-      const r = el?.getBoundingClientRect();
-      return r
-        ? { page: cur, fx: 0.5, fy: clamp01((y - r.top) / r.height), sx: x, sy: y }
-        : { page: cur, fx: 0.5, fy: 0, sx: x, sy: y };
-    };
 
     const onStart = (e) => {
       if (e.touches.length !== 2 || !pdfRef.current) return;
       pinching = true;
+      gestureRef.current = true;
       startD = dist(e.touches);
       startZoom = zoomRef.current;
       factor = 1;
@@ -1398,6 +1505,7 @@ export default function VerbatimReader() {
       if (!e.cancelable) {
         // 네이티브 스크롤이 이미 제스처를 가져갔다 — 핀치를 포기한다
         pinching = false;
+        gestureRef.current = false;
         reset();
         observe();
         return;
@@ -1418,7 +1526,9 @@ export default function VerbatimReader() {
       if (!pinching || e.touches.length >= 2) return;
       pinching = false;
       // 앵커는 끝나는 순간의 중점에서 계산한다 (변환이 걸린 채로 측정)
+      // gestureRef 는 앵커를 잡은 뒤에 내린다 — 그전에 pickCur 이 끼어들면 안 된다
       const anchor = lastMid ? findAnchor(lastMid.x, lastMid.y) : null;
+      gestureRef.current = false;
       reset();
       lastMid = null;
       const next = Math.max(0.3, Math.min(3, startZoom * factor));
@@ -1440,7 +1550,69 @@ export default function VerbatimReader() {
       view.removeEventListener("touchend", onEnd);
       view.removeEventListener("touchcancel", onEnd);
     };
-  }, [relayout, persist]);
+  }, [relayout, persist, findAnchor]);
+
+  /* ── 트랙패드 핀치 / Ctrl+휠 줌 (데스크톱) ──
+     브라우저는 트랙패드 두 손가락 핀치를 ctrlKey 가 붙은 wheel 이벤트로 준다
+     (Ctrl+마우스휠도 같은 모양이라 함께 잡힌다). preventDefault 를 안 하면
+     브라우저 자체 페이지 확대가 먹어 버리므로 passive:false 로 등록한다.
+     터치 핀치와 같은 2단계 구조 — 굴리는 동안엔 stage 에 CSS scale 만 걸고,
+     휠이 멎으면(140ms) 커서 아래 지점을 앵커로 잡아 relayout 으로 다시 그린다. */
+  useEffect(() => {
+    const view = viewRef.current;
+    const stage = stageRef.current;
+    if (!view || !stage) return;
+    let zooming = false, startZoom = 1, factor = 1, last = null, timer = 0;
+    const clampZoom = (z) => Math.max(0.3, Math.min(3, z));
+    const commit = () => {
+      if (!zooming) return;
+      zooming = false;
+      const anchor = last ? findAnchor(last.x, last.y) : null;
+      gestureRef.current = false;
+      stage.style.transform = "";
+      stage.style.transformOrigin = "";
+      setZoomPill(null);
+      last = null;
+      const next = clampZoom(startZoom * factor);
+      if (Math.abs(next - zoomRef.current) > 0.01) {
+        zoomRef.current = next;
+        persist();
+        relayout(anchor?.page, anchor);
+      } else {
+        observe();
+      }
+    };
+    const onWheel = (e) => {
+      if (!e.ctrlKey || !pdfRef.current) return;
+      e.preventDefault();
+      if (!zooming) {
+        zooming = true;
+        gestureRef.current = true;
+        startZoom = zoomRef.current;
+        factor = 1;
+        ioRef.current?.disconnect(); // 제스처 중에는 렌더/프룬이 끼어들지 않게
+        const sr = stage.getBoundingClientRect();
+        stage.style.transformOrigin = `${e.clientX - sr.left}px ${e.clientY - sr.top}px`;
+      }
+      last = { x: e.clientX, y: e.clientY };
+      // deltaMode 는 픽셀(0)/줄(1)/페이지(2) — 줄·페이지 단위면 픽셀로 환산한다.
+      // 트랙패드는 작은 값이 연속으로, 마우스 휠은 한 칸에 100 안팎이 뚝뚝 떨어진다.
+      // 한 번에 튀지 않게 상한을 씌워, 휠 한 칸이 약 20% 가 되게 맞췄다.
+      const raw = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+      const px = Math.max(-50, Math.min(50, raw));
+      const next = clampZoom(startZoom * factor * Math.exp(-px / 220));
+      factor = next / startZoom;
+      stage.style.transform = `scale(${factor})`;
+      setZoomPill(Math.round(next * 100) + "%");
+      clearTimeout(timer);
+      timer = setTimeout(commit, 140);
+    };
+    view.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      view.removeEventListener("wheel", onWheel);
+      clearTimeout(timer);
+    };
+  }, [relayout, persist, findAnchor]);
 
   /* ── 드래그 선택 ── */
   useEffect(() => {
