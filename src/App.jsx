@@ -361,6 +361,13 @@ const CSS = `
   background:var(--desk3);color:#EDEBE6;touch-action:manipulation}
 .vb-stat.warn .vb-statstop{background:#FF9A8A;color:#2A1512;font-weight:640}
 .vb-stopped{margin-top:6px;font-size:11.5px;color:#7C776E}
+/* 느릴 때만 뜨는 갈아타기 권유 — 근거(최근 평균)를 같이 보여 준다 */
+.vb-swap{display:flex;gap:8px;align-items:center;margin:-4px 0 8px;padding:6px 8px 6px 10px;
+  border-radius:10px;background:#232220;border:1px dashed var(--line)}
+.vb-swaptx{flex:1;min-width:0;font-size:11.5px;line-height:1.45;color:#8A857C;
+  font-variant-numeric:tabular-nums}
+.vb-swapbtn{flex:0 0 auto;min-height:30px;padding:0 11px;border-radius:8px;font-size:12px;
+  background:var(--mark2);color:#241F00;font-weight:600;touch-action:manipulation}
 .vb-askin{flex:1;min-height:44px;max-height:120px;resize:none;padding:11px 12px;border-radius:11px;
   border:1px solid var(--line);background:#232220;color:#EDEBE6;font-size:16px;line-height:1.4;
   outline:none;font-family:inherit}
@@ -922,13 +929,18 @@ export default function VerbatimReader() {
       if (was !== "think") setStat({ phase: "think" });
       return;
     }
-    setStat({ phase: p, at: Date.now(), ...info });
+    /* wait 로 넘어가는 순간이 곧 "업스트림 헤더 도착" 이다. 그때까지 걸린 시간이
+       이 요청이 줄 서 있던 시간(q). 질문 난이도와 거의 무관한 값이라 혼잡 판정의 기준이 된다. */
+    const q = p === "wait" && statRef.current && statRef.current.q == null
+      ? { q: Date.now() - statRef.current.t0 } : null;
+    setStat({ phase: p, at: Date.now(), ...q, ...info });
   };
 
-  const startJob = (sid, step) => {
+  const startJob = (sid, step, kind = "ask") => {
     jobRef.current?.ac.abort();               // 앞의 요청이 남아 있으면 먼저 끊는다
     const ac = new AbortController();
-    jobRef.current = { ac, sid };
+    // kind: "ask" 만 모델을 바꿔 다시 던질 수 있다. 캡처는 비전 모델이 정해져 있어 못 바꾼다.
+    jobRef.current = { ac, sid, kind };
     setStat({ running: true, phase: "send", t0: Date.now(), at: Date.now(), chars: 0, step, engine: "", model: "" });
     return ac;
   };
@@ -939,6 +951,56 @@ export default function VerbatimReader() {
   };
   const stopAsk = () => { jobRef.current?.ac.abort(); jobRef.current = null; setStat(null); };
 
+  /* ── 느리면 빠른 모델로 갈아타기 권하기 ──
+     고정 임계값 하나로는 "원래 느린 모델"과 "지금 막힌 모델"을 구분할 수 없다.
+     서버가 모델별 최근 성적을 들고 있으므로(/api/stats), 오래 걸릴 때만 그걸 받아서
+     "지금 이거 15초째인데 저건 평소 6초" 같은 근거를 대고 권한다.
+     권하기만 하고 자동으로 바꾸지는 않는다 — 모델마다 답의 성격이 다르기 때문이다. */
+  const SUGGEST_AFTER = 12_000;  // 이만큼 끌면 대안을 찾아본다
+  const SUGGEST_MIN_N = 3;       // 표본이 이보다 적은 모델은 근거로 못 쓴다
+  const QUEUE_BAD = 5_000;       // 붙는 데 이만큼 걸리면 "막혔다"고 본다
+  const [mStats, setMStats] = useState(null);
+  const statsForRef = useRef("");   // 이 job 에서 이미 받아왔는지
+
+  useEffect(() => {
+    if (!aiStat?.running) return;
+    const ac = jobRef.current?.ac;
+    if (!ac || statsForRef.current === String(aiStat.t0)) return;
+    if (Date.now() - aiStat.t0 < SUGGEST_AFTER) return;
+    statsForRef.current = String(aiStat.t0);
+    fetch("/api/stats")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => j && setMStats(j.stats || {}))
+      .catch(() => {});
+  }, [aiStat?.running, statTick]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const suggestion = useMemo(() => {
+    const st = aiStat;
+    if (!st?.running || !mStats) return null;
+    const elapsed = Date.now() - st.t0;
+    if (elapsed < SUGGEST_AFTER) return null;
+    if (jobRef.current?.kind !== "ask") return null;
+    const cur = cfg.askModel || defModel;
+
+    /* 전체 응답 시간(t)으로 비교하면 안 된다. 실측상 t 는 질문 난이도에 따라 5.7배까지
+       흔들려서(MiniMax: 쉬운 질문 15.8초 / 어려운 질문 89.9초), 지금 요청이 느린 게
+       모델이 막혀서인지 질문이 무거워서인지 구분하지 못한다.
+       헤더까지 걸린 시간(q)은 같은 조건에서 1.5~1.9배로만 흔들린다 — 배정받기까지의
+       시간이라 질문 내용과 거의 무관하다. 그래서 혼잡 판정은 q 로만 한다. */
+    const qNow = st.q == null ? elapsed : st.q;   // 헤더가 아직이면 지금 이 순간 전부가 대기다
+    if (qNow < QUEUE_BAD) return null;            // 배정은 빨랐다 = 질문이 무거운 것이지 막힌 게 아니다
+
+    let best = null;
+    for (const m of models) {
+      if (m.id === cur) continue;
+      const s = mStats[m.id];
+      if (!s || s.n < SUGGEST_MIN_N || !Number.isFinite(s.q)) continue;
+      if (s.q > qNow * 0.4) continue;             // 눈에 띄게 잘 붙을 때만 권한다
+      if (!best || s.q < best.q) best = { id: m.id, label: m.label, q: s.q, n: s.n };
+    }
+    return best && { ...best, qNow };
+  }, [aiStat, statTick, mStats, models, cfg.askModel, defModel]);
+
   const statView = useMemo(() => {
     const st = aiStat;
     if (!st?.running) return null;
@@ -946,7 +1008,12 @@ export default function VerbatimReader() {
     const gap = Math.max(0, Math.round((Date.now() - (st.at || st.t0)) / 1000));
     const who = st.engine ? `${st.engine}${st.model ? " " + st.model.split("/").pop() : ""}` : "";
     const step = st.step ? `${st.step} · ` : "";
-    if (st.phase === "send") return { text: `${step}서버에 요청하는 중 · ${sec}초`, warn: false };
+    /* send = 아직 업스트림 응답 헤더도 못 받았다 = 줄 서는 중.
+       wait = 헤더는 왔는데 토큰이 없다 = 모델이 실제로 계산 중.
+       실측(2026-07-30)상 이 둘은 성격이 다르다 — MiniMax 는 19.3초를 줄 서는 데 쓰고
+       계산은 0.1초였고, DeepSeek 은 0.6초 만에 붙어서 9.4초를 계산했다. */
+    if (st.phase === "send")
+      return { text: `${step}차례를 기다리는 중 · ${sec}초`, warn: sec * 1000 >= STALL_WAIT };
     /* 속생각이 흐르는 동안은 답이 한 글자도 안 나오지만 모델은 분명히 살아 있다.
        여기서만은 "느리다"와 "죽었다"를 구분할 수 있으므로 절대 경고하지 않는다. */
     if (st.phase === "think")
@@ -959,7 +1026,7 @@ export default function VerbatimReader() {
       return {
         text: warn
           ? `${step}${sec}초째 첫 글자가 오지 않습니다${who ? ` · ${who}` : ""} — 모델이 식었으면 1분까지 걸립니다`
-          : `${step}모델이 답을 시작하기를 기다리는 중 · ${sec}초${who ? ` · ${who}` : ""}`,
+          : `${step}모델이 계산 중 · ${sec}초${who ? ` · ${who}` : ""}`,
         warn,
       };
     }
@@ -2020,10 +2087,13 @@ export default function VerbatimReader() {
   }, [numPages]);
 
   /* ── 질문 ── */
-  const sendAsk = async () => {
-    const q = askVal.trim();
-    if (!q || asking) return;
-    setAskVal("");
+  const sendAsk = async (qOverride) => {
+    // onClick={sendAsk} 로도 불린다 — 그때 첫 인자는 MouseEvent 다.
+    const isRetry = typeof qOverride === "string";
+    const q = (isRetry ? qOverride : askVal).trim();
+    if (!q) return;
+    if (asking && !isRetry) return;   // 재시도는 방금 끊은 직후라 asking 을 무시한다
+    if (!isRetry) setAskVal("");
     setAsking(true);
 
     // 세션이 없으면(처음이거나 2시간이 지나 청소됐으면) 첫 질문을 제목 삼아 하나 연다.
@@ -2058,9 +2128,25 @@ export default function VerbatimReader() {
       if (e.name === "AbortError") patchMsg(sid, idx, { text: buf, live: false, stopped: true });
       else patchMsg(sid, idx, { text: "", live: false, err: e.message });
     } finally {
+      // 이미 다음 요청(재시도)이 시작됐으면 그쪽 상태를 건드리지 않는다
+      if (!jobRef.current || jobRef.current.ac === ac) setAsking(false);
       endJob(ac);
-      setAsking(false);
     }
+  };
+
+  /* 권한 모델로 갈아타고 같은 질문을 다시 던진다.
+     끊긴 문답 한 쌍은 걷어낸다 — 반쯤 오다 만 답을 대화 이력에 남기면
+     다음 턴에 모델이 그 조각을 근거로 삼는다. */
+  const retryWith = (mid) => {
+    const sid = curSessRef.current;
+    const s = findSess(sid);
+    const q = [...(s?.msgs || [])].reverse().find((m) => m.role === "me")?.text || "";
+    stopAsk();
+    const next = { ...cfgRef.current, askModel: mid };
+    setCfg(next); cfgRef.current = next; persist();
+    if (s) commitSess(sessRef.current.map((x) => (x.id === sid ? { ...x, msgs: x.msgs.slice(0, -2) } : x)));
+    setAsking(false);
+    if (q) setTimeout(() => sendAsk(q), 0);
   };
 
   const delSess = (id) => {
@@ -2264,7 +2350,7 @@ export default function VerbatimReader() {
 
     /* 상태 표시줄이 "몇 초째 어느 단계인지"를 대신 알려 준다(모델이 식으면 첫 글자까지 실측 52초).
        중단은 이 ac 하나로 끊는다 — 캡처의 두 단계가 이어 달려도 늘 지금 도는 쪽을 가리킨다. */
-    const ac = startJob(sid, kind === "solve" ? "옮겨적는 중" : "해석하는 중");
+    const ac = startJob(sid, kind === "solve" ? "옮겨적는 중" : "해석하는 중", "cap");
     capAbort.current = ac;
     const stepped = (name, getChars) => { setStat({ step: name, phase: "send", at: Date.now() }); return phaseHook(ac, getChars); };
 
@@ -2853,6 +2939,17 @@ export default function VerbatimReader() {
                       <i className="vb-statdot" />
                       <span className="vb-stattx">{statView.text}</span>
                       <button className="vb-statstop" onClick={stopAsk}>중단</button>
+                    </div>
+                  )}
+                  {statView && suggestion && (
+                    <div className="vb-swap">
+                      <span className="vb-swaptx">
+                        지금 모델은 배정까지 {Math.round(suggestion.qNow / 100) / 10}초 —
+                        {" "}{suggestion.label} 은(는) 최근 {suggestion.n}회 평균 {Math.round(suggestion.q / 100) / 10}초
+                      </span>
+                      <button className="vb-swapbtn" onClick={() => retryWith(suggestion.id)}>
+                        바꿔서 다시
+                      </button>
                     </div>
                   )}
                   <div className="vb-askbar">

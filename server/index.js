@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -422,10 +422,49 @@ function trimHistory(h) {
   return out;
 }
 
+/* ── 모델별 최근 성적 ──
+   "지금 느리다"고 말하려면 그 모델의 평소를 알아야 한다. 고정 임계값 하나로는
+   MiniMax(정상 41초)와 죽은 모델을 구분할 수 없다. 그래서 최근 요청을 모델별로
+   기억해 두고 중앙값과 비교한다.
+
+   두 구간을 나눠 잰다 — 실측(2026-07-30)상 성격이 완전히 다르기 때문이다:
+     q = 업스트림 응답 헤더까지. 줄 서는 시간이다. MiniMax 는 여기에 19.3초를 썼다.
+     f = 첫 바이트까지. 모델이 실제로 계산하는 시간. DeepSeek 은 여기에 9.4초를 썼다.
+   같은 20초라도 q 가 크면 혼잡, f 가 크면 그냥 무거운 모델이다. */
+const STAT_KEEP = 20;
+const stats = new Map(); // model -> [{ q, f, t, at }]
+function recordStat(model, s) {
+  if (!model) return;
+  const arr = stats.get(model) || [];
+  arr.push({ ...s, at: Date.now() });
+  if (arr.length > STAT_KEEP) arr.splice(0, arr.length - STAT_KEEP);
+  stats.set(model, arr);
+}
+const median = (xs) => {
+  const a = xs.filter((n) => Number.isFinite(n)).sort((x, y) => x - y);
+  return a.length ? a[Math.floor(a.length / 2)] : null;
+};
+function statOf(model) {
+  /* 30분 지난 표본은 버린다 — NIM 은 안 쓰면 식어서 예전 값이 거짓말이 된다. */
+  const arr = (stats.get(model) || []).filter((s) => Date.now() - s.at < 30 * 60_000);
+  if (!arr.length) return null;
+  return { n: arr.length, q: median(arr.map((s) => s.q)), f: median(arr.map((s) => s.f)), t: median(arr.map((s) => s.t)) };
+}
+
+app.get("/api/stats", requireAuth, (_req, res) => {
+  const out = {};
+  for (const m of [...ASK_MODEL_IDS, NIM_MODEL]) {
+    const s = statOf(m);
+    if (s) out[m] = s;
+  }
+  res.json({ stats: out, keep: STAT_KEEP });
+});
+
 app.post("/api/chat", requireAuth, async (req, res) => {
   const { system = "", user = "", image = "", maxTokens = 1000, forceGemini = false, ask = false, model = "" } = req.body || {};
   if (!user) return res.status(400).json({ error: "user 가 비었습니다." });
   const history = trimHistory(req.body?.history);
+  const t0 = Date.now();
 
   const ac = new AbortController();
   // req 의 'close' 는 본문을 다 읽은 직후에도 발생하므로 쓰면 안 된다.
@@ -450,12 +489,15 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   let upstream = null;
   let engine = "";
   let usedModel = "";
+  let qMs = null;   // 업스트림 헤더까지 (대기)
+  let fMs = null;   // 업스트림 첫 바이트까지 (계산 시작)
   const tryNIM = !forceGemini && NIM_KEY && Date.now() > nimDownUntil;
 
   if (tryNIM) {
     for (const m of chain) {
       try {
         upstream = await callNIM({ ...args, model: m });
+        qMs = Date.now() - t0;   // 붙는 데 걸린 시간 = 줄 선 시간
         engine = "NIM";
         usedModel = m;
         break;
@@ -470,6 +512,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   if (!upstream) {
     try {
       upstream = await callGemini(args);
+      qMs = Date.now() - t0;
       engine = "Gemini";
       usedModel = GEMINI_MODEL;
     } catch (e) {
@@ -488,6 +531,9 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no"); // nginx 앞단 버퍼링 방지
   res.flushHeaders();
 
+  /* 끝까지 흘러간 요청만 기록한다. 중간에 끊긴 건 그 모델이 느렸다는 증거가 아니다. */
+  res.on("finish", () => recordStat(usedModel, { q: qMs, f: fMs, t: Date.now() - t0 }));
+
   try {
     if (engine === "Gemini") await pipeGemini(upstream, res);
     else {
@@ -500,7 +546,12 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         res.end();
       });
       res.on("error", () => rs.destroy());
-      rs.pipe(res);
+      // 첫 바이트 시각만 훔쳐보고 그대로 흘려보낸다 ('data' 리스너를 달면 pipe 전에
+      // 흐름이 시작돼 앞부분을 잃는다).
+      const tap = new Transform({
+        transform(chunk, _e, cb) { if (fMs == null) fMs = Date.now() - t0; cb(null, chunk); },
+      });
+      rs.pipe(tap).pipe(res);
     }
   } catch (e) {
     if (!ac.signal.aborted) console.error("[여백] 스트림 중단:", e.message);
