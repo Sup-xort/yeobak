@@ -97,8 +97,15 @@ const CSS = `
   -webkit-user-select:text;user-select:text;-webkit-touch-callout:none}
 .vb-tl .it{position:absolute;white-space:pre;transform-origin:0 0;cursor:text}
 .vb-tl .w{border-radius:2px}
-.vb-tl .w.hit{background:var(--mark);box-shadow:0 0 0 1px var(--mark)}
-.vb-tl .w.sent{background:rgba(111,211,192,.55)}
+/* 탭한 단어 / 문장 하이라이트 — 글자는 텍스트 레이어(color:transparent)가 아니라 캔버스에 있다.
+   그래서 글자 위에 색을 깔면 무조건 글자를 가린다:
+   불투명하면 통째로 사라지고, 반투명하면 검정이 뿌옇게 뜬다.
+   mix-blend-mode:multiply 로 곱하면 이론상 딱 맞지만 iOS 사파리가 스크롤 컨테이너의
+   합성 레이어 경계를 넘어 블렌딩을 못 해서 실기기에서 그냥 무시된다(isolation:isolate 도 소용없었다).
+   그래서 글자 위는 아예 비우고 아래쪽에 형광펜 획만 긋는다 — 검정이 100% 그대로 남는다. */
+.vb-tl .vb-hl{position:absolute;pointer-events:none;border-radius:1px;
+  background:linear-gradient(to top,var(--mark) 0 3px,transparent 3px)}
+.vb-tl .vb-hl.sent{background:linear-gradient(to top,var(--mark2) 0 3px,transparent 3px)}
 .vb-root ::selection{background:rgba(255,216,77,.55)}
 
 .vb-zoompill{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:36;
@@ -192,7 +199,11 @@ const CSS = `
 /* 좁은 화면에서는 엔진 배지를 숨겨 툴바 숨통을 틔운다 */
 .vb-root:not(.wide) .vb-eng{display:none}
 
-.vb-sheet{position:absolute;left:0;right:0;bottom:0;z-index:35;background:var(--desk2);
+/* 풀이창은 반투명 — 가려진 본문 단어가 비쳐 보이도록.
+   블러는 아주 약하게만 걸어 뒤 글자 형태는 알아볼 수 있게 둔다.
+   backdrop-filter 미지원 브라우저에서도 알파값만으로 비치므로 폴백은 두지 않는다. */
+.vb-sheet{position:absolute;left:0;right:0;bottom:0;z-index:35;background:rgba(42,41,38,.70);
+  -webkit-backdrop-filter:blur(2px) saturate(1.1);backdrop-filter:blur(2px) saturate(1.1);
   border-top:1px solid var(--line);border-radius:18px 18px 0 0;display:flex;flex-direction:column;
   transform:translateY(100%);transition:transform .26s cubic-bezier(.3,.85,.35,1);
   box-shadow:0 -8px 34px rgba(0,0,0,.4)}
@@ -304,6 +315,31 @@ const CSS = `
 .vb-bubble{position:absolute;z-index:38;padding:9px 15px;border-radius:10px;background:var(--mark);
   color:#241F00;font-size:13.5px;font-weight:650;box-shadow:0 4px 14px rgba(0,0,0,.4);white-space:nowrap}
 
+/* ── 영역 캡처 ──
+   오버레이는 .vb-view 의 실측 사각형에 position:fixed 로 맞춘다. .vb-body 안에
+   절대배치하면 목차 패널까지 덮거나 패널 폭(400/272)을 또 하드코딩해야 한다. */
+/* 오버레이 자체는 투명하다 — 딤은 .vb-capsel 의 box-shadow 한 곳에서만 만든다.
+   둘 다 깔면 선택 안쪽까지 어두워져서 정작 오릴 글자가 잘 안 보인다. */
+.vb-cap{position:fixed;z-index:42;touch-action:none;cursor:crosshair;
+  background:transparent;-webkit-user-select:none;user-select:none}
+.vb-cap.busy{cursor:progress}
+.vb-capsel{position:absolute;border:1.5px solid var(--mark);background:rgba(255,216,77,.10);
+  box-shadow:0 0 0 9999px rgba(20,19,18,.42);cursor:move}
+.vb-caph{position:absolute;width:22px;height:22px;border-radius:50%;background:var(--mark);
+  border:2px solid #241F00;touch-action:none}
+.vb-caphint{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:43;
+  padding:8px 14px;border-radius:10px;background:rgba(20,19,18,.9);border:1px solid var(--line);
+  color:#D9D5CC;font-size:13px;white-space:nowrap;pointer-events:none}
+.vb-capmenu{position:absolute;z-index:43;display:flex;gap:6px;padding:6px;border-radius:12px;
+  background:var(--desk2);border:1px solid var(--line);box-shadow:0 6px 20px rgba(0,0,0,.5)}
+.vb-capbtn{min-height:40px;padding:0 15px;border-radius:9px;background:var(--mark);color:#241F00;
+  font-size:14px;font-weight:650;white-space:nowrap;touch-action:manipulation}
+.vb-capbtn.ghost{background:transparent;border:1px solid var(--line);color:#CFCBC2;font-weight:500}
+.vb-capbtn:disabled{opacity:.45}
+/* 질문 탭에 붙는 캡처 썸네일 */
+.vb-msgimg{display:block;max-width:min(100%,320px);border-radius:9px;border:1px solid var(--line);
+  margin:2px 0 8px;background:#fff}
+
 @media (prefers-reduced-motion:reduce){.vb-root *{transition:none!important;animation:none!important}}
 `;
 
@@ -355,6 +391,8 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       system, user,
+      // 영역 캡처 이미지(base64 JPEG). 있으면 서버가 비전 모델 체인으로 보낸다.
+      image: opts.image || "",
       maxTokens: opts.ask ? 1400 : 1000,
       forceGemini: !!cfg.forceGemini,
       ask: !!opts.ask,
@@ -387,6 +425,53 @@ function sentenceAt(text, off) {
   if (e < text.length) e++;
   return { text: text.slice(s, e).replace(/\s+/g, " ").trim(), start: s, end: e };
 }
+/* 화면 세로좌표 y 아래에 있는 페이지 번호(1-based).
+   페이지는 세로 한 줄로 쌓이므로 rect.top 이 인덱스에 대해 단조 증가한다 — 이진 탐색으로 찾는다.
+   curRef 가 얼마나 어긋나 있든 답이 옳다는 게 핵심이다. 예전엔 curRef 주변 ±10쪽만 훑어서,
+   핀치나 빠른 스크롤로 curRef 가 멀어지면 창 안에서 아무것도 못 찾고 그대로 굳었다.
+   그 결과 쪽번호가 실제 화면과 어긋나고, prune 이 보고 있는 페이지를 지워 흰 화면이 뜨고,
+   핀치 앵커가 엉뚱한 페이지를 가리켜 이상한 곳으로 넘어갔다.
+   변환(핀치 중 CSS scale)이 걸려 있어도 getBoundingClientRect 는 변환 후 좌표라 그대로 쓴다. */
+const pageAt = (pages, y) => {
+  const n = pages.length;
+  if (!n) return 1;
+  let lo = 0, hi = n - 1, below = -1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    const r = pages[m]?.getBoundingClientRect();
+    if (!r) break;
+    if (y < r.top) { below = m; hi = m - 1; }
+    else if (y > r.bottom) lo = m + 1;
+    else return m + 1;
+  }
+  return below >= 0 ? below + 1 : n; // 페이지 사이 여백이면 바로 아래 페이지
+};
+
+/* 하이라이트 박스를 .vb-tl 바로 아래에 깐다.
+   .w 스팬 자체에 배경을 주면 안 되는 이유: 부모 .it 에는 폭 보정용 transform 이 걸려 있고,
+   transform 은 블렌딩을 격리시켜서 mix-blend-mode 가 그 아래 캔버스에 닿지 못한다.
+   (translateZ(0) 로 mix-blend-mode 를 가두는 우회법이 바로 이 성질을 쓰는 것)
+   그래서 transform 이 없는 .vb-tl 의 자식으로 박스를 만들어 multiply 로 곱한다 —
+   흰 종이는 형광색으로, 검은 획은 검정 원색 그대로 남는다.
+   좌표는 getBoundingClientRect 차이로 잡으므로 .it 의 transform 이 이미 반영돼 있다. */
+const markSpans = (els, cls) => {
+  for (const el of els) {
+    const layer = el.closest(".vb-tl");
+    if (!layer) continue;
+    const r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    const lr = layer.getBoundingClientRect();
+    const hl = document.createElement("i");
+    hl.className = "vb-hl" + (cls ? " " + cls : "");
+    /* 아래로 4px 더 키운다 — 형광펜 획이 그 여유 안에 들어가서 g·j·p 같은
+       내림자를 가로지르지 않고 글자 밑을 지나간다 */
+    hl.style.left = r.left - lr.left - 1 + "px";
+    hl.style.top = r.top - lr.top + "px";
+    hl.style.width = r.width + 2 + "px";
+    hl.style.height = r.height + 4 + "px";
+    layer.prepend(hl);
+  }
+};
 const fmtSize = (b) =>
   b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
 const fmtDate = (t) => {
@@ -414,6 +499,29 @@ const SYS_ASK = `너는 한국 대학생이 읽고 있는 문서를 함께 보�
 주어진 본문(책 전체 또는 표시된 범위)을 근거로 한국어로 답한다. 짧고 정확하게, 필요하면 원문 표현을 쪽수와 함께 인용한다.
 독자가 지금 보고 있는 쪽과 방금 짚은 문장이 표시되어 있으면 그 맥락을 우선 고려한다.
 본문에 없는 내용은 추측이라고 밝힌다. 인사말 없이 바로 답한다.`;
+
+/* ── 영역 캡처 프롬프트 ──
+   "해석"은 비전 모델이 한 번에 처리하고, "문제풀이"는 두 단계로 나눈다:
+   비전 모델이 눈 역할로 옮겨적고(SYS_CAP_OCR), 실제 추론은 질문 탭 모델(DeepSeek 등)이 한다.
+   비전 모델은 글자를 잘 읽지만 추론은 텍스트 전용 모델이 더 낫기 때문이다. */
+const SYS_CAP_READ = `너는 한국 대학생이 읽는 원서·교재의 한 부분을 함께 보는 번역·해설자다.
+주어진 이미지는 지금 읽고 있는 쪽에서 오려낸 영역이다. 이미지에 보이는 것만 근거로 삼는다.
+먼저 보이는 본문을 자연스러운 한국어로 옮기고, 이어서 이해에 필요한 만큼만 짧게 풀어 설명한다.
+수식·기호·표는 읽은 그대로 옮기고 각 기호가 무엇을 뜻하는지 밝힌다.
+전문 용어는 원어를 괄호로 병기한다. 인사말·마무리 문장·마크다운 기호 금지.
+이미지가 흐리거나 글자를 알아볼 수 없으면 추측하지 말고 그 사실을 먼저 밝힌다.`;
+
+const SYS_CAP_OCR = `이미지에 보이는 내용을 있는 그대로 옮겨 적는다. 번역·해설·풀이를 하지 않는다.
+수식은 한 줄로 읽을 수 있는 형태로 옮긴다(예: (A+B)' = A'B').
+표는 행마다 줄을 나눠 옮기고, 그림·회로도는 [그림: 무엇이 있는지 한 줄]로 적는다.
+문제 번호와 보기 기호(①, (a) 등)를 빠뜨리지 않는다. 알아볼 수 없는 글자는 [?]로 표시한다.
+옮긴 내용만 출력한다.`;
+
+const SYS_CAP_SOLVE = `너는 한국 대학생의 문제풀이 조교다. 주어진 문제를 한국어로 푼다.
+답만 던지지 말고 풀이 과정을 단계로 나눠 보여주되, 군더더기 없이 짧게.
+근거가 되는 정의·법칙은 이름을 밝힌다(예: 드모르간 법칙).
+마지막 줄에 "답: "으로 시작하는 한 줄로 최종 답을 적는다.
+문제가 불완전해서 풀 수 없으면 무엇이 빠졌는지 밝힌다. 인사말·마크다운 기호 금지.`;
 
 /* ───────────────── 컴포넌트 ───────────────── */
 export default function VerbatimReader() {
@@ -485,6 +593,10 @@ export default function VerbatimReader() {
   const extractingRef = useRef(false);
   const delTimer = useRef(null);              // 두 번 눌러 삭제 타이머
   const layoutKeyRef = useRef({ cw: 0, zoom: 0 }); // 마지막 배치에 쓴 폭·배율 — 같으면 relayout 을 건너뛴다
+  // 지금 하이라이트된 구간 {page, start, end, cls}. DOM 이 아니라 오프셋으로 들고 있어야
+  // relayout 이 텍스트 레이어를 걷어내고 다시 그려도 하이라이트가 살아남는다.
+  const markRef = useRef(null);
+  const gestureRef = useRef(false);           // 핀치·트랙패드 줌이 진행 중인가
 
   useEffect(() => { cfgRef.current = cfg; }, [cfg]);
   useEffect(() => { layoutRef.current = { sheetOpen, outOpen }; }, [sheetOpen, outOpen]);
@@ -882,6 +994,7 @@ export default function VerbatimReader() {
       layer.className = "vb-tl";
       el.appendChild(layer);
       await buildTextLayer(page, vp, layer, n);
+      if (markRef.current?.page === n) applyMarks(); // 재배치로 지워진 하이라이트 복원
       renderedRef.current.add(n);
     } catch (e) {
       console.error("page " + n, e);
@@ -904,18 +1017,31 @@ export default function VerbatimReader() {
     }
   };
 
+  /* 현재 페이지 = 뷰포트 세로 중앙에 걸린 페이지.
+     예전에는 IntersectionObserver 의 intersectionRatio 로 정했는데, root 에
+     rootMargin:1000px 이 걸려 있어서 화면 밖 페이지도 비율이 0.35 를 쉽게 넘겼다.
+     observe() 직후처럼 모든 페이지가 한꺼번에 보고될 때는 엔트리 순서에 따라
+     화면 밖 페이지가 마지막에 이겨서 curRef 가 엉뚱한 곳을 가리켰고,
+     그 뒤 relayout(keep=curRef) 이 그리로 스크롤해 "풀이창을 닫으면 앞 페이지로
+     튄다"가 됐다. 이제 실제 화면 좌표로 판정한다. */
+  const pickCur = () => {
+    const view = viewRef.current;
+    const pages = pagesRef.current;
+    // 제스처 중에는 건드리지 않는다 — 임시 CSS scale 때문에 좌표가 계속 흔들리고,
+    // 그 사이 prune 이 보고 있는 페이지를 지워 버릴 수 있다.
+    if (!view || !pages.length || gestureRef.current) return;
+    const vr = view.getBoundingClientRect();
+    const n = pageAt(pages, vr.top + vr.height / 2);
+    if (n !== curRef.current) { curRef.current = n; setCurPage(n); }
+  };
+
   const observe = () => {
     ioRef.current?.disconnect();
     ioRef.current = new IntersectionObserver((ents) => {
-      for (const e of ents) {
-        const n = +e.target.dataset.n;
-        if (e.isIntersecting) {
-          renderPage(n);
-          if (e.intersectionRatio > 0.35) { curRef.current = n; setCurPage(n); }
-        }
-      }
+      for (const e of ents) if (e.isIntersecting) renderPage(+e.target.dataset.n);
+      pickCur();
       prune();
-    }, { root: viewRef.current, rootMargin: "1000px 0px", threshold: [0, 0.35] });
+    }, { root: viewRef.current, rootMargin: "1000px 0px", threshold: 0 });
     pagesRef.current.forEach((el) => el && ioRef.current.observe(el));
   };
 
@@ -1068,6 +1194,18 @@ export default function VerbatimReader() {
     setCurPage(n);
   };
 
+  /* 화면 좌표 (x,y) 아래의 페이지와 페이지 내 상대좌표.
+     transform 이 걸린 상태에서도 getBoundingClientRect 는 변환 후 좌표를 주므로 그대로 쓴다.
+     핀치 줌과 트랙패드 줌이 함께 쓴다. */
+  const findAnchor = useCallback((x, y) => {
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const page = pageAt(pagesRef.current, y);
+    const r = pagesRef.current[page - 1]?.getBoundingClientRect();
+    return r
+      ? { page, fx: clamp01((x - r.left) / r.width), fy: clamp01((y - r.top) / r.height), sx: x, sy: y }
+      : { page, fx: 0.5, fy: 0, sx: x, sy: y };
+  }, []);
+
   /* anchor 가 있으면(핀치 줌) 그 지점(페이지 내 fx/fy)이 화면의 같은 자리(sx/sy)로 돌아오게 복원한다 */
   const relayout = useCallback(async (keepPage, anchor) => {
     const pdf = pdfRef.current;
@@ -1138,6 +1276,23 @@ export default function VerbatimReader() {
     };
   }, [relayout]);
 
+  /* IntersectionObserver 는 페이지가 1000px 여유를 드나들 때만 깨어나므로
+     쪽 번호가 뒤늦게 바뀐다. 스크롤 중에도 rAF 로 한 번씩 현재 페이지를 다시 잡는다
+     (pickCur 은 이진 탐색이라 1000쪽짜리도 프레임당 rect 10번 남짓이다). */
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    let raf = 0;
+    const on = () => {
+      if (raf) return;
+      raf = requestAnimationFrame(() => { raf = 0; pickCur(); });
+    };
+    view.addEventListener("scroll", on, { passive: true });
+    return () => { view.removeEventListener("scroll", on); cancelAnimationFrame(raf); };
+    // pickCur 은 ref 만 읽으므로 첫 렌더의 클로저를 그대로 써도 안전하다
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const goDest = async (dest) => {
     try {
       const pdf = pdfRef.current;
@@ -1149,8 +1304,30 @@ export default function VerbatimReader() {
     } catch (e) { console.warn(e); }
   };
 
+  /* markRef 의 오프셋 구간을 해당 페이지에 다시 그린다.
+     renderPage 가 텍스트 레이어를 새로 만들 때마다 호출되므로,
+     확대/축소나 풀이창 여닫기로 재배치가 일어나도 하이라이트가 유지된다. */
+  const applyMarks = () => {
+    const m = markRef.current;
+    if (!m) return;
+    const pd = dataRef.current[m.page - 1];
+    const el = pagesRef.current[m.page - 1];
+    if (!pd || !el) return;
+    el.querySelectorAll(".vb-hl").forEach((h) => h.remove());
+    markSpans(pd.words.filter((w) => {
+      const o = +w.dataset.off;
+      return o >= m.start && o < m.end;
+    }), m.cls);
+  };
+
+  const setMark = (page, start, end, cls) => {
+    markRef.current = { page, start, end, cls };
+    applyMarks();
+  };
+
   const clearMarks = () => {
-    viewRef.current?.querySelectorAll(".w.hit,.w.sent").forEach((e) => e.classList.remove("hit", "sent"));
+    markRef.current = null;
+    viewRef.current?.querySelectorAll(".vb-hl").forEach((e) => e.remove());
   };
 
   /* ── 단어 / 문장 ── */
@@ -1264,16 +1441,13 @@ export default function VerbatimReader() {
       if (dbl) {
         wAbort.current?.abort();
         clearMarks();
-        for (const w of pd.words) {
-          const o = +w.dataset.off;
-          if (o >= s.start && o < s.end) w.classList.add("sent");
-        }
+        setMark(n, s.start, s.end, "sent");
         setSheetOpen(true);
         setTab("sent");
         runSentence(s.text);
       } else {
         clearMarks();
-        el.classList.add("hit");
+        setMark(n, off, off + el.textContent.length, "");
         setSheetOpen(true);
         setTab("word");
         runWord(wordAt(pd.text, off), s.text);
@@ -1307,33 +1481,16 @@ export default function VerbatimReader() {
     let pinching = false, startD = 0, startZoom = 1, factor = 1, lastMid = null;
     const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
     const mid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
-    const clamp01 = (v) => Math.max(0, Math.min(1, v));
     const reset = () => {
       stage.style.transform = "";
       stage.style.transformOrigin = "";
       setZoomPill(null);
     };
-    // 화면 좌표 (x,y) 아래의 페이지와 페이지 내 상대좌표. transform 이 걸린
-    // 상태에서도 getBoundingClientRect 는 변환 후 좌표를 주므로 그대로 쓴다.
-    const findAnchor = (x, y) => {
-      const cur = curRef.current;
-      for (let i = Math.max(0, cur - 9); i < Math.min(pagesRef.current.length, cur + 9); i++) {
-        const el = pagesRef.current[i];
-        if (!el) continue;
-        const r = el.getBoundingClientRect();
-        if (y >= r.top && y <= r.bottom)
-          return { page: i + 1, fx: clamp01((x - r.left) / r.width), fy: clamp01((y - r.top) / r.height), sx: x, sy: y };
-      }
-      const el = pagesRef.current[cur - 1];
-      const r = el?.getBoundingClientRect();
-      return r
-        ? { page: cur, fx: 0.5, fy: clamp01((y - r.top) / r.height), sx: x, sy: y }
-        : { page: cur, fx: 0.5, fy: 0, sx: x, sy: y };
-    };
 
     const onStart = (e) => {
       if (e.touches.length !== 2 || !pdfRef.current) return;
       pinching = true;
+      gestureRef.current = true;
       startD = dist(e.touches);
       startZoom = zoomRef.current;
       factor = 1;
@@ -1348,6 +1505,7 @@ export default function VerbatimReader() {
       if (!e.cancelable) {
         // 네이티브 스크롤이 이미 제스처를 가져갔다 — 핀치를 포기한다
         pinching = false;
+        gestureRef.current = false;
         reset();
         observe();
         return;
@@ -1368,7 +1526,9 @@ export default function VerbatimReader() {
       if (!pinching || e.touches.length >= 2) return;
       pinching = false;
       // 앵커는 끝나는 순간의 중점에서 계산한다 (변환이 걸린 채로 측정)
+      // gestureRef 는 앵커를 잡은 뒤에 내린다 — 그전에 pickCur 이 끼어들면 안 된다
       const anchor = lastMid ? findAnchor(lastMid.x, lastMid.y) : null;
+      gestureRef.current = false;
       reset();
       lastMid = null;
       const next = Math.max(0.3, Math.min(3, startZoom * factor));
@@ -1390,7 +1550,69 @@ export default function VerbatimReader() {
       view.removeEventListener("touchend", onEnd);
       view.removeEventListener("touchcancel", onEnd);
     };
-  }, [relayout, persist]);
+  }, [relayout, persist, findAnchor]);
+
+  /* ── 트랙패드 핀치 / Ctrl+휠 줌 (데스크톱) ──
+     브라우저는 트랙패드 두 손가락 핀치를 ctrlKey 가 붙은 wheel 이벤트로 준다
+     (Ctrl+마우스휠도 같은 모양이라 함께 잡힌다). preventDefault 를 안 하면
+     브라우저 자체 페이지 확대가 먹어 버리므로 passive:false 로 등록한다.
+     터치 핀치와 같은 2단계 구조 — 굴리는 동안엔 stage 에 CSS scale 만 걸고,
+     휠이 멎으면(140ms) 커서 아래 지점을 앵커로 잡아 relayout 으로 다시 그린다. */
+  useEffect(() => {
+    const view = viewRef.current;
+    const stage = stageRef.current;
+    if (!view || !stage) return;
+    let zooming = false, startZoom = 1, factor = 1, last = null, timer = 0;
+    const clampZoom = (z) => Math.max(0.3, Math.min(3, z));
+    const commit = () => {
+      if (!zooming) return;
+      zooming = false;
+      const anchor = last ? findAnchor(last.x, last.y) : null;
+      gestureRef.current = false;
+      stage.style.transform = "";
+      stage.style.transformOrigin = "";
+      setZoomPill(null);
+      last = null;
+      const next = clampZoom(startZoom * factor);
+      if (Math.abs(next - zoomRef.current) > 0.01) {
+        zoomRef.current = next;
+        persist();
+        relayout(anchor?.page, anchor);
+      } else {
+        observe();
+      }
+    };
+    const onWheel = (e) => {
+      if (!e.ctrlKey || !pdfRef.current) return;
+      e.preventDefault();
+      if (!zooming) {
+        zooming = true;
+        gestureRef.current = true;
+        startZoom = zoomRef.current;
+        factor = 1;
+        ioRef.current?.disconnect(); // 제스처 중에는 렌더/프룬이 끼어들지 않게
+        const sr = stage.getBoundingClientRect();
+        stage.style.transformOrigin = `${e.clientX - sr.left}px ${e.clientY - sr.top}px`;
+      }
+      last = { x: e.clientX, y: e.clientY };
+      // deltaMode 는 픽셀(0)/줄(1)/페이지(2) — 줄·페이지 단위면 픽셀로 환산한다.
+      // 트랙패드는 작은 값이 연속으로, 마우스 휠은 한 칸에 100 안팎이 뚝뚝 떨어진다.
+      // 한 번에 튀지 않게 상한을 씌워, 휠 한 칸이 약 20% 가 되게 맞췄다.
+      const raw = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaMode === 2 ? e.deltaY * 400 : e.deltaY;
+      const px = Math.max(-50, Math.min(50, raw));
+      const next = clampZoom(startZoom * factor * Math.exp(-px / 220));
+      factor = next / startZoom;
+      stage.style.transform = `scale(${factor})`;
+      setZoomPill(Math.round(next * 100) + "%");
+      clearTimeout(timer);
+      timer = setTimeout(commit, 140);
+    };
+    view.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      view.removeEventListener("wheel", onWheel);
+      clearTimeout(timer);
+    };
+  }, [relayout, persist, findAnchor]);
 
   /* ── 드래그 선택 ── */
   useEffect(() => {
@@ -1444,6 +1666,251 @@ export default function VerbatimReader() {
       setAskLog((l) => l.map((m, i) => (i === idx ? { ...m, text: buf, live: false } : m)));
     } catch (e) {
       setAskLog((l) => l.map((m, i) => (i === idx ? { ...m, text: "", live: false, err: e.message } : m)));
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  /* ── 영역 캡처 ──
+     모드에 들어가면 .vb-view 위에 오버레이가 덮이고 입력을 독점한다. 그래서 탭 판정·핀치·
+     스크롤 핸들러와 경쟁하지 않고, 텍스트 레이어의 data-off 오프셋 기계도 건드리지 않는다
+     (픽셀만 읽으므로 스캔 PDF 처럼 텍스트가 없는 문서에서도 그대로 동작한다).
+     좌표는 오버레이 기준(capSel)으로 두고, 자를 때만 페이지 실측 사각형으로 환산한다. */
+  const CAP_TARGET = 1400;      // 크롭 긴 변 목표 픽셀 — 작은 수식도 읽히도록
+  const CAP_MAXPX = 4_000_000;  // 아이패드 사파리가 캔버스를 조용히 비우지 않도록 총 픽셀 상한
+  const CAP_MIN = 16;           // 이보다 작으면 스친 것으로 보고 선택을 버린다
+  const [capMode, setCapMode] = useState(false);
+  const [capBox, setCapBox] = useState(null); // 오버레이 위치 = .vb-view 실측 사각형
+  const [capSel, setCapSel] = useState(null); // {x,y,w,h} 오버레이 기준
+  const [capBusy, setCapBusy] = useState("");
+  const capDragRef = useRef(null);
+  const capAbort = useRef(null);
+
+  const measureCap = () => {
+    const r = viewRef.current?.getBoundingClientRect();
+    if (r) setCapBox({ left: r.left, top: r.top, width: r.width, height: r.height });
+  };
+  /* NIM 모델은 한동안 안 쓰면 콜드스타트가 있다 — 실측으로 식었을 때 비전 52초·질문 탭 44초,
+     데워지면 각각 2.3초·1초대. 모드에 들어가면 사용자가 영역을 그리는 몇 초가 생기므로
+     그 사이에 미리 깨운다. 문제풀이는 비전 → 질문 탭 모델을 연달아 쓰므로 둘 다 건드린다.
+     실패해도 무시한다(어차피 본 요청이 다시 시도한다). */
+  const warmRef = useRef(0);
+  const warmModels = () => {
+    if (Date.now() - warmRef.current < 5 * 60 * 1000) return;
+    warmRef.current = Date.now();
+    const cv = document.createElement("canvas");
+    cv.width = cv.height = 1;
+    const c = cv.getContext("2d");
+    c.fillStyle = "#fff";
+    c.fillRect(0, 0, 1, 1);
+    const poke = (body) =>
+      fetch("/api/chat", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ system: "ok", user: ".", maxTokens: 1, ...body }),
+      }).then((r) => r.body?.cancel()).catch(() => {});
+    poke({ image: cv.toDataURL("image/jpeg").split(",")[1] }); // 비전 모델
+    poke({ ask: true, model: cfgRef.current.askModel || "" }); // 풀이 담당 모델
+  };
+  const enterCap = () => {
+    measureCap(); setCapSel(null); setCapBusy(""); setCapMode(true);
+    warmModels();
+  };
+  const exitCap = () => {
+    capAbort.current?.abort();
+    setCapMode(false); setCapSel(null); setCapBusy("");
+    capDragRef.current = null;
+  };
+  // 모드 중에 창이 바뀌면 오버레이도 따라가야 한다. Escape 로 빠져나온다.
+  useEffect(() => {
+    if (!capMode) return;
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); exitCap(); } };
+    window.addEventListener("resize", measureCap);
+    window.addEventListener("orientationchange", measureCap);
+    window.addEventListener("keydown", onKey, true); // 캡처 단계에서 먼저 먹는다
+    return () => {
+      window.removeEventListener("resize", measureCap);
+      window.removeEventListener("orientationchange", measureCap);
+      window.removeEventListener("keydown", onKey, true);
+    };
+  }, [capMode]);
+
+  const capDown = (e) => {
+    if (capBusy || !capBox) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const x = e.clientX - capBox.left, y = e.clientY - capBox.top;
+    const h = e.target.dataset?.caph;
+    if (h && capSel) capDragRef.current = { mode: h, x, y, orig: { ...capSel } };
+    else if (e.target.classList?.contains("vb-capsel") && capSel)
+      capDragRef.current = { mode: "move", x, y, orig: { ...capSel } };
+    else { capDragRef.current = { mode: "new", x, y }; setCapSel({ x, y, w: 0, h: 0 }); }
+  };
+  const capMove = (e) => {
+    const d = capDragRef.current;
+    if (!d || !capBox) return;
+    const x = Math.max(0, Math.min(capBox.width, e.clientX - capBox.left));
+    const y = Math.max(0, Math.min(capBox.height, e.clientY - capBox.top));
+    if (d.mode === "new") {
+      setCapSel({ x: Math.min(d.x, x), y: Math.min(d.y, y), w: Math.abs(x - d.x), h: Math.abs(y - d.y) });
+      return;
+    }
+    const o = d.orig;
+    if (d.mode === "move") {
+      setCapSel({
+        x: Math.max(0, Math.min(capBox.width - o.w, o.x + (x - d.x))),
+        y: Math.max(0, Math.min(capBox.height - o.h, o.y + (y - d.y))),
+        w: o.w, h: o.h,
+      });
+      return;
+    }
+    // 네 꼭지점 — 잡은 반대쪽 모서리를 고정하고 다시 그린다
+    const l = d.mode.includes("w") ? x : o.x;
+    const r = d.mode.includes("e") ? x : o.x + o.w;
+    const t = d.mode.includes("n") ? y : o.y;
+    const b = d.mode.includes("s") ? y : o.y + o.h;
+    setCapSel({ x: Math.min(l, r), y: Math.min(t, b), w: Math.abs(r - l), h: Math.abs(b - t) });
+  };
+  const capUp = () => {
+    const d = capDragRef.current;
+    capDragRef.current = null;
+    if (d?.mode === "new") setCapSel((s) => (s && (s.w < CAP_MIN || s.h < CAP_MIN) ? null : s));
+  };
+
+  /* 선택과 가장 많이 겹치는 페이지를 고른다. 페이지 사이 여백에 걸쳐도 안전하다.
+     v1 은 한 페이지로 자른다 — 여러 페이지 합성은 다음 단계. */
+  const capPage = (sel) => {
+    if (!capBox) return null;
+    const L = capBox.left + sel.x, T = capBox.top + sel.y;
+    const R = L + sel.w, B = T + sel.h;
+    let best = null, bestA = 0;
+    pagesRef.current.forEach((el, i) => {
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const w = Math.min(R, r.right) - Math.max(L, r.left);
+      const h = Math.min(B, r.bottom) - Math.max(T, r.top);
+      if (w > 0 && h > 0 && w * h > bestA) { bestA = w * h; best = { n: i + 1, r }; }
+    });
+    return best;
+  };
+
+  /* 화면 캔버스를 확대하면 흐려서 모델이 글자를 놓친다.
+     그래서 그 영역만 pdf.js 로 고배율 재렌더해서 자른다. */
+  const cropRegion = async (sel) => {
+    const hit = capPage(sel);
+    const pdf = pdfRef.current;
+    if (!hit || !pdf) throw new Error("영역이 페이지 위에 없습니다.");
+    const { n, r } = hit;
+    const L = Math.max(capBox.left + sel.x, r.left), T = Math.max(capBox.top + sel.y, r.top);
+    const R = Math.min(capBox.left + sel.x + sel.w, r.right), B = Math.min(capBox.top + sel.y + sel.h, r.bottom);
+    const fx = (L - r.left) / r.width, fy = (T - r.top) / r.height;
+    const fw = (R - L) / r.width, fh = (B - T) / r.height;
+    if (fw <= 0 || fh <= 0) throw new Error("영역이 페이지 위에 없습니다.");
+
+    const page = await pdf.getPage(n);
+    const v1 = page.getViewport({ scale: 1 });
+    const cw = v1.width * fw, ch = v1.height * fh;
+    let hi = Math.min(8, Math.max(1, CAP_TARGET / Math.max(cw, ch)));
+    if (cw * ch * hi * hi > CAP_MAXPX) hi = Math.sqrt(CAP_MAXPX / (cw * ch));
+    const vp = page.getViewport({ scale: hi });
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round(vp.width * fw));
+    cv.height = Math.max(1, Math.round(vp.height * fh));
+    const ctx = cv.getContext("2d", { alpha: false });
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    await page.render({
+      canvasContext: ctx, viewport: vp,
+      transform: [1, 0, 0, 1, -vp.width * fx, -vp.height * fy],
+    }).promise;
+    return { page: n, url: cv.toDataURL("image/jpeg", 0.85) };
+  };
+
+  /* kind: "read" = 해석(비전 모델 한 번) / "solve" = 문제풀이(옮겨적기 → 질문 탭 모델이 풀이) */
+  const runCapture = async (kind) => {
+    if (!capSel || capBusy) return;
+    setCapBusy(kind);
+    let shot;
+    try {
+      shot = await cropRegion(capSel);
+    } catch (e) {
+      // 오버레이(z42)가 시트(z35)를 가리므로, 모드에서 나온 뒤에 알린다
+      exitCap();
+      setAskLog((l) => [...l, { role: "ai", text: "", live: false, err: e.message }]);
+      setTab("ask"); setSheetOpen(true);
+      return;
+    }
+    const b64 = shot.url.split(",")[1];
+    exitCap();
+    setTab("ask");
+    setSheetOpen(true);
+
+    capAbort.current?.abort();
+    const ac = new AbortController();
+    capAbort.current = ac;
+    const label = kind === "solve" ? "문제풀이" : "해석";
+    const idx = askLog.length + 1;
+    setAskLog((l) => [
+      ...l,
+      { role: "me", text: `${shot.page}쪽 영역 — ${label}`, img: shot.url },
+      { role: "ai", text: "", live: true },
+    ]);
+    const put = (t, extra) =>
+      setAskLog((l) => l.map((m, i) => (i === idx ? { ...m, text: t, ...extra } : m)));
+
+    /* 모델이 식어 있으면 첫 토큰까지 1분 가까이 걸린다(실측 52초). 그동안 빈 칸이면
+       고장으로 보이므로, 6초까지 아무것도 안 오면 기다리는 중이라고 알린다. */
+    const waking = (onFirst) => {
+      let woke = false;
+      const t = setTimeout(() => {
+        if (!woke) put("모델을 깨우는 중… (처음 한 번은 1분까지 걸릴 수 있습니다)");
+      }, 6000);
+      return (c) => {
+        if (!woke) { woke = true; clearTimeout(t); }
+        onFirst(c);
+      };
+    };
+
+    setAsking(true);
+    try {
+      if (kind === "read") {
+        let buf = "";
+        await ask(SYS_CAP_READ,
+          `[문서: ${docName || "제목 없음"} — ${shot.page}쪽에서 오려낸 영역]\n이 영역을 해석해 달라.`,
+          waking((c) => { buf += c; put(buf); }), ac.signal, { image: b64 });
+        put(buf, { live: false });
+      } else {
+        // 1단계: 비전 모델이 눈 역할 — 옮겨적기. 읽은 내용을 그대로 보여줘서
+        // 모델이 수식을 잘못 읽었을 때 사용자가 바로 알아챌 수 있게 한다.
+        let ocr = "";
+        await ask(SYS_CAP_OCR, `[${shot.page}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
+          waking((c) => { ocr += c; put(`[읽은 내용]\n${ocr}`); }), ac.signal, { image: b64 });
+        if (!ocr.trim()) throw new Error("이미지에서 글자를 읽지 못했습니다.");
+        const head = `[읽은 내용]\n${ocr.trim()}\n\n`;
+
+        /* 회로도·그래프는 옮겨적기에서 [그림: …] 한 줄로 줄어든다. 그대로 2단계로 넘기면
+           풀이를 맡은 텍스트 모델은 그림을 못 본 채 답하게 된다. 그럴 때는 2단계를 건너뛰고
+           그림을 볼 수 있는 비전 모델에게 직접 풀린다. */
+        const hasFig = /\[그림\s*:/.test(ocr);
+        if (hasFig) {
+          const note = "(그림이 있어 그림을 볼 수 있는 모델이 직접 풉니다)\n\n";
+          put(head + note + "푸는 중…");
+          let buf = "";
+          await ask(SYS_CAP_SOLVE,
+            `[문서: ${docName || "제목 없음"} / ${shot.page}쪽에서 오려낸 문제]\n이 이미지의 문제를 풀어라.`,
+            waking((c) => { buf += c; put(head + note + buf); }), ac.signal, { image: b64 });
+          put(head + note + buf, { live: false });
+          return;
+        }
+
+        put(head + "풀이 중…");
+        // 2단계: 추론은 질문 탭 모델(기본 DeepSeek)이 한다 — 이미지 없이 텍스트로.
+        let buf = "";
+        await ask(SYS_CAP_SOLVE,
+          `[문서: ${docName || "제목 없음"} / ${shot.page}쪽에서 오려낸 문제]\n${ocr.trim()}\n\n위 문제를 풀어라.`,
+          (c) => { buf += c; put(head + buf); }, ac.signal, { ask: true });
+        put(head + buf, { live: false });
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") put("", { live: false, err: e.message });
     } finally {
       setAsking(false);
     }
@@ -1618,6 +2085,12 @@ export default function VerbatimReader() {
         <span className={"vb-eng" + (engine === "NIM" ? " c" : engine === "Gemini" ? " g" : "")}>
           {engine || "대기"}
         </span>
+        {numPages > 0 && (
+          <button className={"vb-tool" + (capMode ? " on" : "")} onClick={() => (capMode ? exitCap() : enterCap())}
+            aria-label="영역 캡처">
+            <svg viewBox="0 0 24 24"><path d="M3 8V4h4M21 8V4h-4M3 16v4h4M21 16v4h-4" /><rect x="8" y="8" width="8" height="8" strokeDasharray="2.5 2" /></svg>
+          </button>
+        )}
         <button className="vb-tool" onClick={() => zoomBy(1 / 1.2)} aria-label="축소">−</button>
         <button className="vb-tool" onClick={() => zoomBy(1.2)} aria-label="확대">+</button>
         <button className="vb-tool" onClick={() => setSetOpen(true)} aria-label="설정">
@@ -1919,6 +2392,7 @@ export default function VerbatimReader() {
                 </div>
                 {askLog.map((m, i) => (
                   <div key={i} className={"vb-msg " + m.role + (m.live ? " vb-cur" : "")}>
+                    {m.img && <img className="vb-msgimg" src={m.img} alt="오려낸 영역" />}
                     {m.err ? <span className="vb-err">답을 받지 못했습니다 — {m.err}</span> : m.text}
                   </div>
                 ))}
@@ -1992,6 +2466,41 @@ export default function VerbatimReader() {
           </div>
         )}
       </div>
+
+      {/* 영역 캡처 오버레이 — .vb-root 직속이라 position:fixed 가 뷰포트 기준으로 잡힌다 */}
+      {capMode && capBox && (
+        <div className={"vb-cap" + (capBusy ? " busy" : "")}
+          style={{ left: capBox.left, top: capBox.top, width: capBox.width, height: capBox.height }}
+          onPointerDown={capDown} onPointerMove={capMove}
+          onPointerUp={capUp} onPointerCancel={capUp}>
+          {!capSel && <div className="vb-caphint">읽고 싶은 부분을 드래그해서 감싸세요 · Escape 로 나가기</div>}
+          {capSel && (
+            <>
+              <div className="vb-capsel"
+                style={{ left: capSel.x, top: capSel.y, width: capSel.w, height: capSel.h }} />
+              {[["nw", 0, 0], ["ne", 1, 0], ["sw", 0, 1], ["se", 1, 1]].map(([k, cx, cy]) => (
+                <div key={k} className="vb-caph" data-caph={k}
+                  style={{ left: capSel.x + capSel.w * cx - 11, top: capSel.y + capSel.h * cy - 11 }} />
+              ))}
+              <div className="vb-capmenu"
+                style={{
+                  left: Math.max(4, Math.min((capBox.width || 0) - 250, capSel.x + capSel.w / 2 - 125)),
+                  top: capSel.y > 62 ? capSel.y - 58 : capSel.y + capSel.h + 10,
+                }}
+                onPointerDown={(e) => e.stopPropagation()}>
+                <button className="vb-capbtn" disabled={!!capBusy} onClick={() => runCapture("read")}>
+                  {capBusy === "read" ? "읽는 중…" : "해석"}
+                </button>
+                <button className="vb-capbtn" disabled={!!capBusy} onClick={() => runCapture("solve")}>
+                  {capBusy === "solve" ? "읽는 중…" : "문제풀이"}
+                </button>
+                <button className="vb-capbtn ghost" disabled={!!capBusy} onClick={() => setCapSel(null)}>다시</button>
+                <button className="vb-capbtn ghost" disabled={!!capBusy} onClick={exitCap}>닫기</button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
 
       <input ref={fileRef} type="file" accept="application/pdf" style={{ display: "none" }}
         onChange={(e) => { const f = e.target.files?.[0]; if (f) readFile(f); e.target.value = ""; }} />
