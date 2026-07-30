@@ -946,7 +946,13 @@ export default function VerbatimReader() {
     const gap = Math.max(0, Math.round((Date.now() - (st.at || st.t0)) / 1000));
     const who = st.engine ? `${st.engine}${st.model ? " " + st.model.split("/").pop() : ""}` : "";
     const step = st.step ? `${st.step} · ` : "";
-    if (st.phase === "send") return { text: `${step}서버에 요청하는 중 · ${sec}초`, warn: false };
+    /* send 와 wait 는 성격이 다르다. send 는 업스트림 응답 헤더조차 아직 안 온 상태 —
+       아직 배정을 못 받았다는 뜻이다. wait 는 헤더는 왔는데 토큰이 없는 상태로,
+       모델이 실제로 계산 중이다. 시간을 재서 짐작하는 게 아니라 헤더가 왔는지 안 왔는지의
+       구조적 차이라, 라벨만 정확히 갈라 준다.
+       send 에서도 오래 끌면 경고한다 — 배정조차 못 받은 채 45초면 알려야 한다. */
+    if (st.phase === "send")
+      return { text: `${step}차례를 기다리는 중 · ${sec}초`, warn: sec * 1000 >= STALL_WAIT };
     /* 속생각이 흐르는 동안은 답이 한 글자도 안 나오지만 모델은 분명히 살아 있다.
        여기서만은 "느리다"와 "죽었다"를 구분할 수 있으므로 절대 경고하지 않는다. */
     if (st.phase === "think")
@@ -959,7 +965,7 @@ export default function VerbatimReader() {
       return {
         text: warn
           ? `${step}${sec}초째 첫 글자가 오지 않습니다${who ? ` · ${who}` : ""} — 모델이 식었으면 1분까지 걸립니다`
-          : `${step}모델이 답을 시작하기를 기다리는 중 · ${sec}초${who ? ` · ${who}` : ""}`,
+          : `${step}모델이 계산 중 · ${sec}초${who ? ` · ${who}` : ""}`,
         warn,
       };
     }
