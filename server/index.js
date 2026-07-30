@@ -314,7 +314,7 @@ function sseChunk(text) {
   return `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
 }
 
-async function callNIM({ system, user, image, maxTokens, signal, model }) {
+async function callNIM({ system, user, image, history = [], maxTokens, signal, model }) {
   if (!NIM_KEY) throw new Error("NIM 키 없음");
   // 이미지가 있으면 content 를 배열로 보낸다 (OpenAI 표준 멀티모달 형식).
   const content = image
@@ -329,6 +329,7 @@ async function callNIM({ system, user, image, maxTokens, signal, model }) {
       model: model || NIM_MODEL,
       messages: [
         { role: "system", content: system },
+        ...history.map((t) => ({ role: t.role, content: t.text })),
         { role: "user", content },
       ],
       max_tokens: maxTokens,
@@ -343,7 +344,7 @@ async function callNIM({ system, user, image, maxTokens, signal, model }) {
   return res; // 이미 OpenAI 형식 SSE — 그대로 통과시킨다
 }
 
-async function callGemini({ system, user, image, maxTokens, signal }) {
+async function callGemini({ system, user, image, history = [], maxTokens, signal }) {
   if (!GEMINI_KEY) throw new Error("Gemini 키 없음");
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}` +
@@ -356,7 +357,11 @@ async function callGemini({ system, user, image, maxTokens, signal }) {
     headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: system }] },
-      contents: [{ role: "user", parts }],
+      // Gemini 의 어시스턴트 역할 이름은 "model" 이다.
+      contents: [
+        ...history.map((t) => ({ role: t.role === "assistant" ? "model" : "user", parts: [{ text: t.text }] })),
+        { role: "user", parts },
+      ],
       generationConfig: { maxOutputTokens: maxTokens, temperature: 0.3 },
     }),
   });
@@ -395,9 +400,32 @@ async function pipeGemini(upstream, res) {
 /* NIM 이 죽으면 3분간 Gemini 를 먼저 쓴다 (서킷 브레이커) */
 let nimDownUntil = 0;
 
+/* 질문 탭 세션의 이전 대화. 클라이언트가 이미 잘라서 보내지만,
+   프롬프트가 폭주해 요금·지연이 튀지 않도록 서버에서 한 번 더 자른다.
+   이미지는 전부 버린다 — 비전 체인을 타는 이미지는 현재 턴의 image 하나뿐이다.
+   (이전 턴 이미지까지 실으면 텍스트 전용 모델이 받아 삼키지 못하고 400 을 낸다.) */
+const HIST_TURNS = 16;      // 최근 몇 턴까지
+const HIST_TURN_CHARS = 6000;   // 턴 하나의 상한
+const HIST_TOTAL_CHARS = 48000; // 전체 상한
+function trimHistory(h) {
+  if (!Array.isArray(h)) return [];
+  const out = [];
+  for (const t of h.slice(-HIST_TURNS)) {
+    const text = String(t?.text || "").slice(0, HIST_TURN_CHARS).trim();
+    if (!text) continue;
+    out.push({ role: t?.role === "assistant" ? "assistant" : "user", text });
+  }
+  let total = out.reduce((n, t) => n + t.text.length, 0);
+  while (total > HIST_TOTAL_CHARS && out.length > 1) total -= out.shift().text.length;
+  // 첫 턴은 반드시 user 여야 한다 (Gemini 는 model 로 시작하는 대화를 거부한다).
+  while (out.length && out[0].role !== "user") out.shift();
+  return out;
+}
+
 app.post("/api/chat", requireAuth, async (req, res) => {
   const { system = "", user = "", image = "", maxTokens = 1000, forceGemini = false, ask = false, model = "" } = req.body || {};
   if (!user) return res.status(400).json({ error: "user 가 비었습니다." });
+  const history = trimHistory(req.body?.history);
 
   const ac = new AbortController();
   // req 의 'close' 는 본문을 다 읽은 직후에도 발생하므로 쓰면 안 된다.
@@ -406,7 +434,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
   // 프로바이더가 응답하지 않을 때 탭이 영원히 멈추지 않도록 상한을 둔다.
   const signal = AbortSignal.any([ac.signal, AbortSignal.timeout(90_000)]);
-  const args = { system, user, image, maxTokens: Math.min(Number(maxTokens) || 1000, 4000), signal };
+  const args = { system, user, image, history, maxTokens: Math.min(Number(maxTokens) || 1000, 4000), signal };
 
   // 질문 탭은 더 좋은 모델을 쓴다. 클라이언트가 보낸 모델은 허용 목록에 있을 때만 받는다.
   // 그 모델이 죽어 있어도 단어·문장 탭까지 Gemini 로 끌려가지 않도록,
