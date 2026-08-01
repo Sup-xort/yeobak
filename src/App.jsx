@@ -844,25 +844,31 @@ export default function VerbatimReader() {
     })();
   }, [authed]);
 
-  /* 모델 상태 재측정 — 드롭다운을 열 때마다 서버에서 받아온다. 새로 찌를지 말지는 서버가
-     정한다(기록이 60초 넘은 모델만 max_tokens 1 로 프로브). 그래서 매번 불러도 대개는
-     캐시된 값만 즉시 돌아온다.
+  /* 서버에 **저장돼 있는** 모델 상태를 가져온다. 이건 측정을 시키는 게 아니라 읽기다 —
+     서버는 늘 저장값을 즉시 돌려주고, 그게 오래됐으면 응답을 보낸 뒤에 알아서 다시 잰다.
+     그래서 이 호출은 언제 불러도 값싸고(실측 1ms), 새로 잰 값은 다음에 열 때 보인다.
 
-     여기서 어떤 것도 await 하지 않는다 — 드롭다운은 가진 값으로 곧바로 열리고 배지만
-     뒤따라 채워진다. 모델 선택도 질문 전송도 이 값을 참조하지 않으므로, 측정이 통째로
-     실패해도 기능은 그대로 돈다. 스로틀 대신 중복 요청만 막는다(여닫기를 빠르게 반복해도
-     한 번만 나간다). */
+     어떤 것도 await 하지 않는다. 모델 선택도 질문 전송도 이 값을 참조하지 않으므로,
+     통째로 실패해도 배지만 안 뜨고 기능은 그대로 돈다. */
   const healthReq = useRef(false);
   const refreshHealth = () => {
     if (healthReq.current) return; // 이미 받아오는 중
     healthReq.current = true;
     setHealthBusy(true);
-    fetch("/api/models?probe=1")
+    fetch("/api/models")
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => { if (j?.health) setHealth(j.health); })
       .catch(() => {})
       .finally(() => { healthReq.current = false; setHealthBusy(false); });
   };
+
+  /* 드롭다운이 열려 있는 동안만 저장값을 2초마다 다시 읽는다. 읽기는 2ms 짜리라 부담이
+     없고, 서버가 뒤에서 다시 재고 있는 값이 보고 있는 사이에 채워진다. 닫으면 멈춘다. */
+  useEffect(() => {
+    if (!mdlMenuOpen) return;
+    const t = setInterval(refreshHealth, 2000);
+    return () => clearInterval(t);
+  }, [mdlMenuOpen]);
 
   /* 상태 한 줄 요약. 판단이 애매하면 아무 말도 안 하는 쪽을 고른다 —
      멀쩡한 모델을 "붐빈다"고 적어 두는 게 제일 나쁘다(note 에서 수치를 걷어낸 이유). */

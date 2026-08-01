@@ -202,10 +202,13 @@ function requireAuth(req, res, next) {
      최소 요청을 병렬로 던진다. 스트리밍 핫패스와 무관한 별도 호출이라 안전하다. */
 const health = new Map(); // id → { ok, status, at, ms }
 const HEALTH_TTL = 60 * 1000; // 이보다 최근 기록이 있으면 다시 찌르지 않는다
+const probing = new Set();    // 지금 찌르고 있는 모델 — 겹쳐 부르지 않는다
 const markHealth = (id, ok, status = 0, ms = 0) =>
   health.set(id, { ok, status, at: Date.now(), ms });
 
 async function probe(id) {
+  if (probing.has(id)) return;
+  probing.add(id);
   const t0 = Date.now();
   try {
     const r = await fetch(`${NIM_BASE}/chat/completions`, {
@@ -221,23 +224,31 @@ async function probe(id) {
        (note 에서 걷어낸 그 잘못을 배지에서 되풀이하는 셈). -1 은 "느리다"까지만 말한다.
        덤으로 이 프로브가 콜드스타트를 깨워 두기도 한다. */
     markHealth(id, false, e.name === "TimeoutError" ? -1 : 0, Date.now() - t0);
+  } finally {
+    probing.delete(id);
   }
 }
 
-/* 질문 탭에서 고를 수 있는 모델 목록. ?probe=1 이면 오래된 기록을 새로 잰다. */
-app.get("/api/models", requireAuth, async (req, res) => {
-  if (req.query.probe && NIM_KEY) {
-    const stale = ASK_MODELS
-      .map((m) => m.id)
-      .filter((id) => Date.now() - (health.get(id)?.at || 0) > HEALTH_TTL);
-    await Promise.all(stale.map(probe)); // 8초 상한이 걸려 있어 여기서 오래 잡히지 않는다
-  }
+/* 오래된 기록만 뒤에서 다시 잰다. **await 하지 않는 게 요점이다** — 값을 읽는 쪽은
+   측정이 끝나기를 기다리지 않고 늘 저장값을 즉시 받는다. 새로 잰 값은 그다음 읽을 때
+   보인다. 아무도 앱을 안 쓰면 재지도 않으므로 놀고 있는 서버가 API 를 계속 두드리지도
+   않는다(고정 주기로 도는 타이머를 안 두는 이유). */
+function refreshStale() {
+  if (!NIM_KEY) return;
+  for (const m of ASK_MODELS)
+    if (Date.now() - (health.get(m.id)?.at || 0) > HEALTH_TTL) probe(m.id);
+}
+
+/* 질문 탭에서 고를 수 있는 모델 목록 + 저장된 상태값.
+   이 라우트는 **읽기 전용이다.** 측정을 기다리는 일이 절대 없다. */
+app.get("/api/models", requireAuth, (_req, res) => {
   res.json({
     models: ASK_MODELS,
     default: NIM_ASK_MODEL,
     fast: NIM_MODEL,
     health: Object.fromEntries(health),
   });
+  refreshStale(); // 응답을 보낸 뒤에 시작한다 — 이 줄이 응답을 늦출 여지조차 없게
 });
 
 /* ───────────────── 서재 (PDF 보관함) ─────────────────
@@ -947,4 +958,6 @@ app.listen(PORT, "0.0.0.0", () => {
   console.log(`[여백] http://0.0.0.0:${PORT}  엔진: ${NIM_KEY ? NIM_MODEL : "(NIM 없음)"} → ${GEMINI_KEY ? GEMINI_MODEL : "(Gemini 없음)"}`);
   console.log(`[여백] 질문 탭 기본 모델: ${NIM_ASK_MODEL}${ASK_MODEL_IDS.has(NIM_ASK_MODEL) ? "" : "  ← 허용 목록에 없음(ASK_MODELS 확인)"}`);
   console.log(`[여백] 영역 캡처 비전 모델: ${VISION_CHAIN.join(" → ")}`);
+  // 켜자마자 한 번 재 둔다 — 첫 사용자가 빈 값을 안 보게. 여기서도 await 하지 않는다.
+  refreshStale();
 });
