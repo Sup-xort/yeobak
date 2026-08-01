@@ -844,26 +844,33 @@ export default function VerbatimReader() {
     })();
   }, [authed]);
 
-  /* 모델 상태 재측정 — ?probe=1 은 기록이 60초 넘게 오래된 모델만 max_tokens 1 로 찔러 본다.
-     절대 await 해서 UI 를 막지 않는다. 드롭다운은 가진 값으로 곧바로 열리고, 응답이 오면
-     배지만 갱신된다. 실패하면 그냥 아무 배지도 안 뜬다 — 기능은 그대로 돌아간다. */
-  const healthAt = useRef(0);
+  /* 모델 상태 재측정 — 드롭다운을 열 때마다 서버에서 받아온다. 새로 찌를지 말지는 서버가
+     정한다(기록이 60초 넘은 모델만 max_tokens 1 로 프로브). 그래서 매번 불러도 대개는
+     캐시된 값만 즉시 돌아온다.
+
+     여기서 어떤 것도 await 하지 않는다 — 드롭다운은 가진 값으로 곧바로 열리고 배지만
+     뒤따라 채워진다. 모델 선택도 질문 전송도 이 값을 참조하지 않으므로, 측정이 통째로
+     실패해도 기능은 그대로 돈다. 스로틀 대신 중복 요청만 막는다(여닫기를 빠르게 반복해도
+     한 번만 나간다). */
+  const healthReq = useRef(false);
   const refreshHealth = () => {
-    if (Date.now() - healthAt.current < 20_000) return; // 여닫기를 반복해도 안 쏟아지게
-    healthAt.current = Date.now();
+    if (healthReq.current) return; // 이미 받아오는 중
+    healthReq.current = true;
     setHealthBusy(true);
     fetch("/api/models?probe=1")
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => { if (j?.health) setHealth(j.health); })
       .catch(() => {})
-      .finally(() => setHealthBusy(false));
+      .finally(() => { healthReq.current = false; setHealthBusy(false); });
   };
 
   /* 상태 한 줄 요약. 판단이 애매하면 아무 말도 안 하는 쪽을 고른다 —
      멀쩡한 모델을 "붐빈다"고 적어 두는 게 제일 나쁘다(note 에서 수치를 걷어낸 이유). */
   const healthOf = (id) => {
     const h = health[id];
-    if (!h) return healthBusy ? { cls: "wait", text: "확인 중" } : null;
+    // 아직 값이 없으면 재는 중이라고만 말한다. 재고 있지도 않은데 "측정 중"이라 적으면
+    // 영영 안 바뀌는 문구가 되므로, 그때는 배지를 아예 안 띄운다.
+    if (!h) return healthBusy ? { cls: "wait", text: "측정 중" } : null;
     if (h.ok) return h.ms > 4000 ? { cls: "busy", text: "혼잡" } : { cls: "ok", text: "정상" };
     if (h.status >= 429) return { cls: "jam", text: "붐빔" };    // 529 Overloaded 등
     if (h.status === -1) return { cls: "busy", text: "느림" };   // 8초 안에 무응답 — 콜드스타트일 수 있다
@@ -3914,9 +3921,12 @@ export default function VerbatimReader() {
                     <div style={{ position: "relative", marginLeft: "auto" }}>
                       <button className={"vb-mdlbtn" + (mdlMenuOpen ? " open" : "")}
                         onClick={() => {
-                          // 열기는 곧바로 하고 측정은 뒤따라 붙는다 — await 하지 않는다
-                          setMdlMenuOpen((v) => { if (!v) refreshHealth(); return !v; });
+                          // 열기는 곧바로 하고 측정은 뒤따라 붙는다 — await 하지 않는다.
+                          // refreshHealth 를 setState 업데이터 안에 넣으면 안 된다(순수해야 한다).
+                          const opening = !mdlMenuOpen;
+                          setMdlMenuOpen(opening);
                           setSessMenuOpen(false);
+                          if (opening) refreshHealth();
                         }}>
                         {cfg.askModel ? (models.find((m) => m.id === cfg.askModel)?.label || "모델") : `기본${defLabel ? " — " + defLabel : ""}`}
                         <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
