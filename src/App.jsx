@@ -125,7 +125,7 @@ async function readSSE(res, pick, onDelta, onThink) {
   if (!ct.includes("event-stream")) {
     const j = await res.json();
     const t = pick.whole(j);
-    if (t) onDelta(t);
+    if (t) onDelta?.(t);
     return t;
   }
   const reader = res.body.getReader();
@@ -144,7 +144,7 @@ async function readSSE(res, pick, onDelta, onThink) {
       let j;
       try { j = JSON.parse(raw); } catch { continue; }
       const t = pick.delta(j);
-      if (t) { out += t; onDelta(t); }
+      if (t) { out += t; onDelta?.(t); }
       // 추론 모델의 속생각. 화면에는 안 쓰지만 "살아 있다"는 유일한 증거다.
       const k = pick.think?.(j);
       if (k) onThink?.(k);
@@ -201,7 +201,8 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
   const text = await readSSE(res, PICK_OPENAI, (c) => {
     if (first) { first = false; opts.onPhase?.("stream", { engine, model }); }
     opts.onPhase?.("tick");
-    onDelta(c);
+    // 스트림을 화면에 안 뿌리는 호출자(이름 정리처럼 결과 전체만 쓰는 쪽)는 onDelta 를 안 넘긴다
+    onDelta?.(c);
   }, (k) => {
     // 속생각이 흐르는 동안은 답이 한 글자도 안 나온다. 그래도 모델은 일하고 있다.
     think += k.length;
@@ -322,6 +323,27 @@ const SYS_ASK = `너는 한국 대학생이 읽고 있는 문서를 함께 보�
 본문에 없는 내용은 추측이라고 밝힌다. 인사말 없이 바로 답한다.
 ${FMT_RICH}`;
 
+/* ── 이름 정리 프롬프트 ──
+   서재의 여러 문서 이름을 사용자가 말한 형식으로 한 번에 맞춘다. 모델은 파일을 건드리지 않고
+   "제안"만 JSON 으로 내놓는다 — 실제 변경은 사용자가 미리보기에서 확인하고 누를 때 일어난다.
+   지어내기를 막는 줄("근거가 없으면 현재 이름 그대로")이 핵심이다. 회차 번호를 상상해서 붙이면
+   겉보기엔 그럴듯한데 전부 틀린 이름이 한꺼번에 박힌다. */
+const SYS_RENAME = `너는 사용자의 문서 서재를 정리하는 사서다.
+사용자가 원하는 이름 형식과 문서 목록(현재 이름 + 첫 쪽 본문 일부)을 받는다.
+
+규칙:
+- JSON 만 출력한다. 설명·인사·코드펜스 금지.
+- 형식: {"names":[{"i":0,"name":"새 이름"},{"i":1,"name":"새 이름"}]}
+- i 는 입력에 적힌 번호를 그대로 쓴다. 목록의 모든 문서를 빠짐없이 포함한다.
+- 확장자(.pdf)는 붙이지 않는다.
+- / \\ : * ? " < > | 문자는 쓰지 않는다. 이름은 80자를 넘기지 않는다.
+- 현재 이름과 첫 쪽 본문에 실제로 있는 정보만 쓴다. 회차·주차·장 번호를 지어내지 않는다.
+  근거가 없으면 현재 이름을 그대로 name 에 넣는다.
+- 사용자가 말한 종류에 해당하지 않는 문서는 형식을 억지로 맞추지 말고 현재 이름을 그대로 둔다.
+  예를 들어 강의 노트 형식을 요청했는데 그 문서가 교재·문제지·시험지·논문이면 건드리지 않는다.
+  전체를 다 바꾸는 것보다 아닌 것을 안 바꾸는 쪽이 중요하다.
+- 사용자가 말한 형식을 모든 문서에 같은 방식으로 적용한다.`;
+
 /* ── 영역 캡처 프롬프트 ──
    "해석"은 비전 모델이 한 번에 처리하고, "문제풀이"는 두 단계로 나눈다:
    비전 모델이 눈 역할로 옮겨적고(SYS_CAP_OCR), 실제 추론은 질문 탭 모델(DeepSeek 등)이 한다.
@@ -421,6 +443,14 @@ export default function VerbatimReader() {
   const [docRenameId, setDocRenameId] = useState(""); // 카드에서 인라인으로 이름 바꾸는 중인 문서
   const [docRenameVal, setDocRenameVal] = useState("");
   const [folDragId, setFolDragId] = useState(""); // 사이드바에서 드래그 정렬 중인 폴더 id (파일 드래그 dragId 와 별개)
+  /* ── 이름 정리 ── 모델은 제안만 하고, 실제 변경은 미리보기에서 "적용"을 눌러야 일어난다 */
+  const [renOpen, setRenOpen] = useState(false);
+  const [renPrompt, setRenPrompt] = useState("");
+  const [renBusy, setRenBusy] = useState("");   // "" 아니면 진행 단계 문구
+  const [renErr, setRenErr] = useState("");
+  const [renRows, setRenRows] = useState(null); // null = 아직 제안 전, 배열 = 미리보기
+  const [renTargets, setRenTargets] = useState([]); // 버튼 누른 순간의 대상 목록(스냅샷)
+  const renAbort = useRef(null);
   /* 표지 비율 캐시 {id: w/h}. f.ratio 는 나중에 추가된 필드라 예전 문서엔 없는데,
      그 문서를 열기 전까지는 서버가 비율을 모른다 — 그림이 뜨는 순간 naturalWidth 로 직접 잰다. */
   const [thumbRatio, setThumbRatio] = useState({});
@@ -1006,6 +1036,163 @@ export default function VerbatimReader() {
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("이름을 바꾸지 못했습니다.");
     }
+  };
+
+  /* ── 이름 정리 ──────────────────────────────────────────────────────────
+     흐름: 대상 스냅샷 → 각 문서 첫 쪽 본문 모으기 → 모델에 형식 지시와 함께 넘기기
+     → JSON 제안 파싱 → 미리보기(수정·제외 가능) → 적용. 모델은 파일을 직접 못 건드린다. */
+  const REN_MAX = 40; // 한 번에 다루는 문서 수 상한 — 넘으면 응답이 길어져 JSON 이 잘린다
+
+  /* 모델 답에서 이름 목록을 건져낸다. 프롬프트로 "JSON 만" 이라고 못박아도 코드펜스로 감싸거나
+     {"names":…} 를 빼고 배열만 주는 경우가 있어서, 되는 해석을 차례로 시도한다. */
+  const parseNameJSON = (out) => {
+    let s = String(out || "").trim();
+    const fence = s.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fence) s = fence[1].trim();
+    const cand = [];
+    const a = s.indexOf("{"), b = s.lastIndexOf("}");
+    if (a >= 0 && b > a) cand.push(s.slice(a, b + 1));   // {"names":[…]}
+    const c = s.indexOf("["), d = s.lastIndexOf("]");
+    if (c >= 0 && d > c) cand.push(s.slice(c, d + 1));   // […] 만 준 경우
+    for (const t of cand) {
+      try {
+        const j = JSON.parse(t);
+        const list = Array.isArray(j) ? j : j?.names;
+        if (Array.isArray(list)) return list;
+      } catch {}
+    }
+    return null;
+  };
+
+  /* 모델이 준 이름을 그대로 믿지 않는다. 제어문자·경로문자 제거, 길이 제한,
+     확장자는 모델 출력이 아니라 원래 이름을 따라간다(서재에 .pdf 붙은 이름과 안 붙은 이름이 섞여 있다). */
+  const cleanRenamed = (raw, orig) => {
+    const ext = /\.pdf$/i.test(orig) ? orig.slice(orig.lastIndexOf(".")) : "";
+    let n = String(raw || "")
+      .replace(/[\u0000-\u001f\u007f/\\:*?"<>|]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/\.pdf$/i, "")
+      .trim()
+      .slice(0, 80)
+      .trim();
+    return n ? n + ext : orig;
+  };
+
+  /* 이름 지을 근거로 쓸 앞쪽 본문 — 검색 인덱스에 있으면 그걸 쓰고(대부분), 한 번도 안 연
+     문서일 때만 PDF 를 받아 pdf.js 로 직접 뽑는다. 뷰어의 pdfRef 는 건드리지 않는 별도 문서다.
+     1쪽만 보지 않는 이유는 표지가 이미지 한 장이라 글자가 하나도 없는 문서가 흔해서다
+     (실제로 서재 문서 하나가 그랬다) — 앞 3쪽 중 처음으로 글자가 있는 쪽을 쓴다. */
+  const firstPageText = async (f) => {
+    const pick = (pages) => (pages || []).find((t) => t && t.trim()) || "";
+    try {
+      const r = await libApi(`/api/library/file/${f.id}/text?pages=3`);
+      const t = pick((await r.json()).pages);
+      if (t) return t;
+    } catch {}
+    try {
+      const r = await libApi("/api/library/file/" + f.id);
+      const buf = await r.arrayBuffer();
+      const pdf = await window.pdfjsLib.getDocument({
+        data: new Uint8Array(buf), cMapUrl: CDN + "cmaps/", cMapPacked: true,
+      }).promise;
+      const pages = [];
+      for (let n = 1; n <= Math.min(3, pdf.numPages); n++) {
+        const tc = await (await pdf.getPage(n)).getTextContent();
+        pages.push(tc.items.map((i) => i.str).join(" "));
+      }
+      pdf.destroy?.();
+      return pick(pages);
+    } catch { return ""; }
+  };
+
+  const openRename = (files) => {
+    setRenTargets(files.slice(0, REN_MAX));
+    setRenRows(null); setRenBusy(""); setRenOpen(true);
+    // 조용히 잘라내면 "몇 개는 왜 안 바뀌었지"가 된다 — 잘렸다는 사실을 카드에 남긴다
+    setRenErr(files.length > REN_MAX
+      ? `문서가 ${files.length}개라 앞의 ${REN_MAX}개만 다룹니다. 나머지는 한 번 더 실행해 주세요.`
+      : "");
+  };
+
+  const closeRename = () => {
+    renAbort.current?.abort();
+    setRenOpen(false); setRenRows(null); setRenBusy(""); setRenErr("");
+  };
+
+  const suggestNames = async () => {
+    const files = renTargets;
+    if (!files.length || !renPrompt.trim()) return;
+    renAbort.current?.abort();
+    const ac = new AbortController();
+    renAbort.current = ac;
+    setRenErr(""); setRenRows(null);
+    try {
+      setRenBusy(`문서 ${files.length}개의 첫 쪽을 읽는 중…`);
+      const texts = [];
+      for (let i = 0; i < files.length; i++) {
+        if (ac.signal.aborted) return;
+        setRenBusy(`첫 쪽을 읽는 중… ${i + 1}/${files.length}`);
+        texts.push((await firstPageText(files[i])).replace(/\s+/g, " ").trim().slice(0, 600));
+      }
+      if (ac.signal.aborted) return;
+
+      const body = files.map((f, i) =>
+        `${i}. 현재 이름: ${f.name}\n   첫 쪽: ${texts[i] || "(본문을 읽지 못했습니다)"}`).join("\n\n");
+      setRenBusy("이름을 제안받는 중…");
+      /* 토큰 예산을 크게 잡는 이유 — max_tokens 는 답(content)만이 아니라 추론 모델의
+         속생각(reasoning)까지 함께 깎는다. 문서 4개짜리 실측에서 속생각만 2100~3100자
+         (대략 700~1000토큰)를 먼저 쓰고 답은 그 뒤에 나왔다. 1980 을 줬더니 답이 중간에
+         잘렸고, 3000 부터 완주했다. 그래서 기본을 3000 으로 두고 문서 수만큼 더 얹는다. */
+      const out = await ask(SYS_RENAME,
+        `[원하는 형식]\n${renPrompt.trim()}\n\n[문서 ${files.length}개]\n${body}`,
+        undefined, ac.signal, { maxTokens: Math.min(8000, 3000 + files.length * 150) });
+      if (ac.signal.aborted) return;
+
+      const list = parseNameJSON(out);
+      if (!list) throw new Error(out.trim()
+        ? `형식을 알아볼 수 없는 답이 왔습니다 — ${out.trim().slice(0, 120)}`
+        : "모델이 빈 답을 보냈습니다. 문서 수를 줄이고 다시 시도해 주세요.");
+
+      const byIdx = new Map(list.map((x) => [Number(x?.i), x?.name]));
+      const rows = files.map((f, i) => {
+        const name = cleanRenamed(byIdx.get(i), f.name);
+        return { id: f.id, from: f.name, name, same: name === f.name };
+      });
+      if (rows.every((r) => r.same)) {
+        setRenErr("바꿀 이름을 찾지 못했습니다. 원하는 형식을 조금 더 구체적으로 적어보세요.");
+        setRenBusy(""); return;
+      }
+      setRenRows(rows);
+      setRenBusy("");
+    } catch (e) {
+      if (e.name === "AbortError" || ac.signal.aborted) return;
+      setRenBusy("");
+      setRenErr(e.name === "AuthError" ? "" : (e.message || "제안을 받지 못했습니다."));
+    }
+  };
+
+  const applyRename = async () => {
+    const todo = (renRows || []).filter((r) => r.name.trim() && r.name.trim() !== r.from);
+    if (!todo.length) { closeRename(); return; }
+    setRenBusy(`이름을 바꾸는 중… 0/${todo.length}`);
+    let done = 0, failed = 0;
+    for (const r of todo) {
+      try {
+        await libApi("/api/library/file/" + r.id, {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: r.name.trim() }),
+        });
+        done++;
+      } catch (e) {
+        if (e.name === "AuthError") return;
+        failed++;
+      }
+      setRenBusy(`이름을 바꾸는 중… ${done + failed}/${todo.length}`);
+    }
+    await refreshLib();
+    setRenOpen(false); setRenRows(null); setRenBusy("");
+    if (failed) setLibErr(`${done}개를 바꿨고 ${failed}개는 실패했습니다.`);
   };
 
   /* 사이드바 폴더 드래그 정렬 — 로컬 배열을 먼저 낙관적으로 바꿔 즉시 반응하게 하고,
@@ -2068,7 +2255,7 @@ export default function VerbatimReader() {
   useEffect(() => {
     const onKey = (e) => {
       if (["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
-      if (e.key === "Escape") { setSheetOpen(false); setOutOpen(false); setSetOpen(false); }
+      if (e.key === "Escape") { setSheetOpen(false); setOutOpen(false); setSetOpen(false); closeRename(); }
       if (!pdfRef.current) return;
       if (e.key === "ArrowRight" || e.key === "PageDown") { e.preventDefault(); scrollToPage(Math.min(numPages, curRef.current + 1)); }
       if (e.key === "ArrowLeft" || e.key === "PageUp") { e.preventDefault(); scrollToPage(Math.max(1, curRef.current - 1)); }
@@ -3099,6 +3286,14 @@ export default function VerbatimReader() {
                 }} aria-label="다크 모드" title="다크 모드">
                   {theme === "dark" ? "☀" : "☾"}
                 </button>
+                {/* 이름 정리 — 지금 보고 있는 목록(폴더 안이면 그 폴더)의 이름을 한 번에 맞춘다 */}
+                {(libView === "recent" ? recentFiles : shownFiles).length > 1 && (
+                  <button className="vb-libbtn"
+                    onClick={() => openRename(libView === "recent" ? recentFiles : shownFiles)}
+                    aria-label="이름 정리" title="이름 정리">
+                    <svg viewBox="0 0 24 24"><path d="M20.6 13.4l-7.2 7.2a2 2 0 01-2.8 0l-7-7A2 2 0 013 12.2V5a2 2 0 012-2h7.2a2 2 0 011.4.6l7 7a2 2 0 010 2.8z" /><circle cx="7.8" cy="7.8" r="1.4" /></svg>
+                  </button>
+                )}
                 <button className="vb-libbtn" onClick={() => setSetOpen(true)} aria-label="설정" title="설정">
                   <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 00.3 1.8 2 2 0 11-2.8 2.8 1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5 2 2 0 11-4 0 1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3 2 2 0 11-2.8-2.8 1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1 2 2 0 110-4 1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8 2 2 0 112.8-2.8 1.6 1.6 0 001.8.3 1.6 1.6 0 001-1.5 2 2 0 114 0 1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3 2 2 0 112.8 2.8 1.6 1.6 0 00-.3 1.8 1.6 1.6 0 001.5 1 2 2 0 110 4 1.6 1.6 0 00-1.5 1z" /></svg>
                 </button>
@@ -3735,6 +3930,76 @@ export default function VerbatimReader() {
                 </div>
               )}
               <button className="vb-done" onClick={() => { persist(); setSetOpen(false); }}>닫기</button>
+            </div>
+          </div>
+        )}
+
+        {/* 이름 정리 — 형식을 적어 제안을 받고, 미리보기에서 고치거나 빼고, 적용을 눌러야 반영된다 */}
+        {renOpen && (
+          <div className="vb-modal" onClick={(e) => { if (e.target === e.currentTarget && !renBusy) closeRename(); }}>
+            <div className="vb-card ren">
+              <h3>이름 정리</h3>
+              {!renRows ? (
+                <>
+                  <p className="vb-sub">
+                    지금 보고 있는 문서 {renTargets.length}개의 이름을 원하는 형식으로 맞춥니다.
+                    각 문서의 첫 쪽을 읽어 제목을 찾고 <b>제안만</b> 보여줍니다 — 확인하고 적용을 눌러야 실제로 바뀝니다.
+                  </p>
+                  <div className="vb-field">
+                    <label>원하는 형식</label>
+                    <textarea className="vb-rentext" rows={3} autoFocus value={renPrompt}
+                      disabled={!!renBusy}
+                      onChange={(e) => setRenPrompt(e.target.value)}
+                      placeholder={'예: 논리회로 강의 노트들이야. "논리회로 3주차 — 카르노맵"처럼 과목·주차·주제 순으로 통일해줘'} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="vb-sub">
+                    {renRows.filter((r) => !r.same).length}개를 바꿉니다. 이름을 직접 고칠 수 있고,
+                    ✕ 로 뺀 문서는 그대로 둡니다.
+                  </p>
+                  <div className="vb-renlist">
+                    {renRows.map((r) => {
+                      const f = lib.files.find((x) => x.id === r.id);
+                      return (
+                        <div className={"vb-renrow" + (r.same ? " same" : "")} key={r.id}>
+                          <div className="vb-renthumb">
+                            {f?.thumb ? (
+                              <img src={"/api/library/thumb/" + r.id} alt="" loading="lazy" />
+                            ) : (
+                              <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6" /></svg>
+                            )}
+                          </div>
+                          <div className="vb-rencol">
+                            <input className="vb-reninput" value={r.name}
+                              onChange={(e) => setRenRows((rs) => rs.map((x) =>
+                                x.id === r.id ? { ...x, name: e.target.value, same: e.target.value === x.from } : x))} />
+                            <div className="vb-renfrom" title={r.from}>
+                              {r.same ? "그대로" : r.from}
+                            </div>
+                          </div>
+                          <button className="vb-ib" aria-label="목록에서 빼기" title="목록에서 빼기"
+                            onClick={() => setRenRows((rs) => rs.filter((x) => x.id !== r.id))}>✕</button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+              {renBusy && <div className="vb-renbusy">{renBusy}</div>}
+              {renErr && <div className="vb-err">{renErr}</div>}
+              <div className="vb-renfoot">
+                <button className="vb-libbtn" onClick={closeRename}>취소</button>
+                {!renRows ? (
+                  <button className="vb-libbtn pri" disabled={!renPrompt.trim() || !!renBusy}
+                    onClick={suggestNames}>제안받기</button>
+                ) : (
+                  <button className="vb-libbtn pri"
+                    disabled={!!renBusy || !renRows.some((r) => !r.same)}
+                    onClick={applyRename}>적용</button>
+                )}
+              </div>
             </div>
           </div>
         )}

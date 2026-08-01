@@ -267,6 +267,22 @@ app.patch("/api/library/file/:id", requireAuth, (req, res) => {
   res.json(f);
 });
 
+/* 이름 정리(서재 헤더의 이름표 버튼)가 쓰는 앞쪽 본문 — 검색 인덱스에 이미 있으면 그걸 준다.
+   한 번도 안 연 문서는 인덱스가 없어 404 가 나가고, 클라이언트가 그때만 PDF 를 받아
+   pdf.js 로 직접 뽑는다(서버엔 pdfjs-dist 가 없다 — 아래 주석 참고). */
+app.get("/api/library/file/:id/text", requireAuth, (req, res) => {
+  const f = lib.files.find((x) => x.id === req.params.id);
+  if (!f) return res.status(404).json({ error: "없는 파일입니다." });
+  let pages;
+  try {
+    pages = JSON.parse(fs.readFileSync(path.join(TEXT_DIR, f.id + ".json"), "utf8"));
+  } catch {
+    return res.status(404).json({ error: "본문 인덱스가 없습니다." });
+  }
+  const n = Math.max(1, Math.min(5, Number(req.query.pages) || 1));
+  res.json({ pages: (Array.isArray(pages) ? pages : []).slice(0, n) });
+});
+
 /* 서재 검색 인덱스 갱신 — 클라이언트가 문서를 열어 pdf.js 로 본문을 다 뽑으면
    (App.jsx extractAll) 페이지별 텍스트 배열을 여기로 올린다. 서버는 pdf-lib 만 있고
    pdfjs-dist 는 없어서 서버 자체 추출은 하지 않는다 — 열어본 문서만 검색되는 대신
@@ -712,7 +728,9 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 
   // 프로바이더가 응답하지 않을 때 탭이 영원히 멈추지 않도록 상한을 둔다.
   const signal = AbortSignal.any([ac.signal, AbortSignal.timeout(90_000)]);
-  const args = { system, user, image, history, maxTokens: Math.min(Number(maxTokens) || 1000, 4000), signal };
+  // 상한 8000 — 추론 모델은 max_tokens 안에서 속생각(reasoning)까지 함께 쓰기 때문에,
+  // 이름 정리처럼 긴 구조화 출력이 필요한 호출은 4000 으로는 답이 통째로 잘린다.
+  const args = { system, user, image, history, maxTokens: Math.min(Number(maxTokens) || 1000, 8000), signal };
 
   // 질문 탭은 더 좋은 모델을 쓴다. 클라이언트가 보낸 모델은 허용 목록에 있을 때만 받는다.
   // 그 모델이 죽어 있어도 단어·문장 탭까지 Gemini 로 끌려가지 않도록,

@@ -698,11 +698,47 @@
 .vb-lsub{font-size:12px;line-height:1.5;color:var(--t-muted);padding-left:12px;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 
-.vb-modal{position:absolute;inset:0;z-index:50;background:rgba(20,19,18,.92);display:flex;
+/* 모달 스크림 — 답변 표면(.vb-scrim)과 같은 농도. 불투명하게 덮으면 아래 카드에
+   유리 질감을 줘도 뒤에 비칠 게 없어 그냥 어두운 판이 된다. */
+.vb-modal{position:absolute;inset:0;z-index:50;background:rgba(10,9,8,.34);display:flex;
   align-items:center;justify-content:center;padding:24px}
 .vb-card{width:min(440px,100%);background:var(--desk2);border:1px solid var(--line);
   border-radius:16px;padding:22px;max-height:86%;overflow-y:auto}
+/* 모달 카드는 답변 표면(.vb-surf)과 같은 유리 질감. 로그인 화면의 .vb-card 는
+   스크림 위가 아니라 맨바닥에 놓이므로 여기서 제외한다(.vb-modal 하위로 한정). */
+.vb-modal .vb-card{background:var(--t-glass);
+  backdrop-filter:blur(26px) saturate(1.35);-webkit-backdrop-filter:blur(26px) saturate(1.35);
+  border-color:var(--t-line2);box-shadow:var(--t-shadow)}
 .vb-card h3{margin:0 0 4px;font-size:17px;font-weight:650}
+/* ── 이름 정리 카드 ──
+   미리보기 한 줄 = [썸네일][고칠 수 있는 이름 + 원래 이름][✕ 빼기]. 목록만 스크롤되고
+   머리말·바닥 버튼은 제자리에 있도록 카드를 세로 flex 로 잡는다. */
+.vb-card.ren{width:min(620px,100%);display:flex;flex-direction:column;overflow:hidden}
+.vb-rentext{width:100%;padding:11px;border-radius:10px;border:1px solid var(--line);
+  background:var(--t-input);color:var(--t-ink);font-size:15px;line-height:1.6;outline:none;
+  font-family:inherit;resize:vertical}
+.vb-rentext:disabled{opacity:.55}
+.vb-renlist{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;margin:0 -4px;padding:0 4px}
+.vb-renrow{display:flex;align-items:center;gap:11px;padding:7px 0}
+.vb-renrow+.vb-renrow{border-top:1px solid var(--line)}
+.vb-renrow.same{opacity:.5}
+/* 썸네일은 서재 카드와 같은 규칙(원본 비율대로 contain, 종이만 흰색) — 다만 자리가 작아 고정 칸 */
+.vb-renthumb{flex:0 0 auto;width:38px;height:48px;border-radius:3px;background:#FFFEFB;
+  display:flex;align-items:center;justify-content:center;overflow:hidden;
+  box-shadow:0 1px 2px rgba(21,19,15,.2)}
+.vb-renthumb img{width:100%;height:100%;object-fit:contain;display:block}
+.vb-renthumb svg{width:18px;height:18px;stroke:#8C877C;fill:none;stroke-width:1.5;
+  stroke-linecap:round;stroke-linejoin:round}
+.vb-rencol{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.vb-reninput{width:100%;padding:7px 9px;border-radius:8px;border:1px solid var(--line);
+  background:var(--t-input);color:var(--t-ink);font-size:14px;outline:none;font-family:inherit}
+.vb-reninput:focus{border-color:var(--t-line2)}
+/* 바뀌기 전 이름 — 무엇이 어떻게 바뀌는지 보이지 않으면 미리보기가 의미가 없다 */
+.vb-renfrom{font-size:11.5px;color:var(--t-faint);white-space:nowrap;overflow:hidden;
+  text-overflow:ellipsis;padding-left:2px}
+.vb-renbusy{margin-top:14px;font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums}
+.vb-renfoot{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;flex:0 0 auto}
 .vb-sub{margin:0 0 18px;font-size:13px;color:var(--muted);line-height:1.65}
 .vb-field{margin-bottom:16px}
 .vb-field label{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
