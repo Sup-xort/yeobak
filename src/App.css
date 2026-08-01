@@ -1,0 +1,769 @@
+.vb-root{--desk:#201F1D;--desk2:#2A2926;--desk3:#38362F;--paper:#FDFDFC;
+  --muted:var(--t-muted);--mark:#FFD84D;--mark2:var(--t-mark2);--line:var(--t-line);
+  --sans:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",Pretendard,"Noto Sans KR","Segoe UI",system-ui,sans-serif;
+  --serif:"Iowan Old Style",Charter,"Palatino Linotype",Georgia,"Times New Roman",serif;
+  /* ── 테마 토큰 ──
+     기본값(아래)은 다크; .light 클래스가 라이트 값으로 덮어쓴다.
+     --muted/--line/--mark2 는 --t-* 를 그대로 가리키는 별칭이라 여기서 따로 덮어쓰지 않는다.
+     영역 캡처 오버레이(.vb-cap*)와 확대 배율 표시(.vb-zoompill)만은 늘 다크로 고정한다 —
+     캡처는 전체를 다크 스크림으로 덮은 위에 뜨는 도구모음이라 테마와 무관하게 대비가 필요하다. */
+  --t-bg:#1A1917;--t-desk:#161513;--t-bar:rgba(26,25,23,.92);
+  --t-ink:#F1EFE9;--t-sub:#D6D2CA;--t-muted:#8E8A81;--t-faint:#5F5B54;
+  --t-line:rgba(255,255,255,.09);--t-line2:rgba(255,255,255,.14);--t-lineSoft:rgba(255,255,255,.06);
+  --t-glass:rgba(26,25,23,.66);--t-fill:rgba(255,255,255,.06);
+  --t-input:rgba(0,0,0,.22);--t-menu:#232220;
+  --t-accBg:rgba(255,216,77,.10);--t-accBd:rgba(255,216,77,.24);--t-accInk:#D9BC55;--t-accTx:#F1EFE9;
+  --t-star:#FFD84D;--t-mark2:#6FD3C0;--t-qBg:#FFD84D;--t-qInk:#241F00;
+  --t-statBg:rgba(255,255,255,.05);--t-statBd:rgba(255,255,255,.09);
+  --t-warnBg:rgba(228,113,63,.14);--t-warnBd:rgba(228,113,63,.4);--t-warnFg:#FFB9A3;--t-warnSub:#E4B8AE;--t-warnDot:#FF9A8A;
+  --t-stopBg:#FF9A8A;--t-stopFg:#2A1512;--t-engBg:rgba(255,216,77,.16);--t-engFg:#E0C568;
+  --t-shadow:0 26px 70px rgba(0,0,0,.6);
+  position:relative;width:100%;height:100vh;height:100dvh;
+  display:flex;flex-direction:column;overflow:hidden;
+  font-family:var(--sans);background:var(--desk);color:var(--t-ink);font-size:15px;
+  -webkit-font-smoothing:antialiased;overscroll-behavior:none}
+.vb-root.light{
+  --desk:#F4F1EB;--desk2:#EAE5DB;--desk3:#DED8C9;
+  --t-bg:#F4F1EB;--t-desk:#F4F1EB;--t-bar:rgba(244,241,235,.92);
+  --t-ink:#15130F;--t-sub:#3A362F;--t-muted:#8C877C;--t-faint:#A39D91;
+  --t-line:rgba(21,19,15,.09);--t-line2:rgba(21,19,15,.13);--t-lineSoft:rgba(21,19,15,.06);
+  --t-glass:rgba(255,254,251,.84);--t-fill:rgba(21,19,15,.05);
+  --t-input:#FFFEFB;--t-menu:#FFFEFB;
+  --t-accBg:rgba(255,216,77,.16);--t-accBd:rgba(201,162,39,.28);--t-accInk:#8A6F14;--t-accTx:#241F00;
+  --t-star:#C9A227;--t-mark2:#1F9E8B;--t-qBg:rgba(255,216,77,.28);--t-qInk:#241F00;
+  --t-statBg:rgba(21,19,15,.035);--t-statBd:rgba(21,19,15,.09);
+  --t-warnBg:rgba(228,113,63,.10);--t-warnBd:rgba(196,84,38,.32);--t-warnFg:#8A3A15;--t-warnSub:#A0512C;--t-warnDot:#C45426;
+  --t-stopBg:#C45426;--t-stopFg:#FFF6F1;--t-engBg:rgba(255,216,77,.3);--t-engFg:#5C4A08;
+  --t-shadow:0 26px 70px rgba(21,19,15,.28)}
+.vb-root *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+/* :where 로 특이도를 낮춘 리셋 — .vb-root button 으로 쓰면 (클래스+태그) 특이도가
+   .vb-libbtn 같은 단일 클래스 규칙의 padding 을 전부 덮어써 버린다 (실제로 당했던 버그) */
+.vb-root :where(button){font-family:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+/* 스크롤바 — 디자인 톤에 맞춘 얇은 오버레이형 (라이트·다크 공용 중성 회색) */
+.vb-root{scrollbar-width:thin;scrollbar-color:rgba(140,135,124,.42) transparent}
+.vb-root *{scrollbar-width:thin;scrollbar-color:rgba(140,135,124,.42) transparent}
+.vb-root ::-webkit-scrollbar{width:10px;height:10px}
+.vb-root ::-webkit-scrollbar-track{background:transparent}
+.vb-root ::-webkit-scrollbar-thumb{background:rgba(140,135,124,.34);border-radius:99px;
+  border:3px solid transparent;background-clip:content-box}
+.vb-root ::-webkit-scrollbar-thumb:hover{background:rgba(140,135,124,.58);
+  border:3px solid transparent;background-clip:content-box}
+.vb-root ::-webkit-scrollbar-corner{background:transparent}
+
+.vb-bar{flex:0 0 auto;display:flex;align-items:center;gap:3px;
+  padding:calc(6px + env(safe-area-inset-top)) 10px 6px;
+  background:var(--t-bar);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--t-line);z-index:40;transition:background .3s,border-color .3s}
+.vb-tool{height:36px;min-width:36px;padding:0 10px;border-radius:12px;display:inline-flex;
+  align-items:center;justify-content:center;gap:7px;font-size:13px;color:var(--t-sub);flex:0 0 auto;
+  touch-action:manipulation}
+.vb-tool:active{background:var(--t-fill)}
+.vb-tool.on{background:var(--t-accBg);color:var(--t-accInk);font-weight:600}
+.vb-tool svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+@media (pointer:coarse){.vb-tool{height:42px;min-width:42px}}
+.vb-name{flex:1;min-width:0;padding:0 8px;font-size:13px;color:var(--t-muted);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left;
+  height:28px;border-radius:8px;touch-action:manipulation}
+.vb-name:disabled{cursor:default}
+@media (hover:hover){.vb-name:not(:disabled):hover{background:var(--t-fill);color:var(--t-sub)}}
+.vb-nameedit{flex:1;min-width:0;height:28px;padding:0 8px;margin:0 1px;font-size:13px;
+  color:var(--t-ink);background:var(--t-fill);border:1px solid var(--t-line2);border-radius:8px;
+  outline:none;font-family:inherit}
+.vb-pill{font-variant-numeric:tabular-nums;font-size:12.5px;color:var(--t-muted);padding:0 8px;white-space:nowrap}
+.vb-eng{font-size:10px;letter-spacing:.06em;text-transform:uppercase;padding:4px 7px;
+  border-radius:5px;background:var(--t-engBg);color:var(--t-engFg);white-space:nowrap}
+.vb-eng.c{color:var(--t-engFg)} .vb-eng.g{color:var(--t-mark2)}
+.vb-vsep{width:1px;height:20px;background:var(--t-line);margin:0 5px;flex:0 0 auto}
+.vb-seg2{display:flex;gap:2px;padding:3px;border-radius:13px;background:var(--t-fill);flex:0 0 auto}
+.vb-seg2 button{height:30px;padding:0 12px;border-radius:10px;font-size:12.5px;
+  display:inline-flex;align-items:center;gap:6px;color:var(--t-muted);white-space:nowrap;touch-action:manipulation}
+.vb-seg2 button svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linejoin:round}
+.vb-seg2 button.on{background:var(--paper);color:#15130F;font-weight:600}
+.vb-root:not(.light) .vb-seg2 button.on{background:rgba(255,255,255,.1);color:var(--t-ink)}
+.vb-root.light .vb-seg2 button.on{box-shadow:0 1px 3px rgba(21,19,15,.12)}
+@media (pointer:coarse){.vb-seg2 button{height:38px}}
+
+.vb-body{flex:1;min-height:0;display:flex;position:relative}
+
+.vb-out{position:absolute;inset:0 auto 0 0;width:min(80%,300px);z-index:30;background:var(--desk2);
+  border-right:1px solid var(--line);transform:translateX(-101%);
+  transition:transform .24s cubic-bezier(.3,.8,.4,1);display:flex;flex-direction:column}
+.vb-out.open{transform:none}
+.vb-root.wide .vb-out{position:relative;flex:0 0 272px;width:272px;transform:none}
+.vb-root.wide .vb-out.closed{display:none}
+.vb-out h2{margin:0;padding:14px 16px 10px;font-size:10.5px;font-weight:600;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
+.vb-olist{flex:1;overflow-y:auto;padding:0 8px calc(24px + env(safe-area-inset-bottom));
+  -webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+.vb-orow{display:flex;align-items:center;border-radius:7px}
+.vb-orow.d1{margin-left:15px;border-left:1px solid var(--line);border-radius:0 7px 7px 0}
+.vb-orow.d2{margin-left:30px;border-left:1px solid var(--line);border-radius:0 7px 7px 0}
+.vb-oi{flex:1;min-width:0;text-align:left;padding:10px 10px 10px 2px;border-radius:inherit;
+  font-size:13.5px;line-height:1.45;color:var(--t-sub);touch-action:manipulation;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.vb-oi:active{background:var(--desk3)}
+.vb-orow.d1 .vb-oi{font-size:13px;color:var(--t-muted)}
+.vb-orow.d2 .vb-oi{font-size:12.5px;color:var(--t-faint)}
+.vb-ochev{flex:0 0 28px;height:38px;display:flex;align-items:center;justify-content:center;
+  color:var(--muted);touch-action:manipulation}
+.vb-ochev svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round;transition:transform .16s}
+.vb-ochev.fold svg{transform:rotate(-90deg)}
+.vb-ochev.off{pointer-events:none;visibility:hidden}
+.vb-pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(48px,1fr));gap:6px;padding:6px 4px}
+.vb-pg{height:40px;border-radius:8px;border:1px solid var(--line);font-size:13px;color:var(--t-sub);
+  font-variant-numeric:tabular-nums;touch-action:manipulation}
+.vb-pg:active{background:var(--desk3)}
+.vb-pg.on{background:var(--mark);color:#241F00;border-color:transparent;font-weight:650}
+.vb-oempty{padding:10px 12px;font-size:13px;color:var(--muted);line-height:1.5}
+.vb-scrim{position:absolute;inset:0;background:rgba(0,0,0,.45);z-index:25;opacity:0;
+  pointer-events:none;transition:opacity .24s}
+.vb-scrim.on{opacity:1;pointer-events:auto}
+.vb-root.wide .vb-scrim{display:none}
+
+.vb-view{flex:1;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;
+  padding:14px 0 45vh;touch-action:pan-x pan-y;overscroll-behavior:contain;
+  background:var(--t-desk);transition:padding .26s cubic-bezier(.3,.85,.35,1),background .3s}
+/* 애플펜슬 드래그 중 미리보기 — pointer-events:none 이라 히트테스트/touch-action 에 전혀
+   끼어들지 않는다(제스처 도중 DOM 을 바꾸면 사파리가 진행 중인 터치를 취소해 버리는 걸
+   피하려고, 실제 캡처 오버레이는 펜을 뗀 뒤에만 마운트한다 — 이 미리보기가 그 사이를 잇는다).
+   .vb-cap 과 같은 position:fixed — .vb-view 안에 absolute 로 넣으면 스크롤 컨테이너라
+   스크롤된 만큼 어긋나 화면 밖에 그려진다(실제로 겪었다). */
+.vb-pensel{position:fixed;pointer-events:none;border:1.5px solid var(--mark);
+  background:rgba(255,216,77,.14);z-index:42}
+/* 넓은 화면에서 풀이 시트가 열리면 그 폭만큼 비켜서 페이지가 시트에 가려지지 않게 한다 */
+.vb-root.wide .vb-view.shr{padding-right:400px}
+.vb-pages{transform-origin:50% 0;will-change:transform}
+.vb-page{position:relative;margin:0 auto 14px;background:var(--paper);
+  box-shadow:0 1px 3px rgba(0,0,0,.5),0 10px 30px rgba(0,0,0,.28);border-radius:2px;overflow:hidden}
+.vb-page canvas{position:absolute;inset:0;width:100%;height:100%}
+.vb-pn{position:absolute;right:6px;bottom:5px;font-size:9.5px;color:#B9B5AC;
+  font-variant-numeric:tabular-nums;pointer-events:none}
+.vb-tl{position:absolute;inset:0;overflow:hidden;line-height:1;color:transparent;
+  -webkit-user-select:text;user-select:text;-webkit-touch-callout:none}
+.vb-tl .it{position:absolute;white-space:pre;transform-origin:0 0;cursor:text}
+.vb-tl .w{border-radius:2px}
+/* 탭한 단어 / 문장 하이라이트 — 글자는 텍스트 레이어(color:transparent)가 아니라 캔버스에 있다.
+   그래서 글자 위에 색을 깔면 무조건 글자를 가린다:
+   불투명하면 통째로 사라지고, 반투명하면 검정이 뿌옇게 뜬다.
+   mix-blend-mode:multiply 로 곱하면 이론상 딱 맞지만 iOS 사파리가 스크롤 컨테이너의
+   합성 레이어 경계를 넘어 블렌딩을 못 해서 실기기에서 그냥 무시된다(isolation:isolate 도 소용없었다).
+   그래서 글자 위는 아예 비우고 아래쪽에 형광펜 획만 긋는다 — 검정이 100% 그대로 남는다. */
+.vb-tl .vb-hl{position:absolute;pointer-events:none;border-radius:1px;
+  background:linear-gradient(to top,var(--mark) 0 3px,transparent 3px)}
+.vb-tl .vb-hl.sent{background:linear-gradient(to top,var(--mark2) 0 3px,transparent 3px)}
+.vb-root ::selection{background:rgba(255,216,77,.55)}
+
+.vb-zoompill{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:36;
+  padding:6px 14px;border-radius:20px;background:rgba(32,31,29,.9);color:#EDEBE6;
+  font-size:13px;font-variant-numeric:tabular-nums;pointer-events:none}
+.vb-uppill{position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:34;
+  min-width:250px;max-width:76%;padding:9px 16px;border-radius:12px;background:var(--desk3);
+  border:1px solid var(--line);overflow:hidden;font-size:12.5px;color:var(--t-ink);text-align:center;
+  white-space:nowrap;text-overflow:ellipsis;box-shadow:0 6px 18px rgba(0,0,0,.35)}
+.vb-uppill i{position:absolute;inset:0 auto 0 0;background:rgba(255,216,77,.22);transition:width .2s}
+.vb-uppill span{position:relative}
+
+/* ── 서재 (PDF 보관함) ── */
+/* ── 서재 화면 팔레트 ──
+   여백 서재 핸드오프 README 의 토큰표를 그대로 옮긴 것. AI 패널(4a) 핸드오프와 다크 값이
+   다르다 — ink #FDFDFC vs #F1EFE9, sub #918C82 vs #D6D2CA, line 은 반투명 대신 불투명 #2B2823.
+   두 핸드오프는 시점이 다른 별개 문서라 어느 쪽도 틀린 게 아니고 각자 자기 화면에서 맞으면 된다.
+   그래서 전역 토큰(리더·답변 패널이 쓰는 4a 값)은 두고 서재 안에서만 덮어쓴다.
+   --muted/--line 은 .vb-root 에서 var(--t-*) 로 계산돼 내려오는 별칭이라 여기서 다시 안 쓰면
+   갱신되지 않는다 — 반드시 함께 덮어써야 한다. */
+.vb-lib{
+  --desk:#141312;--desk2:#1C1A18;--desk3:#232120;
+  --t-ink:#FDFDFC;--t-sub:#918C82;--t-muted:#918C82;--t-faint:#6E6A62;
+  --t-line:#2B2823;--t-line2:#4A463F;--t-fill:#232120;
+  --t-input:#1C1A18;--t-menu:#1C1A18;
+  --t-side:#181716;--t-mat:#151413;
+  --muted:#918C82;--line:#2B2823;
+}
+.vb-root.light .vb-lib{
+  --desk:#F4F1EB;--desk2:#FFFEFB;--desk3:#EAE5DB;
+  --t-ink:#15130F;--t-sub:#6E6A62;--t-muted:#6E6A62;--t-faint:#A39D91;
+  --t-line:rgba(21,19,15,.09);--t-line2:rgba(21,19,15,.22);--t-fill:rgba(21,19,15,.045);
+  --t-input:#FFFEFB;--t-menu:#FFFEFB;
+  --t-side:#EFEBE3;--t-mat:#EBE7DE;
+  --muted:#6E6A62;--line:rgba(21,19,15,.09);
+}
+.vb-lib{position:absolute;inset:0;z-index:32;background:var(--desk);display:flex;flex-direction:column;
+  animation:vb-fade .22s ease-out}
+@keyframes vb-fade{from{opacity:0}to{opacity:1}}
+/* 시안 8a: padding:15px 22px, gap:10px, 아래 구분선 1px */
+.vb-libhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:calc(15px + env(safe-area-inset-top)) 22px 15px;border-bottom:1px solid var(--line)}
+/* 브랜드 마크 — 아이콘 + serif "여백" + 세로 구분선 + sans "YEOBAEK".
+   여백 로고.dc.html 확정안(5a)의 워드마크 규격 그대로: 아이콘 26px/radius 6,
+   서체 19px letter-spacing .05em, 구분선 1×14, 라벨 11px .15em uppercase.
+   brand/yeobaek-wordmark-*.svg 를 쓰지 않고 여기서 조립하는 이유: 그 SVG 의 "여백"은
+   <text> 라 사용자 기기에 해당 세리프가 없으면 폴백 폰트로 깨진다(핸드오프 README 경고).
+   아이콘만 SVG 로 두고 글자는 앱의 --serif 스택에 맡기는 편이 안전하다.
+   아이콘은 라이트/다크 공통으로 종이색(#FFFEFB) 판을 쓴다 — "종이만 항상 흰색" 규칙. */
+.vb-brandmk{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+.vb-brandicon{width:26px;height:26px;flex:0 0 auto;border-radius:6px;display:block}
+.vb-brandword{font-family:var(--serif);font-size:19px;line-height:1;letter-spacing:.05em;color:var(--t-ink)}
+.vb-branddiv{width:1px;height:14px;background:var(--line);flex:0 0 auto}
+.vb-brandlbl{font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--t-faint);white-space:nowrap}
+/* 빈 서재 히어로의 큰 아이콘 */
+.vb-herobrand{width:76px;height:76px;border-radius:17px;display:block}
+/* 좁은 화면에서는 구분선·YEOBAEK 라벨을 접어 검색창 자리를 남긴다 (시안은 1160px 가로 기준) */
+.vb-root:not(.wide) .vb-branddiv,.vb-root:not(.wide) .vb-brandlbl{display:none}
+/* .vb-libhead 는 flex-wrap:wrap 이라, 좁아지면 검색창이 다음 줄로 내려간다.
+   그때 margin-left:auto 때문에 오른쪽에 붙어 어색해지므로 한 줄을 통째로 쓰게 한다. */
+.vb-root:not(.wide) .vb-libsearch{margin-left:0;flex:1 1 100%;min-width:0;order:1}
+.vb-crumb{display:flex;align-items:center;gap:2px;font-size:14px;color:var(--muted);min-width:0}
+.vb-crumb button{padding:8px 10px;border-radius:8px;color:var(--t-sub);max-width:200px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;touch-action:manipulation}
+.vb-crumb button.tgt{background:var(--desk3);box-shadow:0 0 0 2px var(--mark)}
+/* 서재 검색창.
+   시안(8a)은 브랜드 마크 뒤에 flex:1 스페이서를 두어 검색창을 오른쪽 액션 버튼 옆에 붙인다.
+   여기서는 margin-left:auto 로 같은 결과를 낸다(스페이서 엘리먼트를 따로 두지 않음).
+   높이는 시안의 34px 대신 40px — 옆의 .vb-libbtn 과 높이를 맞추고 터치 타깃을 확보한다. */
+.vb-libsearch{margin-left:auto;display:flex;align-items:center;gap:8px;flex:0 1 300px;
+  min-width:210px;height:40px;padding:0 12px;border-radius:11px;background:var(--t-fill);
+  border:1px solid var(--line)}
+.vb-libsearch svg{flex:0 0 auto;width:16px;height:16px;stroke:var(--muted);fill:none;
+  stroke-width:1.8;stroke-linecap:round}
+.vb-libsearch input{flex:1;min-width:0;background:none;border:0;outline:none;font-family:inherit;
+  font-size:14px;color:var(--t-ink)}
+.vb-libsearch input::placeholder{color:var(--t-faint)}
+.vb-libsearch button{flex:0 0 auto;width:22px;height:22px;border-radius:50%;font-size:12px;
+  display:inline-flex;align-items:center;justify-content:center;color:var(--muted);
+  background:var(--desk3);touch-action:manipulation}
+/* 검색 결과의 본문 매치 — 카드 하단에 쪽 번호 + 문맥 스니펫을 쌓아 보여준다.
+   클릭하면 그 쪽으로 바로 연다(vb-doc 자체 클릭은 lastPage 로 열리므로 stopPropagation 필요). */
+.vb-hits{margin-top:6px;display:flex;flex-direction:column;gap:3px}
+.vb-hit{display:block;width:100%;text-align:left;padding:5px 7px;border-radius:7px;
+  background:var(--desk2);border:1px solid var(--line);font-size:11.5px;line-height:1.5;
+  color:var(--t-sub);touch-action:manipulation;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb-hitpg{color:var(--t-ink);font-variant-numeric:tabular-nums;font-weight:600;margin-right:5px}
+/* margin-left:auto 는 .vb-libsearch 로 옮겼다 — 검색창부터 오른쪽으로 밀려야 시안과 같은 배치가 된다.
+   시안 8a 의 헤더 버튼은 알약(.vb-seg) 안에 묶이지 않고 각자 테두리를 가진 34×34 정사각이다. */
+.vb-libact{display:flex;gap:10px;align-items:center}
+.vb-libact .vb-libbtn{width:34px;min-width:34px;height:34px;min-height:34px;padding:0;
+  border-radius:11px;border:1px solid var(--line);background:var(--t-fill);color:var(--t-sub);font-size:14px}
+.vb-libact .vb-libbtn svg{width:16px;height:16px;stroke-width:1.7}
+.vb-libact .vb-libbtn.pri{background:var(--mark);color:#241F00;border-color:var(--mark)}
+/* 터치 기기에서는 34px 가 너무 작다 — 핸드오프의 히트 타깃 규칙(44px)을 따른다 */
+@media (pointer:coarse){
+  .vb-libact .vb-libbtn{width:44px;min-width:44px;height:44px;min-height:44px}
+  .vb-libsearch{height:44px}
+}
+/* 서재 헤더의 아이콘 버튼 묶음(★단어장·설정·새폴더 등) — 답변 표면 탭과 별개인 서재 전용 컨테이너 */
+.vb-seg{display:flex;gap:2px;padding:4px;border-radius:12px;background:var(--t-fill);
+  border:1px solid var(--line);flex:0 0 auto}
+/* 질문탭(.vb-tab)과 같은 규격 — 서재와 뷰어의 버튼 크기를 통일한다 */
+.vb-libbtn{min-height:40px;min-width:48px;padding:0 14px;display:inline-flex;align-items:center;justify-content:center;
+  border-radius:9px;background:var(--desk3);font-size:14.5px;line-height:1;
+  color:var(--t-ink);touch-action:manipulation;white-space:nowrap}
+.vb-libbtn svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round}
+.vb-seg .vb-libbtn{background:transparent}
+.vb-libbtn.pri{background:var(--mark);color:#241F00;font-weight:650}
+.vb-libbtn:disabled{opacity:.45}
+.vb-newfol{display:flex;gap:8px;padding:10px 20px 0}
+.vb-newfol input{flex:1;max-width:280px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);
+  background:var(--t-input);color:var(--t-ink);font-size:15px;outline:none;font-family:inherit}
+.vb-libbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+  padding:2px 20px calc(30px + env(safe-area-inset-bottom))}
+/* 서재 인사말 — 시간대 스탬프 + 세리프 헤드라인 + 보조 카피. 서재 최상위(폴더 밖)에서만,
+   앱을 새로 불러올 때 한 번 고른 문장을 보여준다 */
+.vb-greet{padding:32px 2px 26px;max-width:70ch}
+.vb-greetstamp{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--t-faint)}
+.vb-greetline{margin-top:12px;font-family:var(--serif);font-size:32px;line-height:1.35;color:var(--t-ink)}
+.vb-greetsub{margin-top:10px;font-size:14px;line-height:1.75;color:var(--t-sub)}
+.vb-sect{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px}
+/* 좁은 화면 그리드 — 칸 최소폭은 좁은 화면 종이 폭 상한(160×0.86≈138)에 좌우 여백을 더한 값 */
+.vb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:18px 14px}
+.vb-fol{position:relative;border:1px solid var(--line);border-radius:12px;background:var(--desk2);
+  padding:12px;text-align:left;cursor:pointer;touch-action:manipulation;
+  -webkit-user-select:none;user-select:none}
+.vb-fol:active{background:var(--desk3)}
+.vb-fol.over{background:var(--desk3);box-shadow:0 0 0 2px var(--mark)}
+.vb-fol svg{width:26px;height:26px;stroke:var(--mark);fill:none;stroke-width:1.6;
+  stroke-linecap:round;stroke-linejoin:round;margin-bottom:8px}
+/* 책 카드 — 표지(1페이지 썸네일)가 얼굴이다. 좁은 화면도 wide 와 같은 매트 처리를 쓴다
+   (아래 .vb-slot/.vb-paper). 예전의 고정 3:4 표지는 A4·16:9 을 다 잘라먹어서 버렸다. */
+.vb-doc{position:relative;text-align:left;cursor:pointer;touch-action:manipulation;
+  -webkit-user-select:none;user-select:none;-webkit-user-drag:element}
+.vb-doc.drag{opacity:.35}
+/* 제목은 두 줄까지, 넘치면 말줄임(전체 이름은 title 속성에 남긴다).
+   line-break:anywhere 가 핵심 — word-break:break-all 만 주면 엔진이 하이픈·언더바 같은
+   "기존 줄바꿈 기회"를 우선해서 `Charles_H_Roth_Larry_L_Kinney-` / `Fundamentals_of_...`
+   처럼 첫 줄이 덜 찬 채로 꺾인다. anywhere 는 그 우선순위를 없애 줄을 끝까지 채운다. */
+.vb-fname{font-size:13px;line-height:1.4;color:var(--t-ink);min-width:0;
+  line-break:anywhere;word-break:break-all;overflow-wrap:anywhere;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.vb-doc .vb-fname{margin-top:9px}
+.vb-doc:active .vb-slot{transform:scale(.97)}
+.vb-fmeta{margin-top:4px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.vb-dact{position:absolute;top:6px;right:6px;display:flex;gap:4px;z-index:1}
+/* 표지 위에 얹히던 시절의 어두운 칩이었는데, 이제 종이는 칸 안에서 작아져 대부분 데스크 위에
+   놓인다 — 테마 표면색 + 실선으로 바꿔 라이트/다크 양쪽에서 같은 무게로 읽히게 한다 */
+.vb-doc .vb-dact{background:var(--desk2);border:1px solid var(--line);border-radius:9px;
+  -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
+.vb-ib{min-width:30px;height:30px;padding:0 7px;border-radius:8px;display:inline-flex;align-items:center;
+  justify-content:center;font-size:15px;color:var(--muted);background:transparent;text-decoration:none;
+  touch-action:manipulation}
+.vb-ib:active{background:var(--desk3)}
+.vb-ib.del.ask{background:#E4713F;color:#1d0f08;font-size:12px;font-weight:650}
+.vb-hero{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;
+  text-align:center;padding:12vh 24px 6vh}
+.vb-hero p{margin:0;max-width:40ch;font-size:14px;line-height:1.8;color:var(--muted)}
+.vb-hint{font-size:12.5px;color:var(--t-faint);line-height:1.8}
+.vb-hint b{color:var(--t-muted);font-weight:600}
+/* 데스크톱(트랙패드 포함)용 호버 */
+@media (hover:hover){
+  .vb-tool:hover{background:var(--desk3)}
+  .vb-fol:hover{background:var(--desk3)}
+  .vb-libbtn:hover{filter:brightness(1.12)}
+  .vb-seg .vb-libbtn:hover{background:var(--desk3);filter:none}
+  .vb-seg .vb-libbtn.pri:hover{background:var(--mark);filter:brightness(1.08)}
+  .vb-doc:hover .vb-slot{transform:translateY(-2px)}
+  .vb-oi:hover,.vb-pg:hover,.vb-ib:hover{background:var(--desk3)}
+}
+/* 좁은 화면에서는 엔진 배지를 숨겨 툴바 숨통을 틔운다 */
+.vb-root:not(.wide) .vb-eng{display:none}
+
+/* ── wide 서재: 좌측 사이드바 + 매트 그리드 ──
+   design_handoff_yeobaek_library_and_brand/여백 서재.dc.html #8a 를 이 앱의 vb-* 체계로 옮긴 것.
+   좁은 화면은 사이드바를 얹을 폭이 안 나와 위쪽의 기존 폴더 카드 방식을 그대로 쓴다. */
+.vb-libwrap{flex:1;min-height:0;display:flex;overflow:hidden}
+.vb-libwrap>.vb-libbody{flex:1;min-width:0}
+.vb-menuscrim{position:fixed;inset:0;z-index:20}
+
+.vb-libside{flex:0 0 210px;display:flex;flex-direction:column;gap:2px;
+  padding:16px 12px calc(16px + env(safe-area-inset-bottom));
+  background:var(--t-side);border-right:1px solid var(--line);
+  overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
+/* 시안 8a 콘텐츠 메타 줄 — 경로 / (spacer) / 정렬 · 개수. 12.5px */
+.vb-libmeta{display:flex;align-items:center;gap:9px;padding:0 2px 14px;font-size:12.5px}
+.vb-libmeta .f{color:var(--t-faint)}
+.vb-libmeta .cur{color:var(--t-ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb-libmeta .sp{flex:1}
+.vb-libmeta .div{width:1px;height:13px;background:var(--line);flex:0 0 auto}
+.vb-navitem.over{box-shadow:0 0 0 2px var(--mark) inset}
+.vb-smartnav{display:flex;flex-direction:column;gap:2px;margin-bottom:10px}
+.vb-navitem{display:flex;align-items:center;gap:8px;height:34px;padding:0 10px;border-radius:9px;
+  font-size:13px;color:var(--t-sub);touch-action:manipulation}
+.vb-navitem.on{background:var(--t-fill);color:var(--t-ink)}
+.vb-navitem span:first-child{flex:1;min-width:0;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vb-navn{font-size:11px;color:var(--t-faint);font-variant-numeric:tabular-nums}
+
+.vb-folnavlist{display:flex;flex-direction:column;gap:2px;margin:6px 0}
+.vb-folnav{position:relative;display:flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:9px;
+  font-size:13px;color:var(--t-sub);cursor:grab;touch-action:manipulation}
+.vb-folnav.on{background:var(--t-fill);color:var(--t-ink)}
+.vb-folnav.over{box-shadow:0 0 0 2px var(--mark) inset}
+.vb-folnav.dragging{opacity:.35}
+.vb-folnavname{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left}
+.vb-ib.sm{width:22px;min-width:22px;height:22px;font-size:11px;padding:0}
+.vb-folnav .vb-ib.del{opacity:0}
+.vb-folnav .vb-ib.del.ask{opacity:1;font-size:9.5px;padding:0 4px;width:auto}
+
+.vb-folnewinline{padding:2px 2px 6px}
+.vb-folnewinline input{width:100%;height:30px;padding:0 9px;border-radius:8px;border:1px solid var(--line);
+  background:var(--t-input);color:var(--t-ink);font-size:13px;outline:none;font-family:inherit}
+.vb-foladd{display:flex;align-items:center;gap:6px;height:30px;padding:0 10px;border-radius:9px;
+  font-size:12.5px;color:var(--t-faint);touch-action:manipulation}
+.vb-sidespacer{flex:1}
+.vb-sideadd{display:flex;align-items:center;justify-content:center;gap:6px;height:36px;border-radius:10px;
+  border:1px dashed var(--t-line2);font-size:12.5px;color:var(--t-sub);touch-action:manipulation;margin-top:8px}
+.vb-sideadd:disabled{opacity:.45}
+
+/* 매트 그리드 — 칸(.vb-slot)은 모두 같은 자리를 차지하고, 종이(.vb-paper)는 원본 비율대로
+   그 안에서 중앙에 놓인다. 카드 테두리·배경 없이 종이 그림자만, 호버 때만 옅은 판이 뜬다.
+   칸 최소폭은 종이 폭 상한(160) + 카드 좌우 padding(9×2) 이라 종이가 옆 칸을 안 넘본다. */
+.vb-mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(178px,1fr));gap:6px}
+.vb-mdoc{position:relative;display:flex;flex-direction:column;min-width:0;padding:9px;border-radius:14px;
+  background:transparent;cursor:pointer;touch-action:manipulation;-webkit-user-select:none;user-select:none;
+  -webkit-user-drag:element}
+/* 높이는 App.jsx 의 SLOT_H / NARROW_S 와 같이 움직여야 한다 */
+.vb-slot{position:relative;height:132px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
+  transition:transform .16s}
+.vb-slot.sm{height:114px}
+/* 폭만 inline style 로 받고 높이는 aspect-ratio 가 정한다 — 종이와 그림이 정확히 같은
+   비율이라 레터박스(위아래 흰 띠)가 생길 수 없다. 칸이 좁으면 min() 이 같이 줄인다. */
+.vb-paper{position:relative;flex:0 0 auto;background:#FFFEFB;
+  box-shadow:0 1px 2px rgba(21,19,15,.14),0 8px 18px rgba(21,19,15,.16);overflow:hidden}
+.vb-paper img{width:100%;height:100%;object-fit:contain;display:block;pointer-events:none}
+/* 아직 비율을 못 잰 찰나 — 그림이 스스로 크기를 정한다(onLoad 에서 재고 나면 자리를 잡는다) */
+.vb-paper.auto{width:auto;height:auto;max-width:100%;max-height:100%}
+.vb-paper.auto img{width:auto;height:auto;max-width:100%;max-height:100%}
+.vb-paper svg{position:absolute;inset:0;margin:auto;width:26px;height:26px;stroke:#8C877C;fill:none;
+  stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
+.vb-ribbon{position:absolute;top:0;right:8px;width:7px;height:15px;background:var(--mark);
+  clip-path:polygon(0 0,100% 0,100% 100%,50% 72%,0 100%)}
+.vb-mbody{padding-top:9px;display:flex;flex-direction:column;gap:3px;min-width:0}
+.vb-mrename{font-size:13px;font-family:inherit;color:var(--t-ink);background:var(--t-input);
+  border:1px solid var(--t-line2);border-radius:6px;padding:3px 6px;outline:none}
+.vb-mmenu{position:absolute;top:9px;right:9px;width:24px;height:24px;border-radius:8px;border:0;
+  cursor:pointer;background:transparent;color:var(--t-faint);display:flex;align-items:center;justify-content:center;
+  font-size:14px;letter-spacing:1px;touch-action:manipulation;z-index:2}
+
+/* ⋮ 메뉴 — 질문 탭의 vb-dropmenu 와 같은 팝오버 스타일(배경·테두리·그림자·rise 애니메이션) */
+.vb-docmenu{position:absolute;top:38px;right:9px;width:158px;z-index:21;border-radius:11px;
+  background:var(--t-menu);border:1px solid var(--t-line2);box-shadow:0 10px 28px rgba(0,0,0,.32);
+  padding:5px;display:flex;flex-direction:column;gap:1px;animation:rise .16s ease-out}
+.vb-docmenu button,.vb-docmenu a{height:32px;padding:0 9px;border-radius:7px;border:0;background:none;
+  cursor:pointer;font-size:12.5px;text-align:left;color:var(--t-ink);display:flex;align-items:center;
+  justify-content:space-between;text-decoration:none;touch-action:manipulation}
+.vb-menuarrow{color:var(--t-faint)}
+.vb-docsubmenu{display:flex;flex-direction:column;gap:1px;padding:2px 0 4px 10px;
+  border-left:1px solid var(--t-line);margin-left:9px}
+.vb-docsubmenu button{height:28px;font-size:12px;color:var(--t-sub)}
+.vb-docmenu-del{color:#E0644F}
+
+@media (hover:hover){
+  .vb-navitem:hover{background:var(--t-fill)}
+  .vb-folnav:hover{background:var(--t-fill)}
+  .vb-folnav:hover .vb-ib.del{opacity:1}
+  .vb-sideadd:hover{filter:brightness(1.12)}
+  .vb-foladd:hover{background:var(--t-fill);color:var(--t-sub)}
+  .vb-mmenu:hover{background:var(--t-fill);color:var(--t-ink)}
+  .vb-docmenu button:hover,.vb-docmenu a:hover{background:var(--t-fill)}
+  .vb-docmenu-del:hover{background:rgba(224,100,79,.12)}
+  .vb-mdoc:hover{background:var(--t-fill)}
+  .vb-mdoc:hover .vb-slot{transform:translateY(-2px)}
+}
+
+/* ── 답변 표면(패널/카드) ──
+   패널: PDF 오른쪽에 도킹, 탭에 따라 폭이 다르다(단어 372 · 질문 400 · 기록 268).
+   카드: 화면 중앙 720×78%, 뒤에 스크림. 좁은 화면(<WIDE)에서는 패널이 바텀시트로,
+   카드는 좌우 16px 인셋 모달로 접힌다. 유리 질감(backdrop-filter)은 두 모드·두 테마 공통. */
+.vb-scrim{position:absolute;inset:0;z-index:34;background:rgba(10,9,8,.34);opacity:0;pointer-events:none;
+  transition:opacity .3s}
+.vb-scrim.on{opacity:1}
+.vb-surf{position:absolute;z-index:35;display:flex;flex-direction:column;overflow:hidden;
+  background:var(--t-glass);backdrop-filter:blur(26px) saturate(1.35);-webkit-backdrop-filter:blur(26px) saturate(1.35);
+  border:1px solid var(--t-line2);box-shadow:var(--t-shadow);
+  transition:transform .32s cubic-bezier(.2,.9,.25,1),width .3s cubic-bezier(.2,.9,.25,1),
+    height .3s cubic-bezier(.2,.9,.25,1),border-radius .3s,background .3s,opacity .3s}
+.vb-surf.panel{top:0;right:0;bottom:0;left:auto;height:auto;border-radius:0;border-top:0;border-bottom:0;
+  border-right:0;border-left:1px solid var(--t-line);width:400px;transform:translateX(101%)}
+.vb-surf.panel.open{transform:none}
+.vb-surf.panel.t-word{width:372px}
+.vb-surf.panel.t-ask{width:400px}
+.vb-surf.panel.t-log{width:268px}
+.vb-surf.card{top:50%;left:50%;right:auto;bottom:auto;width:720px;height:78%;
+  border-radius:22px;transform:translate(-50%,-50%) scale(.96);opacity:0;pointer-events:none}
+.vb-surf.card.open{transform:translate(-50%,-50%) scale(1);opacity:1;pointer-events:auto}
+.vb-root:not(.wide) .vb-surf.panel{left:0;right:0;top:auto;width:auto!important;
+  border-radius:18px 18px 0 0;border-left:0;border-top:1px solid var(--t-line);transform:translateY(100%)}
+.vb-root:not(.wide) .vb-surf.panel.open{transform:none}
+.vb-root:not(.wide) .vb-surf.card{top:8%;bottom:8%;left:16px;right:16px;width:auto;height:auto;
+  transform:scale(.96)}
+.vb-root:not(.wide) .vb-surf.card.open{transform:scale(1)}
+.vb-griphandle{flex:0 0 auto;padding:10px 0 2px;display:flex;justify-content:center;touch-action:none;cursor:grab}
+.vb-griphandle i{width:42px;height:5px;border-radius:3px;background:var(--t-line2);display:block}
+.vb-root.wide .vb-griphandle{display:none}
+
+.vb-shead{flex:0 0 auto;display:flex;align-items:center;gap:16px;padding:16px 20px 0;
+  border-bottom:1px solid var(--t-line)}
+.vb-root:not(.wide) .vb-shead{padding-top:4px}
+.vb-shtab{padding:0 0 12px;font-size:14px;position:relative;color:var(--t-muted);touch-action:manipulation}
+.vb-shtab.on{color:var(--t-ink);font-weight:600}
+.vb-shtab i{position:absolute;left:0;right:0;bottom:-1px;height:2px;border-radius:2px;background:transparent;
+  font-style:normal}
+.vb-shtab.on i{background:var(--mark)}
+.vb-modebtn,.vb-closebtn{width:30px;height:30px;margin-bottom:8px;border-radius:10px;
+  display:inline-flex;align-items:center;justify-content:center;color:var(--t-faint);
+  touch-action:manipulation;flex:0 0 auto}
+.vb-modebtn{margin-left:auto}
+.vb-modebtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8;
+  stroke-linecap:round;stroke-linejoin:round}
+.vb-closebtn{font-size:15px}
+@media (hover:hover){.vb-modebtn:hover,.vb-closebtn:hover,.vb-shtab:hover{color:var(--t-ink)}}
+.vb-root:not(.wide) .vb-modebtn{display:none}
+
+.vb-panes{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;padding:0 20px calc(24px + env(safe-area-inset-bottom))}
+.vb-root.wide .vb-panes{padding-top:2px}
+.vb-askwrap{flex:1;min-height:0;display:flex;flex-direction:column}
+.vb-root.wide .vb-surf.panel.t-log .vb-panes{padding:0 14px calc(24px + env(safe-area-inset-bottom))}
+@keyframes rise{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.vb-pe{animation:rise .22s ease-out}
+
+/* ── 단어 탭 ── */
+.vb-wpane{padding:22px 0 28px}
+.vb-head{display:flex;align-items:flex-start;gap:10px}
+.vb-hw{font-family:var(--serif);font-size:33px;line-height:1.1;color:var(--t-ink);
+  letter-spacing:-.01em;word-break:break-word;min-width:0}
+.vb-pos{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--t-faint);margin-top:7px}
+.vb-star{margin-left:auto;width:36px;height:36px;border-radius:12px;border:1px solid var(--t-line2);
+  background:none;display:inline-flex;align-items:center;justify-content:center;touch-action:manipulation;flex:0 0 auto}
+.vb-star svg{width:19px;height:19px;stroke:var(--t-faint);fill:none;stroke-width:1.6;stroke-linejoin:round}
+.vb-star.on{background:var(--t-accBg);border-color:var(--t-accBd)}
+.vb-star.on svg{fill:var(--t-star);stroke:var(--t-star)}
+.vb-accbox{margin-top:20px;padding:16px;border-radius:16px;background:var(--t-accBg);border:1px solid var(--t-accBd)}
+.vb-lbl{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--t-faint);margin:0 0 8px}
+.vb-accbox .vb-lbl{color:var(--t-accInk)}
+.vb-acctxt{margin:0;font-size:15.5px;line-height:1.7;color:var(--t-accTx);white-space:pre-wrap;word-break:break-word}
+.vb-senses{margin:22px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:9px}
+.vb-senses li{display:flex;gap:10px;font-size:15px;line-height:1.6;color:var(--t-sub)}
+.vb-senses li i{flex:0 0 auto;font-size:11px;font-style:normal;color:var(--t-faint);
+  font-variant-numeric:tabular-nums;padding-top:3px}
+.vb-quote{margin:22px 0 0;font-family:var(--serif);font-size:14.5px;line-height:1.7;color:var(--t-muted);
+  border-left:2px solid var(--t-line2);padding-left:14px;white-space:pre-wrap;word-break:break-word}
+.vb-wacts{display:flex;gap:7px;margin-top:20px}
+.vb-wactbtn{height:38px;padding:0 14px;border-radius:12px;border:1px solid var(--t-line2);
+  background:none;color:var(--t-sub);font-size:13.5px;touch-action:manipulation}
+.vb-txt{margin:0;font-size:15.5px;line-height:1.75;color:var(--t-ink);white-space:pre-wrap;word-break:break-word}
+.vb-cur::after{content:'';display:inline-block;width:7px;height:15px;margin-left:2px;
+  background:var(--t-star);vertical-align:-2px;animation:vbblink .9s steps(2) infinite}
+@keyframes vbblink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
+.vb-err{color:var(--t-warnFg);font-size:13.5px;line-height:1.6}
+.vb-ph{color:var(--t-faint);font-size:14px;line-height:1.75;padding:22px 0}
+.vb-ph p{margin:0 0 8px}
+
+/* ── 문장 해석 — 본문 위에 뜨는 유리 카드(캔버스 렌더라 실제 행간 삽입 대신 앵커 오버레이) ── */
+.vb-sentcard{position:absolute;z-index:37;max-width:420px;min-width:240px;
+  padding:12px 14px;border-radius:14px;background:var(--t-glass);
+  backdrop-filter:blur(20px) saturate(1.3);-webkit-backdrop-filter:blur(20px) saturate(1.3);
+  border:1px solid var(--t-line2);box-shadow:var(--t-shadow);animation:rise .18s ease-out}
+.vb-sentcard .vb-lbl{display:flex;align-items:center;gap:8px;margin-bottom:6px}
+.vb-sentcard .vb-lbl button{margin-left:auto;color:var(--t-faint);font-size:13px;line-height:1}
+.vb-sentcard p{margin:0;font-size:14.5px;line-height:1.7;color:var(--t-ink);white-space:pre-wrap}
+
+/* ── 질문 탭: 상단 고정(대화 줄 + 컴포저 + 첨부/모델) + 아래 스크롤(상태·문답, 최신이 위) ── */
+.vb-atop{flex:0 0 auto;padding:14px 18px 12px;border-bottom:1px solid var(--t-line)}
+.vb-sessrow{display:flex;align-items:center;gap:8px;margin-bottom:9px}
+.vb-sessbtn{position:relative;display:flex;align-items:center;gap:6px;min-height:28px;padding:0 9px 0 10px;
+  border-radius:9px;border:1px solid var(--t-line2);background:var(--t-fill);font-size:12.5px;color:var(--t-ink);
+  max-width:210px;touch-action:manipulation}
+.vb-sessbtn i{width:5px;height:5px;border-radius:50%;background:var(--t-star);flex:0 0 auto;font-style:normal}
+.vb-sessbtn span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb-sessbtn svg{width:11px;height:11px;flex:0 0 auto;stroke:currentColor;fill:none;stroke-width:2.4;
+  stroke-linecap:round;stroke-linejoin:round;opacity:.5;transition:transform .2s}
+.vb-sessbtn.open svg{transform:rotate(180deg)}
+.vb-ttl{font-size:11.5px;color:var(--t-faint);font-variant-numeric:tabular-nums;white-space:nowrap}
+.vb-newsess{margin-left:auto;min-height:28px;padding:0 10px;border-radius:9px;border:1px dashed var(--t-line2);
+  font-size:12px;color:var(--t-muted);white-space:nowrap;touch-action:manipulation}
+.vb-dropmenu{position:relative;margin-bottom:9px;border-radius:14px;background:var(--t-menu);
+  border:1px solid var(--t-line2);box-shadow:0 8px 24px rgba(0,0,0,.2);overflow:hidden;
+  animation:rise .18s ease-out;max-height:280px;display:flex;flex-direction:column}
+.vb-dropscroll{overflow-y:auto}
+.vb-sessitem{width:100%;text-align:left;padding:10px 12px;display:flex;align-items:center;gap:8px;
+  border-bottom:1px solid var(--t-lineSoft);touch-action:manipulation}
+.vb-sessitem i{width:5px;height:5px;border-radius:50%;background:var(--t-faint);flex:0 0 auto;font-style:normal}
+.vb-sessitem.on{background:var(--t-accBg)}
+.vb-sessitem.on i{background:var(--t-star)}
+.vb-sessitem .t{font-size:13px;color:var(--t-ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb-sessitem.on .t{font-weight:600}
+.vb-sessitem .m{margin-left:auto;font-size:11px;color:var(--t-faint);font-variant-numeric:tabular-nums;
+  white-space:nowrap;flex:0 0 auto}
+.vb-sessitem .x{color:var(--t-faint);font-size:11.5px;flex:0 0 auto}
+.vb-sessitem .x.ask{color:var(--t-warnFg)}
+.vb-dropfoot{padding:9px 12px;font-size:11px;line-height:1.6;color:var(--t-faint)}
+
+.vb-composer{display:flex;align-items:flex-end;gap:8px;padding:8px 8px 8px 14px;border-radius:18px;
+  background:var(--t-input);border:1px solid var(--t-line2)}
+.vb-askin{flex:1;min-height:30px;max-height:96px;resize:none;border:0;background:none;outline:none;
+  font-size:16px;line-height:1.5;color:var(--t-ink);padding:3px 0;font-family:inherit}
+.vb-askin::placeholder{color:var(--t-faint)}
+.vb-send{width:36px;height:36px;flex:0 0 auto;border-radius:14px;background:var(--mark);color:#241F00;
+  display:inline-flex;align-items:center;justify-content:center;touch-action:manipulation}
+.vb-send:disabled{opacity:.4}
+.vb-send svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}
+
+.vb-attrow{display:flex;align-items:center;gap:8px;margin-top:9px;flex-wrap:wrap}
+.vb-chip{display:flex;align-items:center;gap:7px;padding:5px 8px 5px 6px;border-radius:10px;
+  background:var(--t-fill);font-size:12px;color:var(--t-sub)}
+.vb-chip img{width:24px;height:17px;border-radius:4px;object-fit:cover;display:block;border:1px solid var(--t-line2)}
+.vb-chip button{color:var(--t-faint);font-size:12px;line-height:1}
+.vb-capchip{height:28px;padding:0 10px;border-radius:10px;border:1px dashed var(--t-line2);
+  font-size:12px;color:var(--t-muted);touch-action:manipulation;display:inline-flex;align-items:center}
+.vb-mdlbtn{position:relative;margin-left:auto;display:flex;align-items:center;gap:6px;height:28px;padding:0 9px;
+  border-radius:10px;border:1px solid var(--t-line2);background:var(--t-fill);font-size:11.5px;color:var(--t-sub);
+  touch-action:manipulation}
+.vb-mdlbtn svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.4;stroke-linecap:round;
+  stroke-linejoin:round;opacity:.6;transition:transform .2s}
+.vb-mdlbtn.open svg{transform:rotate(180deg)}
+.vb-mdlitem{width:100%;text-align:left;padding:10px 12px;display:flex;flex-direction:column;gap:3px;
+  border-bottom:1px solid var(--t-lineSoft);touch-action:manipulation}
+.vb-mdlitem.on{background:var(--t-accBg)}
+.vb-mdlrow{display:flex;align-items:center;gap:7px;width:100%}
+.vb-mdlrow .n{font-size:13px;color:var(--t-ink)}
+.vb-mdlitem.on .n{font-weight:600}
+.vb-mdlrow .d{font-size:10px;letter-spacing:.06em;text-transform:uppercase;color:var(--t-faint)}
+.vb-mdlrow .c{margin-left:auto;font-size:12px;color:var(--t-star)}
+.vb-mdlnote{font-size:11.5px;line-height:1.5;color:var(--t-muted)}
+.vb-mdlgrp{padding:9px 12px 5px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--t-faint)}
+
+.vb-scroll{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+  padding:0 20px 24px}
+.vb-statcard{margin:12px 0 4px;padding:12px 14px;border-radius:14px;background:var(--t-statBg);
+  border:1px solid var(--t-statBd)}
+.vb-statcard.warn{background:var(--t-warnBg);border-color:var(--t-warnBd)}
+.vb-statrow1{display:flex;align-items:center;gap:9px}
+.vb-statdot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--t-star);
+  animation:vbpulse 1.1s ease-in-out infinite}
+.vb-statcard.warn .vb-statdot{background:var(--t-warnDot)}
+@keyframes vbpulse{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
+.vb-statlbl{font-size:13px;color:var(--t-ink);font-weight:600;line-height:1.4}
+.vb-statcard.warn .vb-statlbl{color:var(--t-warnFg)}
+.vb-statcount{font-size:12px;color:var(--t-muted);font-variant-numeric:tabular-nums;margin-left:auto;flex:0 0 auto}
+.vb-statstop{flex:0 0 auto;min-height:28px;padding:0 10px;border-radius:9px;font-size:11.5px;
+  background:var(--t-fill);color:var(--t-ink);white-space:nowrap;touch-action:manipulation;
+  display:inline-flex;align-items:center;justify-content:center;line-height:1}
+.vb-statcard.warn .vb-statstop{background:var(--t-stopBg);color:var(--t-stopFg);font-weight:600}
+.vb-statsteps{display:flex;gap:4px;margin-top:11px}
+.vb-statstep{flex:1;display:flex;flex-direction:column;gap:5px}
+.vb-statstep b{height:3px;border-radius:2px;background:var(--t-line2);display:block;font-style:normal}
+.vb-statstep.done b{background:var(--t-accBd)}
+.vb-statstep.now b{background:var(--t-star)}
+.vb-statcard.warn .vb-statstep.now b{background:var(--t-warnDot)}
+.vb-statstep span{font-size:10px;color:var(--t-faint)}
+.vb-statstep.now span{font-weight:600;color:var(--t-sub)}
+.vb-statcard.warn .vb-statstep.now span{color:var(--t-warnSub)}
+.vb-statmeta{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:9px;
+  border-top:1px solid var(--t-line2);font-size:11px;color:var(--t-muted);font-variant-numeric:tabular-nums;
+  flex-wrap:wrap}
+.vb-statcard.warn .vb-statmeta{color:var(--t-warnSub);border-top-color:var(--t-warnBd)}
+.vb-statmeta .eng{padding:2px 6px;border-radius:5px;background:var(--t-engBg);color:var(--t-engFg);letter-spacing:.05em}
+.vb-stathint{margin-top:9px;font-size:11.5px;line-height:1.6;color:var(--t-muted)}
+.vb-statcard.warn .vb-stathint{color:var(--t-warnSub)}
+.vb-stopped{margin-top:6px;font-size:11.5px;color:var(--t-faint)}
+
+.vb-recent{display:flex;align-items:center;gap:8px;padding:12px 0 10px;font-size:11px;letter-spacing:.12em;
+  text-transform:uppercase;color:var(--t-faint)}
+.vb-recent b{height:1px;flex:1;background:var(--t-line);font-weight:400}
+
+.vb-qa{padding-bottom:18px;border-bottom:1px solid var(--t-line)}
+.vb-qa.past{opacity:.66;padding:18px 0}
+.vb-qbubble{font-size:14.5px;line-height:1.6;color:var(--t-qInk);font-weight:600;padding:10px 14px;
+  border-radius:14px;background:var(--t-qBg);white-space:pre-wrap;word-break:break-word}
+.vb-qa.past .vb-qbubble{font-size:13.5px;background:var(--t-fill);color:var(--t-sub);padding:9px 13px;border-radius:13px}
+.vb-abody{font-size:15px;line-height:1.85;color:var(--t-ink);margin-top:14px}
+.vb-qa.past .vb-abody{font-size:14px;line-height:1.75;color:var(--t-sub);margin-top:12px}
+.vb-abody.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.vb-msgimg{display:block;max-width:min(100%,320px);border-radius:9px;border:1px solid var(--t-line2);
+  margin:2px 0 8px;background:#fff}
+.vb-expand{margin-top:10px;height:30px;padding:0 11px;border-radius:10px;border:1px solid var(--t-line2);
+  background:none;color:var(--t-muted);font-size:12px;touch-action:manipulation}
+
+/* ── 모델이 준 마크다운·수식 ── */
+.vb-md{font-size:15px;line-height:1.85;word-break:break-word}
+.vb-md>*:first-child{margin-top:0}
+.vb-md>*:last-child{margin-bottom:0}
+.vb-md p{margin:0 0 10px}
+.vb-md h1,.vb-md h2,.vb-md h3,.vb-md h4{margin:16px 0 8px;font-size:15.5px;font-weight:680;
+  color:var(--t-ink);line-height:1.4}
+.vb-md h1{font-size:17px}
+.vb-md h2{font-size:16px}
+.vb-md ul,.vb-md ol{margin:0 0 10px;padding-left:20px}
+.vb-md li{margin:3px 0}
+.vb-md li::marker{color:var(--t-mark2)}
+.vb-md strong{color:var(--t-ink);font-weight:660}
+.vb-md em{color:var(--t-sub)}
+.vb-md a{color:var(--mark);text-decoration:underline;text-underline-offset:2px}
+.vb-md hr{border:0;border-top:1px solid var(--t-line);margin:14px 0}
+.vb-md blockquote{margin:0 0 10px;padding-left:12px;border-left:2px solid var(--t-mark2);color:var(--t-sub)}
+.vb-md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;
+  background:var(--t-fill);border:1px solid var(--t-line);border-radius:5px;padding:1px 5px}
+.vb-md pre{margin:0 0 10px;padding:14px 16px;border-radius:14px;background:var(--t-fill);
+  border:0;overflow-x:auto;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain}
+.vb-md pre code{background:none;border:0;padding:0;font-size:14.5px;line-height:1.6;color:var(--t-sub)}
+.vb-md table{border-collapse:collapse;margin:0 0 10px;font-size:13.5px;display:block;
+  overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
+.vb-md th,.vb-md td{border:1px solid var(--t-line);padding:5px 9px;text-align:left}
+.vb-md th{background:var(--t-fill);font-weight:620}
+/* 긴 수식은 잘리지 않고 옆으로 밀린다 — 아이패드 세로에서 특히 자주 넘친다 */
+.vb-mathblk{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior-x:contain;
+  padding:4px 0 8px;max-width:100%}
+.vb-md .katex{font-size:1.04em}
+.vb-md .katex-display{margin:0}
+/* 스트리밍 커서는 마지막 블록 끝에 붙인다 (.vb-cur::after 는 요소 뒤에 붙어 줄이 바뀐다) */
+.vb-md.vb-cur::after{content:none}
+.vb-md.vb-cur>*:last-child::after{content:'';display:inline-block;width:7px;height:15px;
+  margin-left:2px;background:var(--t-star);vertical-align:-2px;animation:vbblink .9s steps(2) infinite}
+
+/* ── 기록 탭 ── */
+.vb-lpane{padding:16px 0 24px}
+.vb-lhead{display:flex;align-items:center;gap:7px;padding:0 4px 12px}
+.vb-lhead span:first-child{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--t-faint)}
+.vb-lhead b{height:1px;flex:1;background:var(--t-line);font-weight:400}
+.vb-litem{width:100%;text-align:left;padding:10px 8px;border-radius:12px;display:flex;flex-direction:column;
+  gap:4px;touch-action:manipulation}
+@media (hover:hover){.vb-litem:hover{background:var(--t-fill)}}
+.vb-lrow{display:flex;align-items:center;gap:7px;width:100%}
+.vb-ldot{width:5px;height:5px;border-radius:50%;flex:0 0 auto}
+.vb-ltitle{font-size:13.5px;color:var(--t-ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb-lat{margin-left:auto;font-size:10.5px;color:var(--t-faint);font-variant-numeric:tabular-nums;flex:0 0 auto}
+.vb-lsub{font-size:12px;line-height:1.5;color:var(--t-muted);padding-left:12px;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+
+.vb-modal{position:absolute;inset:0;z-index:50;background:rgba(20,19,18,.92);display:flex;
+  align-items:center;justify-content:center;padding:24px}
+.vb-card{width:min(440px,100%);background:var(--desk2);border:1px solid var(--line);
+  border-radius:16px;padding:22px;max-height:86%;overflow-y:auto}
+.vb-card h3{margin:0 0 4px;font-size:17px;font-weight:650}
+.vb-sub{margin:0 0 18px;font-size:13px;color:var(--muted);line-height:1.65}
+.vb-field{margin-bottom:16px}
+.vb-field label{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
+  color:var(--muted);margin-bottom:7px}
+.vb-field input{width:100%;padding:11px;border-radius:10px;border:1px solid var(--line);
+  background:var(--t-input);color:var(--t-ink);font-size:16px;outline:none;font-family:inherit}
+.vb-field input.pw6{text-align:center;letter-spacing:12px;font-size:24px;
+  font-variant-numeric:tabular-nums;padding-left:calc(11px + 12px)}
+.vb-field select{width:100%;padding:11px;border-radius:10px;border:1px solid var(--line);
+  background:var(--t-input);color:var(--t-ink);font-size:15px;outline:none;font-family:inherit;
+  appearance:none;-webkit-appearance:none;
+  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;
+  background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}
+.vb-field select option{background:var(--t-menu);color:var(--t-ink)}
+.vb-hint{margin:8px 2px 0;font-size:12px;color:var(--muted);line-height:1.55}
+
+/* 로그인 숫자 키패드 — 키보드 입력과 병행해서 쓴다 */
+.vb-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.vb-key{height:52px;border-radius:11px;background:var(--t-menu);border:1px solid var(--line);
+  font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;color:var(--t-ink);
+  display:flex;align-items:center;justify-content:center;touch-action:manipulation;
+  transition:background .1s}
+.vb-key:active{background:var(--desk3)}
+.vb-key.sm{font-size:17px;color:var(--muted)}
+.vb-key.go{background:var(--mark);color:#241F00;border-color:transparent}
+.vb-key.go:disabled{opacity:.35}
+@media (pointer:coarse){.vb-key{height:60px;font-size:22px}}
+
+.vb-row{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--t-sub);margin-bottom:16px}
+.vb-row input{width:19px;height:19px;accent-color:var(--mark);flex:0 0 auto}
+.vb-done{width:100%;padding:13px;border-radius:11px;background:var(--mark);color:#241F00;
+  font-weight:650;font-size:15px;touch-action:manipulation}
+
+.vb-bubble{position:absolute;z-index:38;padding:9px 15px;border-radius:10px;background:var(--mark);
+  color:#241F00;font-size:13.5px;font-weight:650;box-shadow:0 4px 14px rgba(0,0,0,.4);white-space:nowrap}
+
+/* ── 영역 캡처 ──
+   오버레이는 .vb-view 의 실측 사각형에 position:fixed 로 맞춘다. .vb-body 안에
+   절대배치하면 목차 패널까지 덮거나 패널 폭(400/272)을 또 하드코딩해야 한다. */
+/* 오버레이 자체는 투명하다 — 딤은 .vb-capsel 의 box-shadow 한 곳에서만 만든다.
+   둘 다 깔면 선택 안쪽까지 어두워져서 정작 오릴 글자가 잘 안 보인다. */
+.vb-cap{position:fixed;z-index:42;touch-action:none;cursor:crosshair;
+  background:transparent;-webkit-user-select:none;user-select:none}
+.vb-cap.busy{cursor:progress}
+.vb-capsel{position:absolute;border:1.5px solid var(--mark);background:rgba(255,216,77,.10);
+  box-shadow:0 0 0 9999px rgba(20,19,18,.42);cursor:move}
+.vb-caph{position:absolute;width:22px;height:22px;border-radius:50%;background:var(--mark);
+  border:2px solid #241F00;touch-action:none}
+.vb-caphint{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:43;
+  padding:8px 14px;border-radius:10px;background:rgba(20,19,18,.9);border:1px solid var(--line);
+  color:#D9D5CC;font-size:13px;white-space:nowrap;pointer-events:none}
+.vb-capmenu{position:absolute;z-index:43;display:flex;flex-wrap:wrap;gap:6px;padding:6px;
+  max-width:min(94vw,340px);border-radius:12px;
+  background:#2A2926;border:1px solid rgba(255,255,255,.10);box-shadow:0 6px 20px rgba(0,0,0,.5)}
+.vb-capbtn{min-height:40px;padding:0 15px;border-radius:9px;background:var(--mark);color:#241F00;
+  font-size:14px;font-weight:650;white-space:nowrap;touch-action:manipulation}
+.vb-capbtn.ghost{background:transparent;border:1px solid var(--line);color:#CFCBC2;font-weight:500}
+.vb-capbtn:disabled{opacity:.45}
+/* 질문 탭에 붙는 캡처 썸네일 */
+.vb-msgimg{display:block;max-width:min(100%,320px);border-radius:9px;border:1px solid var(--line);
+  margin:2px 0 8px;background:#fff}
+
+@media (prefers-reduced-motion:reduce){.vb-root *{transition:none!important;animation:none!important}}

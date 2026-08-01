@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { PDFDocument, PDFName, PDFHexString, PDFNumber } from "pdf-lib";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -20,13 +21,17 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 /* 질문 탭 전용 모델 목록.
    단어·문장 탭은 첫 토큰 속도가 생명이라 NIM_MODEL 을 그대로 쓰고,
    질문 탭만 아래에서 고른 모델로 부른다. 클라이언트가 이 목록을 받아 설정에 띄운다.
-   note 는 2026-07-29 에 같은 질문으로 직접 재본 값이다(TTFT = 첫 글자까지). */
+   note 는 2026-07-29 에 같은 질문으로 직접 재본 값이다(TTFT = 첫 글자까지).
+   think: true 는 reasoning_content(속생각)를 실제로 흘리는 걸 2026-07-31 에 직접 스트리밍으로
+   확인한 모델이다 — 클라이언트 드롭다운이 이 값으로 "추론 모델"/"일반 모델"을 가른다. */
 const ASK_MODELS = [
-  { id: "deepseek-ai/deepseek-v4-pro",           label: "DeepSeek V4 Pro",        note: "설명이 가장 정확하고 말투가 자연스럽다. 첫 응답 ~1초." },
-  { id: "nvidia/nemotron-3-super-120b-a12b",     label: "Nemotron 3 Super 120B",  note: "가장 빨리 끝난다(전체 ~2초). 답이 짧은 편." },
-  { id: "minimaxai/minimax-m3",                  label: "MiniMax M3",             note: "가장 길고 꼼꼼하다. 첫 응답 ~8초." },
-  { id: "openai/gpt-oss-120b",                   label: "GPT-OSS 120B",           note: "단어·문장 탭과 같은 계열. 빠르지만 마크다운을 섞는다." },
-  { id: "mistralai/mistral-medium-3.5-128b",     label: "Mistral Medium 3.5",     note: "다국어에 강하지만 첫 응답이 20초 넘을 때가 있다." },
+  { id: "deepseek-ai/deepseek-v4-pro",           label: "DeepSeek V4 Pro",        think: false, note: "설명이 가장 정확하고 말투가 자연스럽다. 첫 응답 ~1초." },
+  { id: "deepseek-ai/deepseek-v4-flash",         label: "DeepSeek V4 Flash",      think: false, note: "Pro의 경량판. 2026-07-31 재보니 이 서버 기준 첫 응답이 80초 넘게 걸렸다(콜드스타트로 보인다) — 붙자마자 답이 안 와도 죽은 게 아니다." },
+  { id: "nvidia/nemotron-3-super-120b-a12b",     label: "Nemotron 3 Super 120B",  think: true,  note: "속생각을 흘린 뒤 답한다(실측 첫 속생각 0.4초). 답 자체는 짧은 편." },
+  { id: "minimaxai/minimax-m3",                  label: "MiniMax M3",             think: false, note: "가장 길고 꼼꼼하다. 속생각은 안 흘리지만 첫 응답까지 종종 40초를 넘긴다." },
+  { id: "openai/gpt-oss-120b",                   label: "GPT-OSS 120B",           think: true,  note: "단어·문장 탭과 같은 계열. 속생각을 흘리며 빠르게 답하지만 마크다운을 섞는다." },
+  { id: "mistralai/mistral-medium-3.5-128b",     label: "Mistral Medium 3.5",     think: false, note: "다국어에 강하지만 첫 응답이 20초, 드물게 그 이상 걸릴 때가 있다." },
+  { id: "meta/llama-3.3-70b-instruct",           label: "Llama 3.3 70B",          think: false, note: "단어·문장 탭 기본 모델(NIM_MODEL)과 같은 모델. 2026-07-31 재보니 이 서버 기준 첫 응답이 50초대였다 — 콜드스타트 편차가 큰 편." },
 ];
 const ASK_MODEL_IDS = new Set(ASK_MODELS.map((m) => m.id));
 const NIM_ASK_MODEL = process.env.NIM_ASK_MODEL || "deepseek-ai/deepseek-v4-pro";
@@ -57,7 +62,7 @@ app.disable("x-powered-by");
 app.set("trust proxy", 1);
 // 영역 캡처는 base64 JPEG 를 본문에 담아 보낸다 (1400px 크롭이면 대략 200~600KB).
 // 1mb 로는 큰 크롭에서 413 이 나므로 여유를 둔다.
-app.use(express.json({ limit: "4mb" }));
+app.use(express.json({ limit: "12mb" })); // 서재 검색용 본문 캐시(책 전체 텍스트)가 4mb 를 넘는 경우가 있어 올렸다
 
 /* ───────────────── 세션 (단일 비밀번호) ───────────────── */
 const COOKIE = "yb_sess";
@@ -135,9 +140,11 @@ app.get("/api/models", requireAuth, (_req, res) => {
 const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
 const PDF_DIR = path.join(DATA_DIR, "pdfs");
 const THUMB_DIR = path.join(DATA_DIR, "thumbs");
+const TEXT_DIR = path.join(DATA_DIR, "text"); // 서재 검색용 페이지별 본문 캐시, data/text/<id>.json
 const LIB_FILE = path.join(DATA_DIR, "library.json");
 fs.mkdirSync(PDF_DIR, { recursive: true });
 fs.mkdirSync(THUMB_DIR, { recursive: true });
+fs.mkdirSync(TEXT_DIR, { recursive: true });
 
 let lib = { folders: [], files: [] };
 try {
@@ -153,6 +160,55 @@ function saveLib() {
 }
 
 app.get("/api/library", requireAuth, (_req, res) => res.json(lib));
+
+/* 서재 검색 — 제목 부분일치 + (열어서 인덱싱된 문서에 한해) 본문 부분일치.
+   진짜 검색엔진이 아니라 단순 substring 매칭이다: 개인 서재 규모(수십~수백 권)에서는
+   충분하고, 형태소 분석 없이도 한글 부분일치는 잘 맞는다.
+   본문 매칭은 페이지당 첫 등장 위치 하나만, 문서당 최대 3쪽까지만 잡는다 — 검색 결과에
+   "어디 있는지" 감만 주면 되지 전체 occurrence 를 셀 필요는 없다. */
+function snippetAt(text, idx, qLen) {
+  const CTX = 40;
+  const start = Math.max(0, idx - CTX);
+  const end = Math.min(text.length, idx + qLen + CTX);
+  let s = text.slice(start, end);
+  if (start > 0) s = "…" + s;
+  if (end < text.length) s = s + "…";
+  return s;
+}
+function searchDocText(id, qLower, maxMatches = 3) {
+  let pages;
+  try {
+    pages = JSON.parse(fs.readFileSync(path.join(TEXT_DIR, id + ".json"), "utf8"));
+  } catch {
+    return []; // 아직 한 번도 안 열어서 인덱스가 없다 — 제목 매칭만으로 걸릴 수 있다
+  }
+  if (!Array.isArray(pages)) return [];
+  const out = [];
+  for (let i = 0; i < pages.length && out.length < maxMatches; i++) {
+    const t = pages[i] || "";
+    const idx = t.toLowerCase().indexOf(qLower);
+    if (idx >= 0) out.push({ page: i + 1, snippet: snippetAt(t, idx, qLower.length) });
+  }
+  return out;
+}
+app.get("/api/library/search", requireAuth, (req, res) => {
+  const q = String(req.query.q || "").trim().slice(0, 200);
+  if (!q) return res.json({ query: "", results: [] });
+  const qLower = q.toLowerCase();
+  const results = [];
+  for (const f of lib.files) {
+    const titleMatch = f.name.toLowerCase().includes(qLower);
+    const matches = searchDocText(f.id, qLower);
+    if (!titleMatch && !matches.length) continue;
+    results.push({ ...f, titleMatch, matches });
+  }
+  results.sort((a, b) => {
+    if (a.titleMatch !== b.titleMatch) return a.titleMatch ? -1 : 1;
+    if (b.matches.length !== a.matches.length) return b.matches.length - a.matches.length;
+    return (b.at || 0) - (a.at || 0);
+  });
+  res.json({ query: q, results: results.slice(0, 40) });
+});
 
 /* 업로드 — 본문이 PDF 바이트 그대로 오고, 이름·폴더는 쿼리로 받는다 */
 app.post(
@@ -170,7 +226,9 @@ app.post(
     if (dup) return res.json({ ...dup, existing: true });
     const id = crypto.randomUUID();
     fs.writeFileSync(path.join(PDF_DIR, id + ".pdf"), buf);
-    const entry = { id, name, folder, size: buf.length, at: Date.now() };
+    // lastOpenedAt 을 업로드 시각으로 미리 채워 둔다 — 방금 추가한 책이 서재 인사말에서
+    // "오랜만이네요"로 뜨는 걸 막는다(추가 = 사실상 방금 연 것과 같다).
+    const entry = { id, name, folder, size: buf.length, at: Date.now(), lastOpenedAt: Date.now() };
     lib.files.push(entry);
     saveLib();
     res.json(entry);
@@ -190,16 +248,124 @@ app.get("/api/library/file/:id", requireAuth, (req, res) => {
   res.sendFile(path.join(PDF_DIR, f.id + ".pdf"));
 });
 
-/* 폴더 이동·이름 변경 */
+/* 폴더 이동·이름 변경·마지막으로 읽은 쪽 저장.
+   lastPage 는 읽는 동안 쪽이 바뀔 때마다(디바운스해서) 클라이언트가 조용히 보낸다 —
+   다음에 이 파일을 열면 그 쪽부터 시작한다. */
 app.patch("/api/library/file/:id", requireAuth, (req, res) => {
   const f = lib.files.find((x) => x.id === req.params.id);
   if (!f) return res.status(404).json({ error: "없는 파일입니다." });
-  const { folder, name } = req.body || {};
+  const { folder, name, lastPage, opened } = req.body || {};
   if (folder !== undefined)
     f.folder = folder && lib.folders.some((x) => x.id === folder) ? folder : "";
   if (typeof name === "string" && name.trim()) f.name = name.trim().slice(0, 200);
+  if (Number.isFinite(lastPage) && lastPage > 0) f.lastPage = Math.floor(lastPage);
+  // opened:true — 서재에서 이 문서를 열 때마다 찍는다. lastPage 저장은 스크롤 디바운스라
+  // 첫 몇 초 안에 문서를 닫으면 안 찍힐 수 있어서, "정말 열었다"는 별도 신호를 둔다.
+  // 서재 인사말이 "이어읽기"/"오랜만" 을 가르는 기준이 이 값이다.
+  if (opened === true) f.lastOpenedAt = Date.now();
   saveLib();
   res.json(f);
+});
+
+/* 서재 검색 인덱스 갱신 — 클라이언트가 문서를 열어 pdf.js 로 본문을 다 뽑으면
+   (App.jsx extractAll) 페이지별 텍스트 배열을 여기로 올린다. 서버는 pdf-lib 만 있고
+   pdfjs-dist 는 없어서 서버 자체 추출은 하지 않는다 — 열어본 문서만 검색되는 대신
+   훨씬 가볍다. totalPages 도 같이 실어 보내 "마지막 O쪽 · 총 N쪽" 표기에 쓴다. */
+app.post("/api/library/file/:id/text", requireAuth, (req, res) => {
+  const f = lib.files.find((x) => x.id === req.params.id);
+  if (!f) return res.status(404).json({ error: "없는 파일입니다." });
+  const pages = Array.isArray(req.body?.pages) ? req.body.pages : null;
+  if (!pages || !pages.length) return res.status(400).json({ error: "pages 가 비었습니다." });
+  const clean = pages.map((t) => (typeof t === "string" ? t.slice(0, 20000) : ""));
+  const tmp = path.join(TEXT_DIR, f.id + ".json.tmp");
+  const dst = path.join(TEXT_DIR, f.id + ".json");
+  fs.writeFileSync(tmp, JSON.stringify(clean));
+  fs.renameSync(tmp, dst);
+  const total = Number(req.body?.totalPages);
+  if (Number.isFinite(total) && total > 0 && f.totalPages !== Math.floor(total)) {
+    f.totalPages = Math.floor(total);
+    saveLib();
+  }
+  res.json({ ok: true, pages: clean.length });
+});
+
+/* ── 목차 자동 생성 결과를 PDF 파일 자체에 북마크(/Outlines)로 박아 넣는다 ──
+   pdf-lib 는 북마크를 만드는 고수준 API가 없어서 PDFContext 로 직접 트리를 만든다.
+   Title 은 반드시 PDFHexString.fromText() 로 써야 한다 — 기본 PDFString 은
+   PDFDocEncoding(라틴 계열)이라 한글이 깨진다(실제로 재현·확인했다). depth 로 부모를 찾는
+   스택 방식 트리 구성 → 모든 노드에 ref 를 먼저 할당 → Prev/Next/Parent/First/Last/Count 를
+   채우는 순서. pdfjs-dist 3.11.174(이 앱이 쓰는 버전)의 getOutline() 으로 왕복 검증했다. */
+function buildOutlinePdf(pdfBytes, items) {
+  return (async () => {
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const pages = pdfDoc.getPages();
+    const ctx = pdfDoc.context;
+
+    const roots = [];
+    const parentStack = [{ children: roots, depth: -1 }];
+    for (const it of items) {
+      const depth = Math.max(0, Math.min(5, Math.floor(it.depth) || 0));
+      while (parentStack.length > 1 && parentStack[parentStack.length - 1].depth >= depth) parentStack.pop();
+      const node = { title: it.title, page: it.page, children: [] };
+      parentStack[parentStack.length - 1].children.push(node);
+      parentStack.push({ children: node.children, depth });
+    }
+
+    const allocRefs = (nodes) => { for (const n of nodes) { n.ref = ctx.nextRef(); allocRefs(n.children); } };
+    const outlinesRef = ctx.nextRef();
+    allocRefs(roots);
+
+    const countAll = (nodes) => nodes.reduce((s, n) => s + 1 + countAll(n.children), 0);
+    const buildLevel = (nodes, parentRef) => {
+      nodes.forEach((n, i) => {
+        const pageIndex = Math.min(pages.length - 1, Math.max(0, n.page - 1));
+        const dest = ctx.obj([pages[pageIndex].ref, PDFName.of("Fit")]);
+        const dict = { Title: PDFHexString.fromText(n.title), Parent: parentRef, Dest: dest };
+        if (i > 0) dict.Prev = nodes[i - 1].ref;
+        if (i < nodes.length - 1) dict.Next = nodes[i + 1].ref;
+        if (n.children.length) {
+          dict.First = n.children[0].ref;
+          dict.Last = n.children[n.children.length - 1].ref;
+          dict.Count = PDFNumber.of(countAll(n.children));
+          buildLevel(n.children, n.ref);
+        }
+        ctx.assign(n.ref, ctx.obj(dict));
+      });
+    };
+    buildLevel(roots, outlinesRef);
+
+    const outlinesDict = { Type: PDFName.of("Outlines"), Count: PDFNumber.of(countAll(roots)) };
+    if (roots.length) { outlinesDict.First = roots[0].ref; outlinesDict.Last = roots[roots.length - 1].ref; }
+    ctx.assign(outlinesRef, ctx.obj(outlinesDict));
+    pdfDoc.catalog.set(PDFName.of("Outlines"), outlinesRef);
+
+    return pdfDoc.save();
+  })();
+}
+
+app.post("/api/library/file/:id/outline", requireAuth, async (req, res) => {
+  const f = lib.files.find((x) => x.id === req.params.id);
+  if (!f) return res.status(404).json({ error: "없는 파일입니다." });
+  const items = Array.isArray(req.body?.items) ? req.body.items : null;
+  if (!items || !items.length) return res.status(400).json({ error: "items 가 비었습니다." });
+  const clean = items
+    .filter((it) => it && typeof it.title === "string" && it.title.trim() && Number.isFinite(it.page))
+    .slice(0, 300)
+    .map((it) => ({ title: it.title.trim().slice(0, 200), page: Math.max(1, Math.floor(it.page)), depth: it.depth }));
+  if (!clean.length) return res.status(400).json({ error: "유효한 항목이 없습니다." });
+
+  const filePath = path.join(PDF_DIR, f.id + ".pdf");
+  try {
+    const bytes = await fs.promises.readFile(filePath);
+    const out = await buildOutlinePdf(bytes, clean);
+    const tmp = filePath + ".tmp";
+    await fs.promises.writeFile(tmp, out);
+    await fs.promises.rename(tmp, filePath);
+    res.json({ ok: true, count: clean.length });
+  } catch (e) {
+    console.error("[여백] 목차 생성 실패", e);
+    res.status(500).json({ error: "목차를 PDF에 반영하지 못했습니다: " + e.message });
+  }
 });
 
 app.delete("/api/library/file/:id", requireAuth, (req, res) => {
@@ -208,6 +374,7 @@ app.delete("/api/library/file/:id", requireAuth, (req, res) => {
   const [f] = lib.files.splice(i, 1);
   fs.rm(path.join(PDF_DIR, f.id + ".pdf"), { force: true }, () => {});
   fs.rm(path.join(THUMB_DIR, f.id + ".jpg"), { force: true }, () => {});
+  fs.rm(path.join(TEXT_DIR, f.id + ".json"), { force: true }, () => {});
   saveLib();
   res.json({ ok: true });
 });
@@ -224,6 +391,11 @@ app.post(
       return res.status(400).json({ error: "이미지가 비었습니다." });
     fs.writeFileSync(path.join(THUMB_DIR, f.id + ".jpg"), req.body);
     f.thumb = true;
+    // 표지를 만드는 김에 1쪽 원본 비율도 같이 받는다 — 서재 그리드의 "매트" 처리(칸은
+    // 고정, 안의 종이는 원본 비율대로)에 쓴다. 클라이언트가 이미 재고 있는 값이라 별도
+    // 왕복 없이 쿼리로 얹는다.
+    const w = Number(req.query.w), h = Number(req.query.h);
+    if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) f.ratio = w / h;
     saveLib();
     res.json({ ok: true });
   }
@@ -244,6 +416,21 @@ app.post("/api/library/folder", requireAuth, (req, res) => {
   lib.folders.push(folder);
   saveLib();
   res.json(folder);
+});
+
+/* 사이드바 폴더 순서 — 드래그로 바꾼 순서를 그대로 배열 순서로 저장한다.
+   목록에 없는 id(동시에 다른 곳에서 삭제/추가된 폴더)는 무시하고, ids 에 안 실린
+   기존 폴더는 뒤에 원래 순서 그대로 붙인다 — 클라이언트가 살짝 stale 해도 폴더가 사라지지 않는다. */
+app.patch("/api/library/folders/reorder", requireAuth, (req, res) => {
+  const ids = Array.isArray(req.body?.ids) ? req.body.ids : null;
+  if (!ids) return res.status(400).json({ error: "ids 가 비었습니다." });
+  const byId = new Map(lib.folders.map((f) => [f.id, f]));
+  const ordered = ids.filter((id) => byId.has(id)).map((id) => byId.get(id));
+  const seen = new Set(ordered.map((f) => f.id));
+  for (const f of lib.folders) if (!seen.has(f.id)) ordered.push(f);
+  lib.folders = ordered;
+  saveLib();
+  res.json({ folders: lib.folders });
 });
 
 app.patch("/api/library/folder/:id", requireAuth, (req, res) => {
@@ -305,6 +492,97 @@ app.delete("/api/vocab/:id", requireAuth, (req, res) => {
   if (i < 0) return res.status(404).json({ error: "없는 항목입니다." });
   vocab.splice(i, 1);
   saveVocab();
+  res.json({ ok: true });
+});
+
+/* ───────────────── 해석 이력 (기록 탭) ─────────────────
+   드래그 선택으로 해석한 문장/구간. data/interps.json 에 최신순으로 쌓인다.
+   단어장(vocab)과 똑같은 구조 — 예전엔 클라이언트 useRef 에만 있어서 새로고침하면 날아갔다. */
+const INTERP_FILE = path.join(DATA_DIR, "interps.json");
+const INTERP_MAX = 300; // 무한정 쌓이지 않게 오래된 것부터 버린다
+let interps = [];
+try {
+  interps = JSON.parse(fs.readFileSync(INTERP_FILE, "utf8")).items || [];
+} catch {}
+function saveInterps() {
+  const tmp = INTERP_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify({ items: interps }, null, 2));
+  fs.renameSync(tmp, INTERP_FILE);
+}
+
+app.get("/api/interps", requireAuth, (_req, res) => res.json({ items: interps }));
+
+app.post("/api/interps", requireAuth, (req, res) => {
+  const { quote = "", trans = "", doc = "", page = 0 } = req.body || {};
+  const q = String(quote).trim().slice(0, 800);
+  if (!q) return res.status(400).json({ error: "quote 가 비었습니다." });
+  const entry = {
+    id: crypto.randomUUID(),
+    quote: q,
+    trans: String(trans).slice(0, 4000),
+    doc: String(doc).slice(0, 200),
+    page: Number(page) || 0,
+    at: Date.now(),
+  };
+  interps.unshift(entry);
+  if (interps.length > INTERP_MAX) interps.length = INTERP_MAX;
+  saveInterps();
+  res.json(entry);
+});
+
+app.delete("/api/interps/:id", requireAuth, (req, res) => {
+  const i = interps.findIndex((v) => v.id === req.params.id);
+  if (i < 0) return res.status(404).json({ error: "없는 항목입니다." });
+  interps.splice(i, 1);
+  saveInterps();
+  res.json({ ok: true });
+});
+
+/* ───────────────── 단어 찾아본 기록 (기록 탭) ─────────────────
+   ★ 로 담은 것(vocab)과 별개다 — 이건 그냥 그 문서에서 탭해 본 모든 단어.
+   같은 문서에서 같은 단어를 다시 찾으면(대소문자 무시) 새로 안 쌓고 맨 앞으로만 옮긴다 —
+   문서가 다르면 같은 단어라도 별개 항목이다("이 파일에서" 찾아본 것이 기준이라). */
+const LOOKUP_FILE = path.join(DATA_DIR, "lookups.json");
+const LOOKUP_MAX = 1000;
+let lookups = [];
+try {
+  lookups = JSON.parse(fs.readFileSync(LOOKUP_FILE, "utf8")).items || [];
+} catch {}
+function saveLookups() {
+  const tmp = LOOKUP_FILE + ".tmp";
+  fs.writeFileSync(tmp, JSON.stringify({ items: lookups }, null, 2));
+  fs.renameSync(tmp, LOOKUP_FILE);
+}
+
+app.get("/api/lookups", requireAuth, (_req, res) => res.json({ items: lookups }));
+
+app.post("/api/lookups", requireAuth, (req, res) => {
+  const { word = "", mean = "", ctx = "", quote = "", doc = "" } = req.body || {};
+  const w = String(word).trim().slice(0, 80);
+  if (!w) return res.status(400).json({ error: "word 가 비었습니다." });
+  const d = String(doc).slice(0, 200);
+  const i = lookups.findIndex((v) => v.word.toLowerCase() === w.toLowerCase() && v.doc === d);
+  if (i >= 0) lookups.splice(i, 1);
+  const entry = {
+    id: crypto.randomUUID(),
+    word: w,
+    mean: String(mean).slice(0, 500),
+    ctx: String(ctx).slice(0, 800),
+    quote: String(quote).slice(0, 500),
+    doc: d,
+    at: Date.now(),
+  };
+  lookups.unshift(entry);
+  if (lookups.length > LOOKUP_MAX) lookups.length = LOOKUP_MAX;
+  saveLookups();
+  res.json(entry);
+});
+
+app.delete("/api/lookups/:id", requireAuth, (req, res) => {
+  const i = lookups.findIndex((v) => v.id === req.params.id);
+  if (i < 0) return res.status(404).json({ error: "없는 항목입니다." });
+  lookups.splice(i, 1);
+  saveLookups();
   res.json({ ok: true });
 });
 

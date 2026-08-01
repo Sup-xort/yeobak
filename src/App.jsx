@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import "katex/dist/katex.min.css";
+import "./App.css";
 import Rich from "./rich.jsx";
 
 /* ───────────────────────── 설정 ───────────────────────── */
@@ -20,425 +21,103 @@ const SESS_TTL = 2 * 60 * 60 * 1000;
 const SESS_MAX = 20;      // 이보다 많아지면 오래된 것부터 버린다
 const SESS_KEY = "yeobaek.ask";
 const WIDE = 880;
+/* 서재 카드의 "매트" 규격 — 슬롯 높이(px)와 좁은 화면 축소율, 비율을 모를 때 쓰는 A4 세로.
+   SLOT_H 는 App.css 의 .vb-slot / .vb-slot.sm 높이와 같이 움직여야 한다. */
+const SLOT_H = 132;
+const NARROW_S = 114 / SLOT_H; // .vb-slot.sm 이 114px
+const A4_RATIO = 210 / 297;
 /* 터치 기기 여부 — 로그인 키패드에서 OS 키보드를 언제 띄울지 정하는 데만 쓴다 */
 const COARSE = typeof window !== "undefined" && !!window.matchMedia?.("(pointer:coarse)").matches;
+/* 애플펜슬 드래그 캡처 토글을 사파리에서만 보여준다 — 이 제스처는 사파리/웹킷의
+   PointerEvent pointerType:"pen" 구분에 기대는데, 크롬 계열은 아이패드에서도 펜을
+   touch 로 뭉뚱그려 보고할 때가 있어 다른 브라우저에서는 조용히 안 켜지는 게 낫다. */
+const IS_SAFARI =
+  typeof navigator !== "undefined" &&
+  /^((?!chrome|android|crios|fxios|edgios).)*safari/i.test(navigator.userAgent);
 
-const CSS = `
-.vb-root{--desk:#201F1D;--desk2:#2A2926;--desk3:#38362F;--paper:#FDFDFC;
-  --muted:#918C82;--mark:#FFD84D;--mark2:#6FD3C0;--line:rgba(255,255,255,.10);
-  --sans:-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",Pretendard,"Noto Sans KR","Segoe UI",system-ui,sans-serif;
-  --serif:"Iowan Old Style",Charter,"Palatino Linotype",Georgia,"Times New Roman",serif;
-  position:relative;width:100%;height:100vh;height:100dvh;
-  display:flex;flex-direction:column;overflow:hidden;
-  font-family:var(--sans);background:var(--desk);color:#EDEBE6;font-size:15px;
-  -webkit-font-smoothing:antialiased;overscroll-behavior:none}
-.vb-root *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
-/* :where 로 특이도를 낮춘 리셋 — .vb-root button 으로 쓰면 (클래스+태그) 특이도가
-   .vb-libbtn 같은 단일 클래스 규칙의 padding 을 전부 덮어써 버린다 (실제로 당했던 버그) */
-.vb-root :where(button){font-family:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:0}
+/* ── 서재 인사말 ──
+   시간대(새벽·아침·낮·저녁·밤) × 맥락(처음·이어읽기·오랜만) 두 축에서 문장을 고른다.
+   문구 구조는 design_handoff_yeobaek_library_and_brand/여백 서재.dc.html 의 SLOTS 를
+   그대로 옮겼다 — 다만 그 시안은 전부 더미 문구("7쪽" 같은 고정 숫자)라, 여기서는 실제
+   서재 데이터(최근 연 문서 제목·쪽수)로 채운다. "이어읽기" 인지 "오랜만" 인지는 그 문서의
+   lastOpenedAt 이 갈라서 정한다(48시간 기준).
+   같은 문장이 연달아 뜨지 않도록 직전에 보여준 조합의 키를 localStorage 에 남겨 두고
+   다음 선택에서 제외한다 — 서재 화면은 매번 새로 마운트되지 않으니(SPA), 서재를 다시
+   열 때마다가 아니라 앱을 새로 불러올 때 한 번만 고른다(walk-in 인사말이지 실시간 위젯이 아니다). */
+const GREET_STAMP = ["새벽", "아침", "낮", "저녁", "밤"];
+const greetTimeIdx = (h) => (h < 5 ? 0 : h < 11 ? 1 : h < 17 ? 2 : h < 21 ? 3 : 4);
+const GREET_DORMANT_HOURS = 96; // 이보다 오래 안 열었으면 "오랜만"
 
-.vb-bar{flex:0 0 auto;display:flex;align-items:center;gap:2px;
-  padding:calc(6px + env(safe-area-inset-top)) 8px 6px;
-  background:var(--desk);border-bottom:1px solid var(--line);z-index:40}
-.vb-tool{height:36px;min-width:36px;padding:0 10px;border-radius:9px;display:inline-flex;
-  align-items:center;justify-content:center;font-size:13px;color:#D9D5CC;flex:0 0 auto;
-  touch-action:manipulation}
-.vb-tool:active{background:var(--desk3)}
-.vb-tool.on{background:var(--mark);color:#241F00;font-weight:600}
-.vb-tool svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.7;
-  stroke-linecap:round;stroke-linejoin:round}
-@media (pointer:coarse){.vb-tool{height:42px;min-width:42px}}
-.vb-name{flex:1;min-width:0;padding:0 8px;font-size:13px;color:var(--muted);
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.vb-pill{font-variant-numeric:tabular-nums;font-size:12.5px;color:var(--muted);padding:0 8px;white-space:nowrap}
-.vb-eng{font-size:10px;letter-spacing:.06em;text-transform:uppercase;padding:4px 7px;
-  border-radius:5px;background:var(--desk3);color:var(--muted);white-space:nowrap}
-.vb-eng.c{color:var(--mark)} .vb-eng.g{color:var(--mark2)}
+const GREET_NEW = [
+  ["처음 오셨네요.", "PDF를 끌어다 놓거나 위의 'PDF 추가'로 서재를 채워보세요."],
+  ["여백에 오신 걸 환영합니다.", "단어는 탭 한 번, 문장은 두 번, 구간은 드래그로 풀이합니다."],
+  ["빈 서재입니다.", "자료를 넣으면 표지와 함께 여기 꽂힙니다."],
+];
+const greetDormant = (at) => [
+  ["오랜만이네요.", at ? `${at}가 그대로 남아 있습니다.` : "서재를 둘러볼까요?"],
+  ["다시 만나 반갑습니다.", "새로 시작해도, 이어서 봐도 좋습니다."],
+  ["한동안 안 오셨네요.", at ? `${at}에서 이어가 볼까요?` : "새 자료를 열어볼까요?"],
+];
+const greetResume = (at) => [
+  [ // 새벽
+    ["아직 아무도 깨지 않았네요.", "조용한 시간엔 어려운 장이 더 잘 읽히더군요."],
+    ["밤을 넘기셨군요.", "15분만 더 읽고 덮는 것도 좋은 선택입니다."],
+    ["불 켜진 방이 여기 하나.", at ? `${at}에서 이어가시겠어요?` : "이어서 읽어볼까요?"],
+  ],
+  [ // 아침
+    ["좋은 아침입니다.", at ? `${at}에서 멈추셨어요.` : "오늘도 좋은 하루 보내세요."],
+    ["오늘 첫 페이지를 열어볼까요.", "아침엔 새 챕터를 시작하기 좋습니다."],
+    ["일찍 오셨네요.", at ? `${at}, 짧게 이어가 볼까요?` : "짧게 한 챕터 어떠세요."],
+  ],
+  [ // 낮
+    ["이어서 읽을 준비가 되셨나요.", at ? `${at}에서 기다리고 있습니다.` : "새 자료를 열어볼까요?"],
+    ["한낮의 30분.", at ? `${at}로 돌아가 볼까요?` : "잠깐 짬을 내 읽어볼까요?"],
+    ["다시 오셨군요.", "읽던 자리로 바로 갈까요, 아니면 새 자료를 열까요?"],
+  ],
+  [ // 저녁
+    ["하루를 덮기 전에, 한 챕터.", at ? `${at}가 기다리고 있습니다.` : "가볍게 한 챕터 어떠세요."],
+    ["저녁입니다.", "가벼운 걸 읽어도 좋고, 읽던 곳으로 돌아가도 좋습니다."],
+    ["수고하셨어요.", at ? `${at}가 그대로 있습니다.` : "오늘 하루도 고생 많으셨어요."],
+  ],
+  [ // 밤
+    ["늦은 시간이네요.", "짧게 읽고 덮으시겠어요? 자리는 기억해두겠습니다."],
+    ["오늘의 마지막 페이지.", "어려운 장은 내일 아침으로 미뤄도 괜찮습니다."],
+    ["조용한 밤입니다.", at ? `${at}에서 이어가 볼까요?` : "화면을 어둡게 해두었어요."],
+  ],
+];
 
-.vb-body{flex:1;min-height:0;display:flex;position:relative}
+function pickGreeting(libData) {
+  const now = new Date();
+  const timeIdx = greetTimeIdx(now.getHours());
+  const stamp = `${GREET_STAMP[timeIdx]} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
 
-.vb-out{position:absolute;inset:0 auto 0 0;width:min(80%,300px);z-index:30;background:var(--desk2);
-  border-right:1px solid var(--line);transform:translateX(-101%);
-  transition:transform .24s cubic-bezier(.3,.8,.4,1);display:flex;flex-direction:column}
-.vb-out.open{transform:none}
-.vb-root.wide .vb-out{position:relative;flex:0 0 272px;width:272px;transform:none}
-.vb-root.wide .vb-out.closed{display:none}
-.vb-out h2{margin:0;padding:14px 16px 10px;font-size:10.5px;font-weight:600;
-  letter-spacing:.16em;text-transform:uppercase;color:var(--muted)}
-.vb-olist{flex:1;overflow-y:auto;padding:0 8px calc(24px + env(safe-area-inset-bottom));
-  -webkit-overflow-scrolling:touch;overscroll-behavior:contain}
-.vb-orow{display:flex;align-items:center;border-radius:7px}
-.vb-orow.d1{margin-left:15px;border-left:1px solid var(--line);border-radius:0 7px 7px 0}
-.vb-orow.d2{margin-left:30px;border-left:1px solid var(--line);border-radius:0 7px 7px 0}
-.vb-oi{flex:1;min-width:0;text-align:left;padding:10px 10px 10px 2px;border-radius:inherit;
-  font-size:13.5px;line-height:1.45;color:#CFCBC2;touch-action:manipulation;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.vb-oi:active{background:var(--desk3)}
-.vb-orow.d1 .vb-oi{font-size:13px;color:#B4B0A7}
-.vb-orow.d2 .vb-oi{font-size:12.5px;color:#A09C93}
-.vb-ochev{flex:0 0 28px;height:38px;display:flex;align-items:center;justify-content:center;
-  color:var(--muted);touch-action:manipulation}
-.vb-ochev svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;
-  stroke-linecap:round;stroke-linejoin:round;transition:transform .16s}
-.vb-ochev.fold svg{transform:rotate(-90deg)}
-.vb-ochev.off{pointer-events:none;visibility:hidden}
-.vb-pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(48px,1fr));gap:6px;padding:6px 4px}
-.vb-pg{height:40px;border-radius:8px;border:1px solid var(--line);font-size:13px;color:#CFCBC2;
-  font-variant-numeric:tabular-nums;touch-action:manipulation}
-.vb-pg:active{background:var(--desk3)}
-.vb-pg.on{background:var(--mark);color:#241F00;border-color:transparent;font-weight:650}
-.vb-oempty{padding:10px 12px;font-size:13px;color:var(--muted);line-height:1.5}
-.vb-scrim{position:absolute;inset:0;background:rgba(0,0,0,.45);z-index:25;opacity:0;
-  pointer-events:none;transition:opacity .24s}
-.vb-scrim.on{opacity:1;pointer-events:auto}
-.vb-root.wide .vb-scrim{display:none}
+  const files = libData?.files || [];
+  const recent = files.length
+    ? [...files].sort((a, b) => (b.lastOpenedAt || b.at || 0) - (a.lastOpenedAt || a.at || 0))[0]
+    : null;
+  const hoursSince = recent ? (Date.now() - (recent.lastOpenedAt || recent.at || 0)) / 3_600_000 : Infinity;
+  const at = recent
+    ? `《${recent.name}》 ${recent.lastPage || 1}쪽${recent.totalPages ? ` · 전체 ${recent.totalPages}쪽` : ""}`
+    : "";
 
-.vb-view{flex:1;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;
-  padding:14px 0 45vh;touch-action:pan-x pan-y;overscroll-behavior:contain;
-  transition:padding .26s cubic-bezier(.3,.85,.35,1)}
-/* 넓은 화면에서 풀이 시트가 열리면 그 폭만큼 비켜서 페이지가 시트에 가려지지 않게 한다 */
-.vb-root.wide .vb-view.shr{padding-right:400px}
-.vb-pages{transform-origin:50% 0;will-change:transform}
-.vb-page{position:relative;margin:0 auto 14px;background:var(--paper);
-  box-shadow:0 1px 3px rgba(0,0,0,.5),0 10px 30px rgba(0,0,0,.28);border-radius:2px;overflow:hidden}
-.vb-page canvas{position:absolute;inset:0;width:100%;height:100%}
-.vb-pn{position:absolute;right:6px;bottom:5px;font-size:9.5px;color:#B9B5AC;
-  font-variant-numeric:tabular-nums;pointer-events:none}
-.vb-tl{position:absolute;inset:0;overflow:hidden;line-height:1;color:transparent;
-  -webkit-user-select:text;user-select:text;-webkit-touch-callout:none}
-.vb-tl .it{position:absolute;white-space:pre;transform-origin:0 0;cursor:text}
-.vb-tl .w{border-radius:2px}
-/* 탭한 단어 / 문장 하이라이트 — 글자는 텍스트 레이어(color:transparent)가 아니라 캔버스에 있다.
-   그래서 글자 위에 색을 깔면 무조건 글자를 가린다:
-   불투명하면 통째로 사라지고, 반투명하면 검정이 뿌옇게 뜬다.
-   mix-blend-mode:multiply 로 곱하면 이론상 딱 맞지만 iOS 사파리가 스크롤 컨테이너의
-   합성 레이어 경계를 넘어 블렌딩을 못 해서 실기기에서 그냥 무시된다(isolation:isolate 도 소용없었다).
-   그래서 글자 위는 아예 비우고 아래쪽에 형광펜 획만 긋는다 — 검정이 100% 그대로 남는다. */
-.vb-tl .vb-hl{position:absolute;pointer-events:none;border-radius:1px;
-  background:linear-gradient(to top,var(--mark) 0 3px,transparent 3px)}
-.vb-tl .vb-hl.sent{background:linear-gradient(to top,var(--mark2) 0 3px,transparent 3px)}
-.vb-root ::selection{background:rgba(255,216,77,.55)}
+  let mode, pool;
+  if (!files.length) { mode = "new"; pool = GREET_NEW; }
+  else if (hoursSince > GREET_DORMANT_HOURS) { mode = "dormant"; pool = greetDormant(at); }
+  else { mode = "resume"; pool = greetResume(at)[timeIdx]; }
 
-.vb-zoompill{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:36;
-  padding:6px 14px;border-radius:20px;background:rgba(32,31,29,.9);color:#EDEBE6;
-  font-size:13px;font-variant-numeric:tabular-nums;pointer-events:none}
-.vb-uppill{position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:34;
-  min-width:250px;max-width:76%;padding:9px 16px;border-radius:12px;background:var(--desk3);
-  border:1px solid var(--line);overflow:hidden;font-size:12.5px;color:#EDEBE6;text-align:center;
-  white-space:nowrap;text-overflow:ellipsis;box-shadow:0 6px 18px rgba(0,0,0,.35)}
-.vb-uppill i{position:absolute;inset:0 auto 0 0;background:rgba(255,216,77,.22);transition:width .2s}
-.vb-uppill span{position:relative}
+  let last = "";
+  try { last = localStorage.getItem("yeobaek.greet") || ""; } catch {}
+  const keyOf = (i) => `${mode}:${timeIdx}:${i}`;
+  const idxPool = pool.map((_, i) => i);
+  const candidates = idxPool.filter((i) => keyOf(i) !== last);
+  const pick = candidates.length ? candidates : idxPool;
+  const idx = pick[Math.floor(Math.random() * pick.length)];
+  try { localStorage.setItem("yeobaek.greet", keyOf(idx)); } catch {}
 
-/* ── 서재 (PDF 보관함) ── */
-.vb-lib{position:absolute;inset:0;z-index:32;background:var(--desk);display:flex;flex-direction:column;
-  animation:vb-fade .22s ease-out}
-@keyframes vb-fade{from{opacity:0}to{opacity:1}}
-.vb-libhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-  padding:calc(14px + env(safe-area-inset-top)) 20px 6px}
-.vb-mk{font-family:var(--serif);font-size:34px;line-height:1;color:var(--paper);letter-spacing:-.02em}
-.vb-mk em{font-style:italic;background:var(--mark);color:#241F00;padding:0 .12em;border-radius:3px}
-.vb-crumb{display:flex;align-items:center;gap:2px;font-size:14px;color:var(--muted);min-width:0}
-.vb-crumb button{padding:8px 10px;border-radius:8px;color:#D9D5CC;max-width:200px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;touch-action:manipulation}
-.vb-crumb button.tgt{background:var(--desk3);box-shadow:0 0 0 2px var(--mark)}
-.vb-libact{margin-left:auto;display:flex;gap:8px;align-items:center}
-/* 질문탭(.vb-tab)과 같은 규격 — 서재와 뷰어의 버튼 크기를 통일한다 */
-.vb-libbtn{min-height:40px;min-width:48px;padding:0 14px;display:inline-flex;align-items:center;justify-content:center;
-  border-radius:9px;background:var(--desk3);font-size:14.5px;line-height:1;
-  color:#EDEBE6;touch-action:manipulation;white-space:nowrap}
-.vb-libbtn svg{width:20px;height:20px;stroke:currentColor;fill:none;stroke-width:1.8;
-  stroke-linecap:round;stroke-linejoin:round}
-.vb-seg .vb-libbtn{background:transparent}
-.vb-libbtn.pri{background:var(--mark);color:#241F00;font-weight:650}
-.vb-libbtn:disabled{opacity:.45}
-.vb-newfol{display:flex;gap:8px;padding:10px 20px 0}
-.vb-newfol input{flex:1;max-width:280px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);
-  background:#232220;color:#EDEBE6;font-size:15px;outline:none;font-family:inherit}
-.vb-libbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
-  padding:2px 20px calc(30px + env(safe-area-inset-bottom))}
-.vb-sect{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px}
-.vb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:18px 14px}
-.vb-fol{position:relative;border:1px solid var(--line);border-radius:12px;background:var(--desk2);
-  padding:12px;text-align:left;cursor:pointer;touch-action:manipulation;
-  -webkit-user-select:none;user-select:none}
-.vb-fol:active{background:var(--desk3)}
-.vb-fol.over{background:var(--desk3);box-shadow:0 0 0 2px var(--mark)}
-.vb-fol svg{width:26px;height:26px;stroke:var(--mark);fill:none;stroke-width:1.6;
-  stroke-linecap:round;stroke-linejoin:round;margin-bottom:8px}
-/* 책 카드 — 표지(1페이지 썸네일)가 얼굴이다 */
-.vb-doc{position:relative;text-align:left;cursor:pointer;touch-action:manipulation;
-  -webkit-user-select:none;user-select:none;-webkit-user-drag:element}
-.vb-doc.drag{opacity:.35}
-.vb-cov{position:relative;aspect-ratio:3/4;border-radius:5px 10px 10px 5px;background:var(--desk2);
-  border:1px solid var(--line);display:flex;align-items:center;justify-content:center;overflow:hidden;
-  box-shadow:0 1px 2px rgba(0,0,0,.45),0 8px 22px rgba(0,0,0,.3)}
-.vb-cov::after{content:'';position:absolute;inset:0 auto 0 0;width:7px;
-  background:linear-gradient(90deg,rgba(0,0,0,.3),rgba(0,0,0,0));pointer-events:none}
-.vb-cov img{width:100%;height:100%;object-fit:cover;display:block;pointer-events:none}
-.vb-cov svg{width:30px;height:30px;stroke:var(--muted);fill:none;stroke-width:1.5;
-  stroke-linecap:round;stroke-linejoin:round}
-.vb-doc:active .vb-cov{box-shadow:0 0 0 2px var(--mark)}
-.vb-fname{font-size:13.5px;line-height:1.35;color:#EDEBE6;word-break:break-word;
-  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.vb-doc .vb-fname{margin-top:8px}
-.vb-fmeta{margin-top:4px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
-.vb-dact{position:absolute;top:6px;right:6px;display:flex;gap:4px;z-index:1}
-.vb-doc .vb-dact{background:rgba(32,31,29,.72);border-radius:9px;-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
-.vb-ib{min-width:30px;height:30px;padding:0 7px;border-radius:8px;display:inline-flex;align-items:center;
-  justify-content:center;font-size:15px;color:var(--muted);background:transparent;text-decoration:none;
-  touch-action:manipulation}
-.vb-ib:active{background:var(--desk3)}
-.vb-ib.del.ask{background:#E4713F;color:#1d0f08;font-size:12px;font-weight:650}
-.vb-hero{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;
-  text-align:center;padding:12vh 24px 6vh}
-.vb-hero p{margin:0;max-width:40ch;font-size:14px;line-height:1.8;color:var(--muted)}
-.vb-hint{font-size:12.5px;color:#6E6A62;line-height:1.8}
-.vb-hint b{color:#9B958A;font-weight:600}
-/* 데스크톱(트랙패드 포함)용 호버 */
-@media (hover:hover){
-  .vb-tool:hover{background:var(--desk3)}
-  .vb-fol:hover{background:var(--desk3)}
-  .vb-libbtn:hover{filter:brightness(1.12)}
-  .vb-seg .vb-libbtn:hover{background:var(--desk3);filter:none}
-  .vb-seg .vb-libbtn.pri:hover{background:var(--mark);filter:brightness(1.08)}
-  .vb-doc:hover .vb-cov{transform:translateY(-3px);
-    box-shadow:0 3px 4px rgba(0,0,0,.45),0 14px 30px rgba(0,0,0,.38)}
-  .vb-oi:hover,.vb-pg:hover,.vb-ib:hover{background:var(--desk3)}
-  .vb-tab:hover{color:#EDEBE6}
+  const [line, sub] = pool[idx];
+  return { stamp, line, sub };
 }
-.vb-cov{transition:transform .16s,box-shadow .16s}
-/* 좁은 화면에서는 엔진 배지를 숨겨 툴바 숨통을 틔운다 */
-.vb-root:not(.wide) .vb-eng{display:none}
 
-/* 풀이창은 반투명 — 가려진 본문 단어가 비쳐 보이도록.
-   블러는 아주 약하게만 걸어 뒤 글자 형태는 알아볼 수 있게 둔다.
-   backdrop-filter 미지원 브라우저에서도 알파값만으로 비치므로 폴백은 두지 않는다. */
-.vb-sheet{position:absolute;left:0;right:0;bottom:0;z-index:35;background:rgba(42,41,38,.70);
-  -webkit-backdrop-filter:blur(2px) saturate(1.1);backdrop-filter:blur(2px) saturate(1.1);
-  border-top:1px solid var(--line);border-radius:18px 18px 0 0;display:flex;flex-direction:column;
-  transform:translateY(100%);transition:transform .26s cubic-bezier(.3,.85,.35,1);
-  box-shadow:0 -8px 34px rgba(0,0,0,.4)}
-.vb-sheet.open{transform:none}
-.vb-root.wide .vb-sheet{left:auto;right:0;top:0;bottom:0;width:400px;height:100%!important;
-  border-radius:0;border-top:0;border-left:1px solid var(--line);transform:translateX(101%)}
-.vb-root.wide .vb-sheet.open{transform:none}
-.vb-grip{padding:10px 0 2px;display:flex;justify-content:center;touch-action:none;cursor:grab}
-.vb-grip i{width:42px;height:5px;border-radius:3px;background:#57544C;display:block}
-.vb-root.wide .vb-grip{display:none}
-.vb-tabs{display:flex;gap:8px;padding:4px 12px 10px;align-items:center;overflow-x:auto;
-  -webkit-overflow-scrolling:touch}
-.vb-root.wide .vb-tabs{padding-top:16px}
-/* 탭은 세그먼트 버튼 그룹 — 홈(서재)의 노란 포인트와 같은 강조색을 쓴다 */
-.vb-seg{display:flex;gap:2px;padding:4px;border-radius:12px;background:#232220;
-  border:1px solid var(--line);flex:0 0 auto}
-.vb-tab{min-height:40px;padding:0 20px;display:inline-flex;align-items:center;justify-content:center;
-  border-radius:9px;font-size:14.5px;line-height:1;color:var(--muted);
-  touch-action:manipulation;flex:0 0 auto;white-space:nowrap}
-.vb-tab.on{background:var(--mark);color:#241F00;font-weight:650}
-.vb-x{margin-left:auto;padding:8px 12px;color:var(--muted);font-size:18px;line-height:1}
-.vb-panes{flex:1;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;
-  overscroll-behavior:contain;padding:0 20px calc(22px + env(safe-area-inset-bottom))}
-
-.vb-head{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
-.vb-star{margin-left:auto;width:38px;height:38px;border-radius:9px;display:inline-flex;
-  align-items:center;justify-content:center;align-self:center;touch-action:manipulation}
-.vb-star svg{width:22px;height:22px;stroke:var(--muted);fill:none;stroke-width:1.7;stroke-linejoin:round}
-.vb-star.on svg{fill:var(--mark);stroke:var(--mark)}
-.vb-star:active{background:var(--desk3)}
-.vb-vi{padding:12px 0;border-bottom:1px solid var(--line)}
-.vb-vihead{display:flex;align-items:center;gap:8px}
-.vb-viw{font-family:var(--serif);font-size:19px;color:var(--paper);word-break:break-word}
-.vb-vimeta{font-size:11px;color:var(--muted);margin-left:auto;white-space:nowrap}
-.vb-vim{margin:6px 0 0;font-size:14px;line-height:1.6;color:#DAD6CE}
-.vb-vic{margin:4px 0 0;font-size:13px;line-height:1.6;color:var(--muted)}
-.vb-hw{font-family:var(--serif);font-size:32px;line-height:1.15;color:var(--paper);
-  letter-spacing:-.01em;word-break:break-word}
-.vb-pos{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--mark);
-  border:1px solid rgba(255,216,77,.35);border-radius:4px;padding:2px 6px}
-.vb-rule{height:1px;background:var(--line);margin:14px 0}
-.vb-lbl{font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}
-.vb-txt{margin:0;font-size:15.5px;line-height:1.75;color:#E7E4DD;white-space:pre-wrap;word-break:break-word}
-.vb-quote{font-family:var(--serif);font-size:15px;color:#C9C5BC;border-left:2px solid var(--mark2);
-  padding-left:12px;line-height:1.65;white-space:pre-wrap}
-.vb-senses{margin:0;padding:0;list-style:none;counter-reset:s}
-.vb-senses li{font-size:15px;line-height:1.65;color:#DAD6CE;padding:3px 0 3px 20px;position:relative}
-.vb-senses li::before{content:counter(s);counter-increment:s;position:absolute;left:0;top:5px;
-  font-size:10.5px;color:var(--muted);font-variant-numeric:tabular-nums}
-.vb-cur::after{content:'';display:inline-block;width:7px;height:15px;margin-left:2px;
-  background:var(--mark);vertical-align:-2px;animation:vbblink .9s steps(2) infinite}
-@keyframes vbblink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
-.vb-err{color:#FF9A8A;font-size:13.5px;line-height:1.6}
-.vb-ph{color:#6E6A62;font-size:14px;line-height:1.75;padding:8px 0}
-
-.vb-msg{font-size:15px;line-height:1.75;margin-bottom:14px}
-.vb-msg.me{color:var(--mark);font-weight:550;white-space:pre-wrap}
-.vb-msg.ai{color:#E7E4DD}
-
-/* ── 질문 탭 머리: 세션 칩 줄 + 모델 고르기 ── */
-/* .vb-panes 의 좌우 여백(20px)을 음수 마진으로 밀어내고 자기 패딩으로 되돌린다 —
-   그러지 않으면 가장자리 20px 틈으로 본문이 머리 밑을 지나가는 게 보인다. */
-.vb-asktop{position:sticky;top:0;z-index:2;background:var(--desk2);
-  margin:0 -20px 6px;padding:8px 20px 10px;border-bottom:1px solid var(--line)}
-.vb-sesstrip{display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch;
-  padding-bottom:2px;scrollbar-width:none}
-.vb-sesstrip::-webkit-scrollbar{display:none}
-.vb-sessnew{flex:0 0 auto;min-height:34px;padding:0 12px;border-radius:9px;font-size:13px;
-  background:var(--desk3);color:#EDEBE6;white-space:nowrap;touch-action:manipulation}
-.vb-sesschip{flex:0 0 auto;display:inline-flex;align-items:center;border-radius:9px;
-  background:#232220;border:1px solid var(--line);overflow:hidden;max-width:220px}
-.vb-sesschip.on{background:var(--mark);border-color:var(--mark)}
-.vb-sesslbl{min-height:34px;padding:0 4px 0 11px;font-size:13px;color:#CFCBC2;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;touch-action:manipulation}
-.vb-sesschip.on .vb-sesslbl{color:#241F00;font-weight:600}
-.vb-sessx{min-height:34px;padding:0 9px 0 5px;font-size:11px;color:#7C776E;touch-action:manipulation}
-.vb-sesschip.on .vb-sessx{color:rgba(36,31,0,.6)}
-.vb-sessx.ask{color:#FF9A8A;font-size:11.5px}
-.vb-askmeta{display:flex;gap:8px;align-items:center;margin-top:8px}
-.vb-mdl{flex:1;min-width:0;min-height:34px;padding:0 26px 0 9px;border-radius:9px;
-  border:1px solid var(--line);background:#232220;color:#CFCBC2;font-size:12.5px;
-  font-family:inherit;outline:none;-webkit-appearance:none;appearance:none;
-  background-image:linear-gradient(45deg,transparent 50%,#8A857C 50%),
-    linear-gradient(135deg,#8A857C 50%,transparent 50%);
-  background-position:calc(100% - 15px) 15px,calc(100% - 10px) 15px;
-  background-size:5px 5px,5px 5px;background-repeat:no-repeat}
-.vb-sessttl{flex:0 0 auto;font-size:11.5px;color:#6E6A62;font-variant-numeric:tabular-nums}
-
-/* ── 모델이 준 마크다운·수식 ── */
-.vb-md{font-size:15px;line-height:1.75;word-break:break-word}
-.vb-md>*:first-child{margin-top:0}
-.vb-md>*:last-child{margin-bottom:0}
-.vb-md p{margin:0 0 10px}
-.vb-md h1,.vb-md h2,.vb-md h3,.vb-md h4{margin:16px 0 8px;font-size:15.5px;font-weight:680;
-  color:#F3F1EC;line-height:1.4}
-.vb-md h1{font-size:17px}
-.vb-md h2{font-size:16px}
-.vb-md ul,.vb-md ol{margin:0 0 10px;padding-left:20px}
-.vb-md li{margin:3px 0}
-.vb-md li::marker{color:var(--mark2)}
-.vb-md strong{color:#FFF8E2;font-weight:660}
-.vb-md em{color:#DAD6CE}
-.vb-md a{color:var(--mark);text-decoration:underline;text-underline-offset:2px}
-.vb-md hr{border:0;border-top:1px solid var(--line);margin:14px 0}
-.vb-md blockquote{margin:0 0 10px;padding-left:12px;border-left:2px solid var(--mark2);color:#C9C5BC}
-.vb-md code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;
-  background:#232220;border:1px solid var(--line);border-radius:5px;padding:1px 5px}
-.vb-md pre{margin:0 0 10px;padding:11px 12px;border-radius:10px;background:#1D1C1A;
-  border:1px solid var(--line);overflow-x:auto;-webkit-overflow-scrolling:touch}
-.vb-md pre code{background:none;border:0;padding:0;font-size:12.5px;line-height:1.6}
-.vb-md table{border-collapse:collapse;margin:0 0 10px;font-size:13.5px;display:block;
-  overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%}
-.vb-md th,.vb-md td{border:1px solid var(--line);padding:5px 9px;text-align:left}
-.vb-md th{background:#232220;font-weight:620}
-/* 긴 수식은 잘리지 않고 옆으로 밀린다 — 아이패드 세로에서 특히 자주 넘친다 */
-.vb-mathblk{overflow-x:auto;overflow-y:hidden;-webkit-overflow-scrolling:touch;
-  padding:4px 0 8px;max-width:100%}
-.vb-md .katex{font-size:1.04em}
-.vb-md .katex-display{margin:0}
-/* 스트리밍 커서는 마지막 블록 끝에 붙인다 (.vb-cur::after 는 요소 뒤에 붙어 줄이 바뀐다) */
-.vb-md.vb-cur::after{content:none}
-.vb-md.vb-cur>*:last-child::after{content:'';display:inline-block;width:7px;height:15px;
-  margin-left:2px;background:var(--mark);vertical-align:-2px;animation:vbblink .9s steps(2) infinite}
-
-/* 상태줄과 입력줄은 한 덩어리로 바닥에 붙는다 — 답을 기다리는 동안 스크롤해도 늘 보인다 */
-.vb-askfoot{position:sticky;bottom:0;background:var(--desk2);margin:0 -20px;padding:8px 20px 0}
-.vb-askbar{padding:2px 0 4px;display:flex;gap:8px;align-items:flex-end}
-.vb-figtog{flex:0 0 auto;height:44px;padding:0 12px;border-radius:11px;font-size:12.5px;
-  background:#232220;border:1px solid var(--line);color:#8A857C;touch-action:manipulation}
-.vb-figtog.on{background:var(--mark2);border-color:var(--mark2);color:#241F00;font-weight:600}
-
-/* ── 모델 상태줄 ── */
-.vb-stat{display:flex;gap:8px;align-items:center;margin-bottom:8px;padding:7px 8px 7px 10px;
-  border-radius:10px;background:#232220;border:1px solid var(--line)}
-.vb-stat.warn{border-color:rgba(255,154,138,.45);background:#2B2320}
-.vb-statdot{flex:0 0 auto;width:7px;height:7px;border-radius:50%;background:var(--mark);
-  animation:vbpulse 1.1s ease-in-out infinite}
-.vb-stat.warn .vb-statdot{background:#FF9A8A}
-@keyframes vbpulse{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1)}}
-.vb-stattx{flex:1;min-width:0;font-size:11.5px;line-height:1.45;color:#A8A399;
-  font-variant-numeric:tabular-nums}
-.vb-stat.warn .vb-stattx{color:#E4B8AE}
-.vb-statstop{flex:0 0 auto;min-height:30px;padding:0 11px;border-radius:8px;font-size:12px;
-  background:var(--desk3);color:#EDEBE6;touch-action:manipulation}
-.vb-stat.warn .vb-statstop{background:#FF9A8A;color:#2A1512;font-weight:640}
-.vb-stopped{margin-top:6px;font-size:11.5px;color:#7C776E}
-.vb-askin{flex:1;min-height:44px;max-height:120px;resize:none;padding:11px 12px;border-radius:11px;
-  border:1px solid var(--line);background:#232220;color:#EDEBE6;font-size:16px;line-height:1.4;
-  outline:none;font-family:inherit}
-.vb-askin:focus{border-color:rgba(255,216,77,.5)}
-.vb-send{height:44px;padding:0 16px;border-radius:11px;background:var(--mark);color:#241F00;
-  font-weight:650;font-size:14.5px;touch-action:manipulation}
-.vb-send:disabled{opacity:.4}
-.vb-askctx{font-size:12px;color:var(--muted);line-height:1.55;margin-bottom:14px}
-
-.vb-modal{position:absolute;inset:0;z-index:50;background:rgba(20,19,18,.92);display:flex;
-  align-items:center;justify-content:center;padding:24px}
-.vb-card{width:min(440px,100%);background:var(--desk2);border:1px solid var(--line);
-  border-radius:16px;padding:22px;max-height:86%;overflow-y:auto}
-.vb-card h3{margin:0 0 4px;font-size:17px;font-weight:650}
-.vb-sub{margin:0 0 18px;font-size:13px;color:var(--muted);line-height:1.65}
-.vb-field{margin-bottom:16px}
-.vb-field label{display:block;font-size:11px;letter-spacing:.1em;text-transform:uppercase;
-  color:var(--muted);margin-bottom:7px}
-.vb-field input{width:100%;padding:11px;border-radius:10px;border:1px solid var(--line);
-  background:#232220;color:#EDEBE6;font-size:16px;outline:none;font-family:inherit}
-.vb-field input.pw6{text-align:center;letter-spacing:12px;font-size:24px;
-  font-variant-numeric:tabular-nums;padding-left:calc(11px + 12px)}
-.vb-field select{width:100%;padding:11px;border-radius:10px;border:1px solid var(--line);
-  background:#232220;color:#EDEBE6;font-size:15px;outline:none;font-family:inherit;
-  appearance:none;-webkit-appearance:none;
-  background-image:linear-gradient(45deg,transparent 50%,#918C82 50%),linear-gradient(135deg,#918C82 50%,transparent 50%);
-  background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;
-  background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}
-.vb-field select option{background:#232220;color:#EDEBE6}
-.vb-hint{margin:8px 2px 0;font-size:12px;color:var(--muted);line-height:1.55}
-
-/* 로그인 숫자 키패드 — 키보드 입력과 병행해서 쓴다 */
-.vb-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
-.vb-key{height:52px;border-radius:11px;background:#232220;border:1px solid var(--line);
-  font-size:20px;font-weight:600;font-variant-numeric:tabular-nums;color:#EDEBE6;
-  display:flex;align-items:center;justify-content:center;touch-action:manipulation;
-  transition:background .1s}
-.vb-key:active{background:var(--desk3)}
-.vb-key.sm{font-size:17px;color:var(--muted)}
-.vb-key.go{background:var(--mark);color:#241F00;border-color:transparent}
-.vb-key.go:disabled{opacity:.35}
-@media (pointer:coarse){.vb-key{height:60px;font-size:22px}}
-
-.vb-row{display:flex;align-items:center;gap:10px;font-size:14px;color:#D2CEC5;margin-bottom:16px}
-.vb-row input{width:19px;height:19px;accent-color:var(--mark);flex:0 0 auto}
-.vb-done{width:100%;padding:13px;border-radius:11px;background:var(--mark);color:#241F00;
-  font-weight:650;font-size:15px;touch-action:manipulation}
-
-.vb-bubble{position:absolute;z-index:38;padding:9px 15px;border-radius:10px;background:var(--mark);
-  color:#241F00;font-size:13.5px;font-weight:650;box-shadow:0 4px 14px rgba(0,0,0,.4);white-space:nowrap}
-
-/* ── 영역 캡처 ──
-   오버레이는 .vb-view 의 실측 사각형에 position:fixed 로 맞춘다. .vb-body 안에
-   절대배치하면 목차 패널까지 덮거나 패널 폭(400/272)을 또 하드코딩해야 한다. */
-/* 오버레이 자체는 투명하다 — 딤은 .vb-capsel 의 box-shadow 한 곳에서만 만든다.
-   둘 다 깔면 선택 안쪽까지 어두워져서 정작 오릴 글자가 잘 안 보인다. */
-.vb-cap{position:fixed;z-index:42;touch-action:none;cursor:crosshair;
-  background:transparent;-webkit-user-select:none;user-select:none}
-.vb-cap.busy{cursor:progress}
-.vb-capsel{position:absolute;border:1.5px solid var(--mark);background:rgba(255,216,77,.10);
-  box-shadow:0 0 0 9999px rgba(20,19,18,.42);cursor:move}
-.vb-caph{position:absolute;width:22px;height:22px;border-radius:50%;background:var(--mark);
-  border:2px solid #241F00;touch-action:none}
-.vb-caphint{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:43;
-  padding:8px 14px;border-radius:10px;background:rgba(20,19,18,.9);border:1px solid var(--line);
-  color:#D9D5CC;font-size:13px;white-space:nowrap;pointer-events:none}
-.vb-capmenu{position:absolute;z-index:43;display:flex;gap:6px;padding:6px;border-radius:12px;
-  background:var(--desk2);border:1px solid var(--line);box-shadow:0 6px 20px rgba(0,0,0,.5)}
-.vb-capbtn{min-height:40px;padding:0 15px;border-radius:9px;background:var(--mark);color:#241F00;
-  font-size:14px;font-weight:650;white-space:nowrap;touch-action:manipulation}
-.vb-capbtn.ghost{background:transparent;border:1px solid var(--line);color:#CFCBC2;font-weight:500}
-.vb-capbtn:disabled{opacity:.45}
-/* 질문 탭에 붙는 캡처 썸네일 */
-.vb-msgimg{display:block;max-width:min(100%,320px);border-radius:9px;border:1px solid var(--line);
-  margin:2px 0 8px;background:#fff}
-
-@media (prefers-reduced-motion:reduce){.vb-root *{transition:none!important;animation:none!important}}
-`;
 
 /* ───────────────── AI 호출 (Claude → Gemini) ───────────────── */
 async function readSSE(res, pick, onDelta, onThink) {
@@ -499,7 +178,7 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
       image: opts.image || "",
       // 같은 세션의 지난 문답. 서버가 system 과 현재 user 사이에 끼워 넣는다.
       history: opts.history || [],
-      maxTokens: opts.ask ? 2000 : 1000,
+      maxTokens: opts.maxTokens ?? (opts.ask ? 2000 : 1000),
       forceGemini: !!cfg.forceGemini,
       ask: !!opts.ask,
       model: opts.ask ? cfg.askModel || "" : "",
@@ -599,6 +278,21 @@ const fmtDate = (t) => {
   const d = new Date(t || 0);
   return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()}`;
 };
+/* 서재 카드 메타 줄용 상대 시간 — "3일 전"이 "2026.7.28"보다 한눈에 들어온다.
+   1주 넘어가면 다시 절대 날짜로(오래된 날짜의 "N일 전"은 오히려 안 읽힌다). */
+const fmtRel = (t) => {
+  if (!t) return "";
+  const diff = Date.now() - t;
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "방금";
+  if (min < 60) return `${min}분 전`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}시간 전`;
+  const day = Math.floor(hr / 24);
+  if (day === 1) return "어제";
+  if (day < 7) return `${day}일 전`;
+  return fmtDate(t);
+};
 function parseWord(s) {
   const m = s.match(/뜻\s*:\s*([\s\S]*?)(?:\n\s*문맥\s*:|$)/);
   const c = s.match(/문맥\s*:\s*([\s\S]*)$/);
@@ -656,6 +350,20 @@ const SYS_CAP_SOLVE = `너는 한국 대학생의 문제풀이 조교다. 주어
 문제가 불완전해서 풀 수 없으면 무엇이 빠졌는지 밝힌다. 인사말 금지.
 ${FMT_RICH}`;
 
+/* ── 목차 자동 생성 ──
+   출력은 JSON 배열 하나뿐이어야 한다 — 코드펜스나 설명이 섞이면 클라이언트의
+   "첫 [ 부터 마지막 ] 까지"파싱이 그 안의 텍스트까지 함께 집어삼켜 깨진다. */
+const SYS_OUTLINE = `너는 책의 각 쪽 본문을 보고 목차(장·절 제목과 시작 쪽번호)를 뽑아내는 도구다.
+입력은 "[N쪽] 본문 일부" 형식으로 여러 쪽이 이어져 있다. 그중 장(chapter)·절(section) 제목으로
+보이는 부분만 골라 아래와 같은 JSON 배열 하나만 출력한다 — 설명, 인사말, 마크다운 코드펜스 없이 순수 JSON만:
+[{"title": "1장 서론", "page": 3, "depth": 0}, {"title": "1.1 배경", "page": 4, "depth": 1}]
+규칙:
+- title 은 원문에 실제로 나온 제목 그대로 옮긴다(번역·요약·재작성 금지).
+- depth 는 0(장/큰 제목) 또는 1(절/작은 제목)만 쓴다.
+- page 는 그 제목이 시작되는 쪽의 번호([N쪽] 표시)를 그대로 쓴다.
+- 표지·저작권·목차 자체·참고문헌·색인·연습문제처럼 장/절 제목이 아닌 것은 넣지 않는다.
+- 확신이 없으면 넣지 않는다. 최소 3개, 최대 80개.`;
+
 /* ───────────────── 컴포넌트 ───────────────── */
 export default function VerbatimReader() {
   const [ready, setReady] = useState(false);
@@ -665,6 +373,8 @@ export default function VerbatimReader() {
   const [curPage, setCurPage] = useState(1);
   const [outline, setOutline] = useState([]);
   const [outOpen, setOutOpen] = useState(false);
+  const [outlineGen, setOutlineGen] = useState(false); // 목차 자동 생성 진행 중
+  const [outlineErr, setOutlineErr] = useState("");
   const [sheetOpen, setSheetOpen] = useState(false);
   const [tab, setTab] = useState("word");
   const [engine, setEngine] = useState("");
@@ -700,6 +410,33 @@ export default function VerbatimReader() {
   const [vocab, setVocab] = useState([]);         // 단어장 (서버 data/vocab.json 과 동기화)
   const [folded, setFolded] = useState(() => new Set()); // 접힌 목차 항목 index
   const [upProg, setUpProg] = useState(null);     // 업로드 진행 {name, pct}
+  const [renaming, setRenaming] = useState(null); // 문서명 편집 중이면 그 값, 아니면 null
+  const [libQuery, setLibQuery] = useState("");   // 서재 검색어
+  const [libSearchRes, setLibSearchRes] = useState(null); // null = 검색 중 아님, 배열 = 결과
+  const [libSearching, setLibSearching] = useState(false);
+  const [greet, setGreet] = useState(null);       // 서재 인사말 {stamp, line, sub}, 앱 로드 시 한 번만 고른다
+  const [libView, setLibView] = useState("");     // "" = 전체 문서, "recent" = 최근 연 문서 스마트뷰
+  const [docMenuId, setDocMenuId] = useState(""); // 열려 있는 문서 카드 ⋮ 메뉴
+  const [docMoveId, setDocMoveId] = useState(""); // ⋮ 메뉴 안에서 "이동 ›" 서브메뉴가 펼쳐진 문서
+  const [docRenameId, setDocRenameId] = useState(""); // 카드에서 인라인으로 이름 바꾸는 중인 문서
+  const [docRenameVal, setDocRenameVal] = useState("");
+  const [folDragId, setFolDragId] = useState(""); // 사이드바에서 드래그 정렬 중인 폴더 id (파일 드래그 dragId 와 별개)
+  /* 표지 비율 캐시 {id: w/h}. f.ratio 는 나중에 추가된 필드라 예전 문서엔 없는데,
+     그 문서를 열기 전까지는 서버가 비율을 모른다 — 그림이 뜨는 순간 naturalWidth 로 직접 잰다. */
+  const [thumbRatio, setThumbRatio] = useState({});
+
+  /* ── 리디자인(design_handoff_yeobaek_ai_panel, 채택안 4a) 상태 ──
+     테마·패널모드는 기기에 저장한다(cfg 와 같은 persist 에 얹는다). */
+  const [theme, setTheme] = useState("dark");           // "dark" | "light"
+  const [panelMode, setPanelMode] = useState("panel");  // "panel" | "card"
+  const [sessMenuOpen, setSessMenuOpen] = useState(false);
+  const [mdlMenuOpen, setMdlMenuOpen] = useState(false);
+  const [expandSet, setExpandSet] = useState(() => new Set()); // 펼친 지난 문답 "sid:i"
+  // 문장 해석은 캔버스 위에 뜨는 카드다 — 페이지가 래스터라 실제 행간 삽입은 불가능해서
+  // 원문 위치에 앵커한 오버레이로 대신한다. 위치는 트리거 시점에 한 번 계산한다(vb-bubble과 동일한 타협).
+  const [sentPos, setSentPos] = useState(null); // {left, top} — .vb-body 기준. null 이면 카드 숨김
+  const [interpLog, setInterpLog] = useState([]); // 기록 탭용 문장 해석 이력 (서버 data/interps.json 과 동기화)
+  const [lookups, setLookups] = useState([]);     // 기록 탭용 단어 찾아본 이력 (★ 와 별개, data/lookups.json)
 
   const rootRef = useRef(null);
   const viewRef = useRef(null);
@@ -716,18 +453,19 @@ export default function VerbatimReader() {
   const curRef = useRef(1);
   const cacheRef = useRef(new Map());
   const cfgRef = useRef(cfg);
-  const tapRef = useRef({ t: 0, page: null });
   const wAbort = useRef(null);
   const sAbort = useRef(null);
   const lastSentRef = useRef("");
   const selRef = useRef("");
   const boxRef = useRef({ w: 1024, h: 768 });
-  const layoutRef = useRef({ sheetOpen: false, outOpen: false });
+  const layoutRef = useRef({ sheetOpen: false, outOpen: false, panelMode: "panel" });
   const pwRef = useRef(null);
   const curFileRef = useRef(null);            // 지금 열려 있는 서재 파일 {id, name}
   const bookTextRef = useRef([]);             // 질문 탭용 페이지별 전체 텍스트 (백그라운드 추출)
   const extractingRef = useRef(false);
   const delTimer = useRef(null);              // 두 번 눌러 삭제 타이머
+  const lastPageTimer = useRef(null);          // "마지막으로 읽은 쪽" 저장 디바운스 타이머
+  const greetInitRef = useRef(false);          // 서재 인사말을 이미 골랐는가 (앱 로드당 한 번)
   const layoutKeyRef = useRef({ cw: 0, zoom: 0 }); // 마지막 배치에 쓴 폭·배율 — 같으면 relayout 을 건너뛴다
   // 지금 하이라이트된 구간 {page, start, end, cls}. DOM 이 아니라 오프셋으로 들고 있어야
   // relayout 이 텍스트 레이어를 걷어내고 다시 그려도 하이라이트가 살아남는다.
@@ -735,9 +473,13 @@ export default function VerbatimReader() {
   const gestureRef = useRef(false);           // 핀치·트랙패드 줌이 진행 중인가
 
   useEffect(() => { cfgRef.current = cfg; }, [cfg]);
-  useEffect(() => { layoutRef.current = { sheetOpen, outOpen }; }, [sheetOpen, outOpen]);
+  useEffect(() => { layoutRef.current = { sheetOpen, outOpen, panelMode }; }, [sheetOpen, outOpen, panelMode]);
 
   /* 설정 저장 / 복원 */
+  const themeRef = useRef(theme);
+  const panelModeRef = useRef(panelMode);
+  useEffect(() => { themeRef.current = theme; }, [theme]);
+  useEffect(() => { panelModeRef.current = panelMode; }, [panelMode]);
   useEffect(() => {
     try {
       const raw = localStorage.getItem("yeobaek");
@@ -745,13 +487,20 @@ export default function VerbatimReader() {
       const s = JSON.parse(raw);
       if (s.cfg) setCfg((c) => ({ ...c, ...s.cfg }));
       if (s.zoom) zoomRef.current = s.zoom;
+      if (s.theme === "light" || s.theme === "dark") setTheme(s.theme);
+      if (s.panelMode === "panel" || s.panelMode === "card") setPanelMode(s.panelMode);
+      if (typeof s.penCapture === "boolean") setPenCapture(s.penCapture);
     } catch {}
   }, []);
   const persist = useCallback(() => {
     try {
       localStorage.setItem(
         "yeobaek",
-        JSON.stringify({ cfg: cfgRef.current, zoom: zoomRef.current })
+        JSON.stringify({
+          cfg: cfgRef.current, zoom: zoomRef.current,
+          theme: themeRef.current, panelMode: panelModeRef.current,
+          penCapture: penCaptureRef.current,
+        })
       );
     } catch {}
   }, []);
@@ -978,14 +727,15 @@ export default function VerbatimReader() {
     };
   }, [aiStat, statTick]);
 
-  /* 문답이 하나 늘거나 세션을 옮기면 맨 아래로 내린다. 스트리밍 중에는 따라가지 않는다 —
-     답을 읽으려고 위로 올려 둔 화면을 토큰마다 끌어내리면 읽을 수가 없다. */
+  /* 새 문답은 맨 위("최신")에 꽂힌다 — 문답이 하나 늘거나 세션을 옮기면 맨 위로 올린다.
+     스트리밍 중(토큰 추가)에는 askLog.length 가 안 변하므로 따라가지 않는다 —
+     답을 읽으려고 아래로 내려 둔 화면을 토큰마다 끌어올리면 읽을 수가 없다. */
   const panesRef = useRef(null);
   useEffect(() => {
     if (tab !== "ask" || !sheetOpen) return;
     const el = panesRef.current;
     if (!el) return;
-    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+    requestAnimationFrame(() => { el.scrollTop = 0; });
   }, [askLog.length, curSess, tab, sheetOpen]);
 
   const ttlLeft = useMemo(() => {
@@ -1033,11 +783,81 @@ export default function VerbatimReader() {
     return r;
   }, []);
 
+  /* 마지막으로 읽은 쪽 — 페이지가 바뀔 때마다 그대로 서버에 쏘면 스크롤 한 번에
+     요청이 수십 번 나가므로 디바운스한다. curFileRef 가 없으면(서재에 없는 임시 문서,
+     또는 아직 업로드가 안 끝난 방금 연 로컬 파일) 저장할 대상이 없으니 조용히 넘어간다. */
+  useEffect(() => {
+    const id = curFileRef.current?.id;
+    if (!id || !curPage) return;
+    clearTimeout(lastPageTimer.current);
+    lastPageTimer.current = setTimeout(() => {
+      const nowId = curFileRef.current?.id; // 디바운스 대기 중 문서가 바뀌었을 수 있다
+      if (!nowId) return;
+      libApi("/api/library/file/" + nowId, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lastPage: curPage }),
+      }).catch(() => {});
+    }, 1200);
+    return () => clearTimeout(lastPageTimer.current);
+  }, [curPage, libApi]);
+
+  /* 디바운스 타이머가 돌기 전에 탭을 닫거나 앱을 스와이프해 나가면 마지막 몇 쪽이
+     안 남는다 — pagehide 에서 한 번 더 즉시 쏜다(keepalive 로 응답을 안 기다려도 전송은 됨).
+     beforeunload 대신 pagehide 를 쓰는 건 iOS 사파리의 bfcache 때문 — beforeunload 는
+     bfcache 진입을 막아버려서 뒤로가기 복원이 느려진다. */
+  useEffect(() => {
+    const flush = () => {
+      const id = curFileRef.current?.id;
+      if (!id || !curRef.current) return;
+      try {
+        fetch("/api/library/file/" + id, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ lastPage: curRef.current }),
+          keepalive: true,
+        });
+      } catch {}
+    };
+    window.addEventListener("pagehide", flush);
+    return () => window.removeEventListener("pagehide", flush);
+  }, []);
+
+  /* 서재 검색 — 제목(즉시 반영)과 본문(서버 왕복 필요) 둘 다 하나의 검색창에서.
+     타이핑마다 부르지 않게 디바운스하고, 느린 요청이 나중 응답을 덮어쓰지 않게
+     순번(seq)으로 막는다. */
+  const libSearchTimer = useRef(null);
+  const libSearchSeq = useRef(0);
+  const runLibSearch = useCallback((q) => {
+    clearTimeout(libSearchTimer.current);
+    const query = q.trim();
+    if (!query) { libSearchSeq.current++; setLibSearchRes(null); setLibSearching(false); return; }
+    setLibSearching(true);
+    libSearchTimer.current = setTimeout(async () => {
+      const seq = ++libSearchSeq.current;
+      try {
+        const r = await libApi("/api/library/search?q=" + encodeURIComponent(query));
+        const j = await r.json();
+        if (seq === libSearchSeq.current) setLibSearchRes(j.results || []);
+      } catch (e) {
+        if (seq === libSearchSeq.current && e.name !== "AuthError") setLibSearchRes([]);
+      } finally {
+        if (seq === libSearchSeq.current) setLibSearching(false);
+      }
+    }, 300);
+  }, [libApi]);
+  const changeLibQuery = (v) => { setLibQuery(v); runLibSearch(v); };
+  const clearLibQuery = () => { setLibQuery(""); libSearchSeq.current++; clearTimeout(libSearchTimer.current); setLibSearchRes(null); setLibSearching(false); };
+
   const refreshLib = useCallback(async () => {
     try {
       const r = await libApi("/api/library");
-      setLib(await r.json());
+      const j = await r.json();
+      setLib(j);
       setLibErr("");
+      // 앱을 새로 불러올 때 딱 한 번만 인사말을 고른다 — 이후의 refreshLib 호출(업로드·
+      // 이동·삭제 등)마다 다시 고르면 조작할 때마다 인사말이 바뀌어 산만하다.
+      if (!greetInitRef.current) { greetInitRef.current = true; setGreet(pickGreeting(j)); }
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("서재 목록을 불러오지 못했습니다.");
     }
@@ -1050,9 +870,23 @@ export default function VerbatimReader() {
     } catch {}
   }, [libApi]);
 
+  const refreshInterps = useCallback(async () => {
+    try {
+      const r = await libApi("/api/interps");
+      setInterpLog((await r.json()).items || []);
+    } catch {}
+  }, [libApi]);
+
+  const refreshLookups = useCallback(async () => {
+    try {
+      const r = await libApi("/api/lookups");
+      setLookups((await r.json()).items || []);
+    } catch {}
+  }, [libApi]);
+
   useEffect(() => {
-    if (authed === true) { refreshLib(); refreshVocab(); }
-  }, [authed, refreshLib, refreshVocab]);
+    if (authed === true) { refreshLib(); refreshVocab(); refreshInterps(); refreshLookups(); }
+  }, [authed, refreshLib, refreshVocab, refreshInterps, refreshLookups]);
 
   /* fetch 는 업로드 진행률을 못 재서 XHR 을 쓴다 */
   const uploadPDF = (buf, name, folder) =>
@@ -1108,14 +942,20 @@ export default function VerbatimReader() {
       await page.render({ canvasContext: ctx, viewport: vp }).promise;
       const blob = await new Promise((r) => cv.toBlob(r, "image/jpeg", 0.82));
       if (!blob) return;
-      await libApi("/api/library/thumb/" + id, {
+      // v1 은 회전(/Rotate)까지 반영된 화면상 크기라, 매트 그리드에 실제로 보이는
+      // 비율과 그대로 맞는다 — 서버는 이 비율을 서재 카드 크기 계산에만 쓴다.
+      await libApi(`/api/library/thumb/${id}?w=${Math.round(v1.width)}&h=${Math.round(v1.height)}`, {
         method: "POST", headers: { "Content-Type": "image/jpeg" }, body: blob,
       });
       refreshLib();
     } catch {}
   };
 
-  const openLibFile = async (f) => {
+  /* gotoPage 가 있으면(검색 결과 클릭 등) 그 쪽으로, 없으면 저장된 lastPage 로 연다.
+     둘 다 없으면 기존처럼 1쪽. scrollToPage 는 pagesRef 의 실제 DOM 크기를 재는데,
+     loadPDF 가 끝난 시점에는 buildPages 가 이미 동기로 크기를 잡아 둔 뒤라 바로 불러도
+     되지만, 막 setLibOpen(false) 한 직후라 레이아웃이 아직 안 붙었을 수도 있어 rAF 로 한 틱 미룬다. */
+  const openLibFile = async (f, gotoPage) => {
     try {
       setLibErr("");
       const r = await libApi("/api/library/file/" + f.id);
@@ -1123,7 +963,17 @@ export default function VerbatimReader() {
       curFileRef.current = { id: f.id, name: f.name };
       setLibOpen(false);
       await loadPDF(new Uint8Array(buf), f.name);
-      if (!f.thumb) sendThumb(f.id); // 표지가 없던 책은 처음 열 때 만들어진다
+      const target = gotoPage || f.lastPage;
+      if (target && target > 1) requestAnimationFrame(() => scrollToPage(target, false));
+      // 표지가 없던 책은 처음 열 때 만들어진다.
+      // ratio 는 나중에 추가된 필드라 기존 문서엔 없다 — 표지가 있어도 비율이 없으면 이때 채운다
+      // (sendThumb 이 표지를 다시 올리면서 w/h 를 같이 보낸다).
+      if (!f.thumb || !(f.ratio > 0)) sendThumb(f.id);
+      // 서재 인사말이 "이어읽기"인지 "오랜만"인지 가르는 시각 — 실패해도 읽기엔 지장 없다
+      libApi("/api/library/file/" + f.id, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ opened: true }),
+      }).catch(() => {});
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("파일을 여는 데 실패했습니다.");
     }
@@ -1139,6 +989,43 @@ export default function VerbatimReader() {
       refreshLib();
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("옮기지 못했습니다.");
+    }
+  };
+
+  const renameFile = async (id, name) => {
+    const n = name.trim();
+    if (!n) { setDocRenameId(""); return; }
+    try {
+      await libApi("/api/library/file/" + id, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: n }),
+      });
+      setDocRenameId("");
+      refreshLib();
+    } catch (e) {
+      if (e.name !== "AuthError") setLibErr("이름을 바꾸지 못했습니다.");
+    }
+  };
+
+  /* 사이드바 폴더 드래그 정렬 — 로컬 배열을 먼저 낙관적으로 바꿔 즉시 반응하게 하고,
+     서버엔 최종 순서(id 배열)만 PATCH 한다. 실패해도 다음 refreshLib 에서 서버 순서로 되돌아온다. */
+  const reorderFolders = async (ids) => {
+    setLib((s) => {
+      const byId = new Map(s.folders.map((f) => [f.id, f]));
+      const ordered = ids.filter((id) => byId.has(id)).map((id) => byId.get(id));
+      const seen = new Set(ordered.map((f) => f.id));
+      for (const f of s.folders) if (!seen.has(f.id)) ordered.push(f);
+      return { ...s, folders: ordered };
+    });
+    try {
+      await libApi("/api/library/folders/reorder", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ids }),
+      });
+    } catch (e) {
+      if (e.name !== "AuthError") refreshLib(); // 실패하면 서버 상태로 되돌린다
     }
   };
 
@@ -1223,22 +1110,25 @@ export default function VerbatimReader() {
     }
   };
 
-  /* 지금 열려 있는 문서를 파일로 저장 — pdf.js 가 들고 있는 원본 바이트를 그대로 내려준다 */
-  const downloadCur = async () => {
-    const pdf = pdfRef.current;
-    if (!pdf) return;
+  /* 툴바의 문서명을 탭하면 편집 모드로 바뀐다. 서재에 저장된 문서(curFileRef 있음)는
+     서버 이름도 함께 바꾸고, 아직 서재에 없는 문서(저장 실패 등)는 화면 표시만 바꾼다. */
+  const renameCur = async (name) => {
+    const n = name.trim();
+    setRenaming(null);
+    if (!n || n === docName) return;
+    const id = curFileRef.current?.id;
+    if (!id) { setDocName(n); return; }
     try {
-      const data = await pdf.getData();
-      const url = URL.createObjectURL(new Blob([data], { type: "application/pdf" }));
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = (docName || "문서") + ".pdf";
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
+      await libApi("/api/library/file/" + id, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: n }),
+      });
+      setDocName(n);
+      curFileRef.current = { ...curFileRef.current, name: n };
+      refreshLib();
     } catch (e) {
-      console.warn("download", e);
+      if (e.name !== "AuthError") setLibErr("이름을 바꾸지 못했습니다.");
     }
   };
 
@@ -1284,7 +1174,7 @@ export default function VerbatimReader() {
     const { w } = boxRef.current;
     const isWide = w >= WIDE;
     const pad = isWide ? 56 : 12;
-    const sh = isWide && layoutRef.current.sheetOpen ? 400 : 0;
+    const sh = isWide && layoutRef.current.sheetOpen && layoutRef.current.panelMode === "panel" ? 400 : 0;
     const ow = isWide && layoutRef.current.outOpen ? 272 : 0;
     return Math.max(240, w - pad - sh - ow);
   };
@@ -1349,7 +1239,22 @@ export default function VerbatimReader() {
       const vp = page.getViewport({ scale: scaleRef.current * zoomRef.current });
       el.style.width = vp.width + "px";
       el.style.height = vp.height + "px";
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      /* 캔버스 크기에 상한을 씌운다. 아이패드 사파리는 캔버스가 한계를 넘으면 예외를 던지지
+         않고 조용히 빈(흰) 캔버스를 주고, 메모리 압박이 심해지면 탭을 통째로 리로드한다 —
+         300% 확대에서 "흰 화면이 뜨고 갑자기 재시작"하던 원인이 이것이다.
+         (영역 캡처 쪽에는 이미 같은 대비가 있었다: CAP_MAXPX)
+         캔버스는 CSS 로 페이지 크기에 늘어나므로(.vb-page canvas{inset:0;width:100%;height:100%})
+         상한에 걸리면 위치가 어긋나는 게 아니라 조금 흐려질 뿐이다 — 흰 화면보다는 낫다. */
+      const MAX_PX = 12_000_000;  // 총 픽셀 (iOS 의 캔버스 면적 한계보다 넉넉히 아래)
+      const MAX_SIDE = 8192;      // 한 변 길이
+      let dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const fit = Math.min(
+        1,
+        Math.sqrt(MAX_PX / Math.max(1, vp.width * vp.height * dpr * dpr)),
+        MAX_SIDE / Math.max(1, vp.width * dpr),
+        MAX_SIDE / Math.max(1, vp.height * dpr),
+      );
+      if (fit < 1) dpr *= fit;
       const cv = document.createElement("canvas");
       cv.width = Math.floor(vp.width * dpr);
       cv.height = Math.floor(vp.height * dpr);
@@ -1515,6 +1420,20 @@ export default function VerbatimReader() {
     } finally {
       extractingRef.current = false;
     }
+    // 서재 검색 인덱스 — 이 문서가 서재 파일이고(로컬에서 방금 연 파일이면 아직 id 가
+    // 없을 수 있다), 다른 문서로 바뀌지 않았고, 전 쪽이 다 뽑혔을 때만 서버에 올린다.
+    // 실패해도 조용히 넘어간다 — 검색이 안 되는 것뿐, 읽기엔 지장이 없다.
+    if (pdfRef.current === pdf) {
+      const id = curFileRef.current?.id;
+      const full = bookTextRef.current;
+      if (id && full.length === pdf.numPages && full.every((t) => t != null)) {
+        libApi("/api/library/file/" + id + "/text", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ pages: full, totalPages: pdf.numPages }),
+        }).catch(() => {});
+      }
+    }
   };
 
   /* 질문에 딸려 보낼 본문 — 짧은 책은 통째로, 긴 책은 현재 쪽 주변으로 한도까지.
@@ -1562,6 +1481,76 @@ export default function VerbatimReader() {
     const from = picked[0]?.n ?? cur;
     const to = picked[picked.length - 1]?.n ?? cur;
     return { scope: `${from}–${to}쪽 (전체 ${N}쪽 중)`, text };
+  };
+
+  /* ── 목차 자동 생성 ──
+     buildAskContext 와 달리 "지금 보는 쪽 주변"이 아니라 책 전체를 훑어야 한다 —
+     장이 어디서 시작할지 모르기 때문. 통째로 들어가면 그대로, 안 들어가면
+     쪽마다 앞부분만 잘라서라도 전 쪽을 대표하게 한다(제목은 대개 쪽 맨 위에 있다). */
+  const OUTLINE_CAP = 70000;
+  const buildOutlineContext = () => {
+    const pdf = pdfRef.current;
+    const N = pdf.numPages;
+    const pages = bookTextRef.current;
+    const pageText = (n) => pages[n - 1] ?? (dataRef.current[n - 1]?.text || "").replace(/\s+/g, " ").trim();
+    const full = Array.from({ length: N }, (_, i) => pageText(i + 1));
+    const total = full.reduce((s, t) => s + t.length + 8, 0);
+    if (total <= OUTLINE_CAP) return full.map((t, i) => `[${i + 1}쪽] ${t}`).join("\n");
+    const perPage = Math.max(80, Math.floor(OUTLINE_CAP / N));
+    return full.map((t, i) => `[${i + 1}쪽] ${t.slice(0, perPage)}`).join("\n");
+  };
+
+  // extractAll 이 아직 돌고 있으면 끝날 때까지 기다린다 — 일부만 보고 목차를 뽑으면
+  // 아직 안 읽은 뒷부분의 장이 통째로 빠진다.
+  const waitForExtraction = async (pdf) => {
+    const N = pdf.numPages;
+    while (pdfRef.current === pdf) {
+      const arr = bookTextRef.current;
+      if (Array.from({ length: N }, (_, i) => arr[i]).every((t) => t != null)) return true;
+      await new Promise((r) => setTimeout(r, 300));
+    }
+    return false;
+  };
+
+  const generateOutline = async () => {
+    const pdf = pdfRef.current;
+    const id = curFileRef.current?.id;
+    if (!pdf || !id || outlineGen) return;
+    setOutlineErr("");
+    setOutlineGen(true);
+    try {
+      await waitForExtraction(pdf);
+      if (pdfRef.current !== pdf) return; // 기다리는 동안 다른 문서로 바뀜
+      const context = buildOutlineContext();
+      let buf = "";
+      await ask(SYS_OUTLINE, context, (c) => { buf += c; }, undefined, { ask: true, maxTokens: 3000 });
+      const s = buf.indexOf("["), e = buf.lastIndexOf("]");
+      if (s < 0 || e < s) throw new Error("모델이 목차 형식으로 답하지 않았습니다.");
+      let items;
+      try { items = JSON.parse(buf.slice(s, e + 1)); } catch { throw new Error("모델 응답을 읽지 못했습니다."); }
+      const clean = (Array.isArray(items) ? items : [])
+        .filter((it) => it && typeof it.title === "string" && it.title.trim() && Number.isFinite(it.page))
+        .map((it) => ({ title: it.title.trim(), page: Math.max(1, Math.round(it.page)), depth: it.depth === 1 ? 1 : 0 }));
+      if (!clean.length) throw new Error("본문에서 목차를 찾지 못했습니다.");
+
+      await libApi("/api/library/file/" + id + "/outline", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ items: clean }),
+      });
+
+      // 서버 파일이 바뀌었다 — 다시 받아서 pdf.js 가 새 /Outlines 를 그대로 파싱하게 한다.
+      // (커스텀 렌더링이 따로 필요 없다: 북마크가 진짜 PDF 구조로 박혀서 기존 목차 패널이 그대로 읽는다.)
+      const name = docName;
+      const r = await libApi("/api/library/file/" + id);
+      const nbuf = await r.arrayBuffer();
+      await loadPDF(new Uint8Array(nbuf), name);
+      refreshLib();
+    } catch (e) {
+      if (e.name !== "AuthError") setOutlineErr(e.message || "목차를 만들지 못했습니다.");
+    } finally {
+      setOutlineGen(false);
+    }
   };
 
   const scrollToPage = (n, smooth = true) => {
@@ -1642,7 +1631,7 @@ export default function VerbatimReader() {
   useEffect(() => {
     const t = setTimeout(() => relayout(), 280);
     return () => clearTimeout(t);
-  }, [sheetOpen, outOpen, wide, relayout]);
+  }, [sheetOpen, outOpen, wide, panelMode, relayout]);
 
   useEffect(() => {
     let t;
@@ -1714,7 +1703,10 @@ export default function VerbatimReader() {
   const runWord = async (w, sentence) => {
     if (!w) return;
     const key = "w|" + w + "|" + sentence.slice(0, 120);
-    if (cacheRef.current.has(key)) { setWord({ ...cacheRef.current.get(key), quote: sentence }); return; }
+    if (cacheRef.current.has(key)) {
+      setWord({ ...cacheRef.current.get(key), quote: sentence });
+      return; // 기록 저장은 아래 word state 를 지켜보는 useEffect 가 일괄 처리한다
+    }
     setWord({ head: w, pos: "", senses: ["찾는 중…"], ctx: "", quote: sentence, live: true });
     wAbort.current?.abort();
     wAbort.current = new AbortController();
@@ -1758,7 +1750,7 @@ export default function VerbatimReader() {
         };
         cacheRef.current.set(key, { ...merged });
         return merged;
-      });
+      }); // 기록 저장은 아래 word state 를 지켜보는 useEffect 가 일괄 처리한다
     } catch (e) {
       if (e.name !== "AbortError") setWord((s) => (s && s.head === w ? { ...s, live: false, err: e.message } : s));
     }
@@ -1767,7 +1759,12 @@ export default function VerbatimReader() {
   const runSentence = async (text) => {
     if (!text) return;
     const key = "s|" + text.slice(0, 200);
-    if (cacheRef.current.has(key)) { setSent({ trans: cacheRef.current.get(key), quote: text, live: false }); return; }
+    if (cacheRef.current.has(key)) {
+      const trans = cacheRef.current.get(key);
+      setSent({ trans, quote: text, live: false });
+      pushInterp(text, trans);
+      return;
+    }
     setSent({ trans: "", quote: text, live: true });
     sAbort.current?.abort();
     sAbort.current = new AbortController();
@@ -1779,15 +1776,77 @@ export default function VerbatimReader() {
       }, sAbort.current.signal);
       cacheRef.current.set(key, buf.trim());
       setSent((s) => (s && s.quote === text ? { ...s, trans: buf.trim(), live: false } : s));
+      pushInterp(text, buf.trim());
     } catch (e) {
       if (e.name !== "AbortError") setSent((s) => (s && s.quote === text ? { ...s, live: false, err: e.message } : s));
     }
   };
 
-  /* ── 탭 (한 번 / 두 번) ──
+  /* 기록 탭용 해석 이력 — 서버에 저장해야 새로고침·다른 기기에서도 남는다(단어장과 동일 구조) */
+  const pushInterp = async (quote, trans) => {
+    if (!trans) return;
+    try {
+      const r = await libApi("/api/interps", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ quote, trans, doc: docName, page: curRef.current }),
+      });
+      const entry = await r.json();
+      setInterpLog((v) => [entry, ...v]);
+    } catch (e) {
+      if (e.name !== "AuthError") console.warn("interp save", e);
+    }
+  };
+
+  /* 기록 탭에 뜨는 "이 문서에서 찾아본 단어" — ★ 로 담은 단어장(vocab)과 별개다.
+     탭할 때마다(캐시로 즉시 뜨든 새로 물어보든) 서버에 남겨서 기록 탭이 "이 파일에서
+     질문한 단어"를 보여주게 한다. 같은 문서 안에서 같은 단어를 다시 찾으면 서버가
+     알아서 맨 앞으로 옮긴다(POST /api/lookups 참고). */
+  const pushLookup = async (word, senses, ctx, quote) => {
+    const mean = (senses || []).filter((s) => s && s !== "찾는 중…").join(" / ");
+    if (!mean) return;
+    try {
+      const r = await libApi("/api/lookups", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ word, mean, ctx: ctx || "", quote: quote || "", doc: docName }),
+      });
+      const entry = await r.json();
+      setLookups((v) => [entry, ...v.filter((x) => !(x.word.toLowerCase() === entry.word.toLowerCase() && x.doc === entry.doc))]);
+    } catch (e) {
+      if (e.name !== "AuthError") console.warn("lookup save", e);
+    }
+  };
+
+  /* word 상태가 "완료"로 가라앉는 순간을 감지해서 기록한다 — runWord 안에서
+     setWord(updater) 직후 cacheRef.current.get(key) 를 바로 읽어 pushLookup 을 부르면,
+     React 가 그 updater 를 아직 안 돌렸을 때(배치 타이밍) 조용히 빈 결과를 읽어 기록이
+     통째로 빠졌다(실제로 겪은 버그 — 새로 찾은 단어는 거의 다 안 남고 캐시로 재조회한
+     것만 남았다). 커밋된 word state 자체를 보면 이 타이밍 문제가 아예 없다. */
+  const loggedWordKeyRef = useRef("");
+  useEffect(() => {
+    if (!word || word.live || word.err) return;
+    const key = "w|" + word.head + "|" + (word.quote || "").slice(0, 120);
+    if (loggedWordKeyRef.current === key) return;
+    loggedWordKeyRef.current = key;
+    pushLookup(word.head, word.senses, word.ctx, word.quote);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [word]);
+
+  /* 문장/구간 해석은 캔버스로 렌더된 페이지 위에 뜨는 유리 카드로 보여준다 — 드래그 선택
+     ("선택 구간 해석" 말풍선)이나 단어 탭의 "문장 해석" 버튼에서 들어온다.
+     두 번 탭 제스처는 리디자인에서 뺐다. */
+  const showQuoteInterp = (text) => {
+    const hostR = viewRef.current?.parentElement?.getBoundingClientRect();
+    setSentPos(hostR ? { left: Math.max(8, hostR.width / 2 - 160), top: 60 } : { left: 20, top: 60 });
+    runSentence(text);
+  };
+
+  /* ── 단어 탭 ──
      pointerdown 에서 바로 실행하면 핀치의 첫 손가락·스크롤 시작·길게 눌러 선택까지
      전부 단어 풀이로 오인한다. 후보만 잡아 두고 pointerup 에서 판정한다:
-     둘째 손가락이 오거나, 8px 넘게 움직이거나, 350ms 를 넘기면 탭이 아니다. */
+     둘째 손가락이 오거나, 8px 넘게 움직이거나, 350ms 를 넘기면 탭이 아니다.
+     (예전엔 두 번 탭 = 문장 번역이었지만 리디자인에서 뺐다 — 문장 해석은 드래그 선택으로만 들어간다.) */
   useEffect(() => {
     const view = viewRef.current;
     if (!view) return;
@@ -1813,25 +1872,15 @@ export default function VerbatimReader() {
       const pd = dataRef.current[n - 1];
       if (!pd) return;
       const off = +el.dataset.off;
-      const now = Date.now();
-      const dbl = now - tapRef.current.t < 350 && tapRef.current.page === n;
-      tapRef.current = { t: now, page: n };
       const s = sentenceAt(pd.text, off);
       lastSentRef.current = s.text;
-      if (dbl) {
-        wAbort.current?.abort();
-        clearMarks();
-        setMark(n, s.start, s.end, "sent");
-        setSheetOpen(true);
-        setTab("sent");
-        runSentence(s.text);
-      } else {
-        clearMarks();
-        setMark(n, off, off + el.textContent.length, "");
-        setSheetOpen(true);
-        setTab("word");
-        runWord(wordAt(pd.text, off), s.text);
-      }
+      // 한 번 탭 = 항상 단어 풀이. 문장 해석은 드래그 선택(구간 해석)으로만 들어간다.
+      setSentPos(null);
+      clearMarks();
+      setMark(n, off, off + el.textContent.length, "");
+      setSheetOpen(true);
+      setTab("word");
+      runWord(wordAt(pd.text, off), s.text);
     };
     view.addEventListener("pointerdown", onDown, { passive: true });
     view.addEventListener("pointermove", onMove, { passive: true });
@@ -1869,6 +1918,9 @@ export default function VerbatimReader() {
 
     const onStart = (e) => {
       if (e.touches.length !== 2 || !pdfRef.current) return;
+      /* 여기서 preventDefault 로 네이티브 팬을 원천 차단해 보려 했지만 되돌렸다 —
+         렉이 걸리고, 페이지 크기는 그대로인데 내용만 작아지고 상하반전되는 렌더 깨짐이 생겼다.
+         핀치 중 튀는 문제는 아래 onMove 의 e.cancelable 사후 방어로만 다룬다. */
       pinching = true;
       gestureRef.current = true;
       startD = dist(e.touches);
@@ -2088,6 +2140,12 @@ export default function VerbatimReader() {
   const [capBusy, setCapBusy] = useState("");
   const capDragRef = useRef(null);
   const capAbort = useRef(null);
+  const capModeRef = useRef(false); // 애플펜슬 이펙트가 리렌더마다 다시 걸리지 않고 최신 capMode 를 읽는 용도
+  useEffect(() => { capModeRef.current = capMode; }, [capMode]);
+  const [penCapture, setPenCapture] = useState(true); // 애플펜슬로 그으면 자동 캡처(사파리 전용)
+  const penCaptureRef = useRef(penCapture);
+  useEffect(() => { penCaptureRef.current = penCapture; }, [penCapture]);
+  const [penSel, setPenSel] = useState(null); // 펜 드래그 중 미리보기(.vb-view 기준, pointer-events:none)
 
   const measureCap = () => {
     const r = viewRef.current?.getBoundingClientRect();
@@ -2136,6 +2194,94 @@ export default function VerbatimReader() {
       window.removeEventListener("keydown", onKey, true);
     };
   }, [capMode]);
+
+  /* ── 애플펜슬로 그으면 캡처 ──
+     이 기능은 세 번 헛짚고 나서야 제자리를 찾았다. 남은 함정이 전부 여기 적혀 있다.
+
+     1) 제스처 도중에 DOM 을 건드리면 안 된다. 예전엔 그리는 도중에 바로 진짜 캡처
+        오버레이(.vb-cap, touch-action:none, position:fixed)를 띄웠는데, 누르고 있는 지점 위에
+        touch-action:none 인 요소가 새로 올라오면 사파리가 진행 중인 터치 시퀀스를 통째로
+        취소한다 — 펜을 뗐다 다시 대지 않는 한 같은 제스처로는 다시 안 잡힌다.
+        그래서 드래그 중에는 pointer-events:none 인 시각 미리보기(penSel)만 갱신하고,
+        펜을 뗀 뒤에야 enterCap() 으로 진짜 오버레이를 띄운다.
+
+     2) 포인터 이벤트로는 스크롤을 못 막는다. iOS 의 PointerEvent 는 터치 이벤트에서 파생된
+        호환 이벤트라서 pointermove 의 preventDefault() 로는 네이티브 스크롤이 안 멈춘다
+        (그래서 "드래그가 아예 안 된다" — 실은 페이지가 스크롤되고 있었다). 게다가
+        .vb-view 는 touch-action:pan-x pan-y 라 첫 move 시점엔 이미 스크롤이 시작돼 있어
+        그때 막아도 늦다. 그래서 touchstart 단계에서 preventDefault() 로 스크롤이 시작조차
+        못 하게 한다. 펜 판별은 웹킷 전용 Touch.touchType === "stylus" 로 한다
+        (PointerEvent.pointerType 과 달리 터치 이벤트 쪽에서 바로 읽을 수 있다).
+
+     3) .vb-view 에 non-passive pointermove 를 걸면 핀치줌이 깨진다. 그렇게 걸었더니
+        "핀치할 때 페이지가 몇 장씩 넘어가는" 예전 버그가 되살아났다 — 브라우저의 스크롤
+        판정 경로가 바뀌면서 핀치 핸들러가 기대는 touchmove 의 e.cancelable 전제가 무너진다.
+        그래서 여기서는 포인터 이벤트를 아예 쓰지 않고 터치 이벤트만 쓴다.
+
+     손가락과는 부딪히지 않는다: 펜은 touchType 으로 갈라내고, 핀치는 두 손가락일 때만
+     동작하므로(여기는 한 손가락짜리 stylus 만 받는다) 서로 배타적이다. */
+  useEffect(() => {
+    const view = viewRef.current;
+    // 꺼져 있으면 리스너를 아예 안 붙인다 — non-passive 터치 리스너의 존재 자체가
+    // 핀치줌의 e.cancelable 판정에 영향을 줄 수 있어서, 껐을 때는 예전과 100% 같은 상태여야 한다
+    if (!view || !IS_SAFARI || !penCapture) return;
+    let pend = null; // {x0, y0}
+
+    const isPen = (e) =>
+      e.touches.length === 1 && e.touches[0].touchType === "stylus";
+
+    const onStart = (e) => {
+      pend = null;
+      if (capModeRef.current || !isPen(e)) return;
+      // 여기서 막아야 스크롤이 시작조차 안 한다 — touchmove 에서 막으면 이미 늦다
+      if (e.cancelable) e.preventDefault();
+      const t = e.touches[0];
+      pend = { x0: t.clientX, y0: t.clientY };
+    };
+    /* 미리보기는 .vb-cap 과 같은 화면 고정(fixed) 좌표로 들고 있는다 —
+       .vb-view 안에 absolute 로 넣으면 스크롤 컨테이너라 스크롤된 만큼 어긋난다. */
+    const onMove = (e) => {
+      if (!pend || !isPen(e)) return;
+      if (e.cancelable) e.preventDefault();
+      const t = e.touches[0];
+      const r = view.getBoundingClientRect();
+      const cx = (v) => Math.max(r.left, Math.min(r.right, v));
+      const cy = (v) => Math.max(r.top, Math.min(r.bottom, v));
+      const x0 = cx(pend.x0), y0 = cy(pend.y0);
+      const x1 = cx(t.clientX), y1 = cy(t.clientY);
+      setPenSel({
+        left: Math.min(x0, x1), top: Math.min(y0, y1),
+        w: Math.abs(x1 - x0), h: Math.abs(y1 - y0),
+      });
+    };
+    const onEnd = () => {
+      if (!pend) return;
+      pend = null;
+      setPenSel((sel) => {
+        if (sel && sel.w >= CAP_MIN && sel.h >= CAP_MIN) {
+          // capSel 은 오버레이(=.vb-view 실측 사각형) 기준이라 화면 좌표에서 되돌려 준다
+          const r = view.getBoundingClientRect();
+          enterCap();                // 이제서야 오버레이를 띄운다 — 제스처는 이미 끝났다
+          capDragRef.current = null; // 크기 조절(핸들)은 이제부터 새 조작이니 비워 둔다
+          setCapSel({ x: sel.left - r.left, y: sel.top - r.top, w: sel.w, h: sel.h });
+        }
+        return null; // 미리보기는 항상 치운다
+      });
+    };
+    const onCancel = () => { pend = null; setPenSel(null); };
+
+    view.addEventListener("touchstart", onStart, { passive: false });
+    view.addEventListener("touchmove", onMove, { passive: false });
+    view.addEventListener("touchend", onEnd, { passive: true });
+    view.addEventListener("touchcancel", onCancel, { passive: true });
+    return () => {
+      view.removeEventListener("touchstart", onStart);
+      view.removeEventListener("touchmove", onMove);
+      view.removeEventListener("touchend", onEnd);
+      view.removeEventListener("touchcancel", onCancel);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [penCapture]);
 
   const capDown = (e) => {
     if (capBusy || !capBox) return;
@@ -2225,6 +2371,30 @@ export default function VerbatimReader() {
       transform: [1, 0, 0, 1, -vp.width * fx, -vp.height * fy],
     }).promise;
     return { page: n, url: cv.toDataURL("image/jpeg", 0.85) };
+  };
+
+  /* "질문" — 해석/문제풀이처럼 정해진 프롬프트를 바로 쏘지 않고, 오려낸 그림만 새 세션에
+     붙여 질문 탭으로 넘긴다. 사용자가 직접 무엇을 물어볼지 타이핑하게 두는 쪽. */
+  const runCaptureAsk = async () => {
+    if (!capSel || capBusy) return;
+    setCapBusy("ask");
+    let shot;
+    try {
+      shot = await cropRegion(capSel);
+    } catch (e) {
+      exitCap();
+      const sid = curSessRef.current && findSess(curSessRef.current) ? curSessRef.current : newSess("영역 캡처");
+      addMsgs(sid, [{ role: "ai", text: "", live: false, err: e.message }]);
+      setTab("ask"); setSheetOpen(true);
+      return;
+    }
+    const b64 = shot.url.split(",")[1];
+    exitCap();
+    setTab("ask");
+    setSheetOpen(true);
+    // vision:true 로 세션을 열면 기존 "그림 함께" 로직이 이 첨부를 기본으로 켜 둔다.
+    newSess(`${shot.page}쪽 질문`, { img: b64, vision: true });
+    setCapBusy("");
   };
 
   /* kind: "read" = 해석(비전 모델 한 번) / "solve" = 문제풀이(옮겨적기 → 질문 탭 모델이 풀이) */
@@ -2344,6 +2514,34 @@ export default function VerbatimReader() {
     r.readAsArrayBuffer(f);
   };
 
+  /* 파일을 여러 개 고르거나 끌어다 놓았을 때 — 한 번에 읽을 수 있는 문서는 하나뿐이라
+     "여는" 건 의미가 없다. 딱 한 개면 기존처럼 열면서 저장하고, 여러 개면 전부 서재에만
+     올린다(순서대로, 업로드 진행률 알약이 파일마다 갱신된다). 표지는 기존과 같이
+     처음 열 때 만들어진다 — 일괄 업로드에서는 만들지 않는다. */
+  const readFiles = (fileList) => {
+    const files = Array.from(fileList || []).filter(
+      (f) => f.type === "application/pdf" || /\.pdf$/i.test(f.name)
+    );
+    if (!files.length) return;
+    if (files.length === 1) { readFile(files[0]); return; }
+    (async () => {
+      setLibErr("");
+      let ok = 0, fail = 0;
+      for (const f of files) {
+        try {
+          const buf = await f.arrayBuffer();
+          await uploadPDF(buf, f.name.replace(/\.pdf$/i, ""), libFolder);
+          ok++;
+        } catch (e) {
+          if (e.name === "AuthError") return;
+          fail++;
+        }
+      }
+      refreshLib();
+      if (fail) setLibErr(`${ok}개 추가, ${fail}개는 업로드하지 못했습니다.`);
+    })();
+  };
+
   const dragRef = useRef(null);
   const zoomBy = (f) => {
     zoomRef.current = Math.max(0.3, Math.min(3, zoomRef.current * f));
@@ -2394,14 +2592,212 @@ export default function VerbatimReader() {
 
   const defLabel = models.find((m) => m.id === defModel)?.label || "";
   const askNote = models.find((m) => m.id === (cfg.askModel || defModel))?.note || "";
-  const folders = [...lib.folders].sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  const folders = lib.folders; // 서버가 준 배열 순서 그대로 — 사이드바 드래그 정렬이 이 순서를 바꾼다
   const shownFiles = lib.files
     .filter((f) => (f.folder || "") === libFolder)
     .sort((a, b) => (b.at || 0) - (a.at || 0));
+  const recentFiles = [...lib.files]
+    .filter((f) => f.lastOpenedAt)
+    .sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
   const curFolName = lib.folders.find((f) => f.id === libFolder)?.name || "";
+  const isSearchMode = libQuery.trim().length > 0; // 검색어가 있으면 폴더 뷰 대신 검색 결과를 보여준다
+  const folderName = (id) => lib.folders.find((fo) => fo.id === id)?.name || "";
+  const lastMeta = (f) =>
+    f.lastPage ? `마지막 ${f.lastPage}쪽${f.totalPages ? " · 총 " + f.totalPages + "쪽" : ""} · ` : "";
+  /* 매트 처리 — 칸(슬롯)은 모두 같은 자리를 차지하고, 그 안에서 종이가 원본 비율
+     (f.ratio = w/h)대로 축소돼 가운데 놓인다. 잘리는 데 없이, 격자는 안 흐트러지게.
+
+     높이를 일정하게 맞추면 16:9 슬라이드가 A4 옆에서 두 배 넓어져 옆 칸을 침범한다.
+     그래서 시안 8a 의 규격(16:9→148×83 · A4→90×127 · 4:3→132×99)이 쓰는 "넓이 일정"
+     규칙을 그대로 옮겼다: w=√(A·r), h=√(A/r). A=12000 이면 위 세 값과 ±3px 안에서 맞는다.
+     파노라마 스캔·아주 긴 세로 문서는 상한에 걸려 비율만 유지한 채 줄어든다. */
+  const PAPER_AREA = 12000;
+  /* floor 인 건 반올림이 상한을 1px 넘겨 칸 높이를 삐져나오는 걸 막으려는 것 */
+  const matteWidth = (r, s = 1) => Math.floor(Math.min(
+    Math.sqrt(PAPER_AREA * s * s * r), // 넓이 일정
+    SLOT_H * s * r,                    // 칸 높이를 넘지 않게 (아주 긴 세로 문서)
+    160 * s,                           // 옆 칸을 침범하지 않게 (파노라마 스캔)
+  ));
+  const measureThumb = (id, img) => {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    if (!w || !h) return;
+    setThumbRatio((m) => (m[id] ? m : { ...m, [id]: w / h }));
+  };
+  /* 카드 종이 한 장. 비율을 알면 폭을 정해 주고(칸보다 좁으면 min() 으로 같이 줄어든다),
+     아직 모르면 그림이 스스로 정하게 두었다가 onLoad 에서 잰 값으로 자리를 잡는다.
+     폭만 주고 aspect-ratio 로 높이를 받아 두면 레터박스(위아래 흰 띠)가 아예 안 생긴다. */
+  const renderPaper = (f, s = 1) => {
+    const r = f.ratio > 0 ? f.ratio : thumbRatio[f.id] || (f.thumb ? 0 : A4_RATIO);
+    const style = r ? { width: `min(${matteWidth(r, s)}px, 100%)`, aspectRatio: String(r) } : undefined;
+    return (
+      <div className={"vb-slot" + (s < 1 ? " sm" : "")}>
+        <div className={"vb-paper" + (r ? "" : " auto")} style={style}>
+          {f.thumb ? (
+            <img src={"/api/library/thumb/" + f.id} alt="" loading="lazy"
+              onLoad={(e) => measureThumb(f.id, e.currentTarget)} />
+          ) : (
+            <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6" /></svg>
+          )}
+          {f.lastPage > 0 && <span className="vb-ribbon" />}
+        </div>
+      </div>
+    );
+  };
+
+  /* wide 레이아웃 서재 카드 — 매트 처리한 종이 + ⋮ 메뉴.
+     좁은 화면 카드(vb-doc)는 종이만 같고 아이콘 액션이 붙어 있어 렌더가 따로다. */
+  const renderDocCard = (f, opt = {}) => {
+    const menuOpen = docMenuId === f.id;
+    const moveOpen = docMoveId === f.id;
+    const renaming = docRenameId === f.id;
+    return (
+      <div key={f.id} draggable={!renaming}
+        className="vb-mdoc"
+        onClick={() => !renaming && openLibFile(f)}
+        onDragStart={(e) => {
+          setDragId(f.id);
+          e.dataTransfer.setData("text/plain", f.id);
+          e.dataTransfer.effectAllowed = "move";
+        }}
+        onDragEnd={() => { setDragId(""); setDropTgt(""); }}>
+        {renderPaper(f)}
+        <button className="vb-mmenu" onClick={(e) => {
+          e.stopPropagation();
+          setDocMenuId(menuOpen ? "" : f.id); setDocMoveId("");
+        }} aria-label="더보기" title="더보기">⋮</button>
+        {menuOpen && (
+          <div className="vb-docmenu" onClick={(e) => e.stopPropagation()}>
+            <button onClick={() => { setDocRenameId(f.id); setDocRenameVal(f.name); setDocMenuId(""); }}>
+              이름 바꾸기
+            </button>
+            <button onClick={() => setDocMoveId(moveOpen ? "" : f.id)}>
+              이동 <span className="vb-menuarrow">›</span>
+            </button>
+            {moveOpen && (
+              <div className="vb-docsubmenu">
+                <button onClick={() => { moveFile(f.id, ""); setDocMenuId(""); setDocMoveId(""); }}>서재(최상위)</button>
+                {folders.map((fo) => (
+                  <button key={fo.id} onClick={() => { moveFile(f.id, fo.id); setDocMenuId(""); setDocMoveId(""); }}>
+                    {fo.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <a className="vb-docmenu-dl" href={"/api/library/file/" + f.id + "?dl=1"} download
+              onClick={() => setDocMenuId("")}>다운로드</a>
+            <button className="vb-docmenu-del"
+              onClick={() => tapDel(f.id, () => { delFile(f.id); setDocMenuId(""); })}>
+              {delAsk === f.id ? "정말 삭제할까요?" : "삭제"}
+            </button>
+          </div>
+        )}
+        <div className="vb-mbody">
+          {renaming ? (
+            <input className="vb-mrename" autoFocus value={docRenameVal}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => setDocRenameVal(e.target.value)}
+              onBlur={() => renameFile(f.id, docRenameVal)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") { e.preventDefault(); renameFile(f.id, docRenameVal); }
+                if (e.key === "Escape") { e.preventDefault(); setDocRenameId(""); }
+              }} />
+          ) : (
+            <div className="vb-fname" title={f.name}>{f.name}</div>
+          )}
+          <div className="vb-fmeta">
+            {opt.folderLabel ? opt.folderLabel + " · " : ""}{lastMeta(f)}{fmtRel(f.lastOpenedAt || f.at)}
+          </div>
+          {opt.matches?.length > 0 && (
+            <div className="vb-hits">
+              {opt.matches.map((m) => (
+                <button key={m.page} className="vb-hit"
+                  onClick={(e) => { e.stopPropagation(); openLibFile(f, m.page); }}>
+                  <span className="vb-hitpg">{m.page}쪽</span>{m.snippet}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
   const savedVocab = word?.head
     ? vocab.find((v) => v.word.toLowerCase() === word.head.toLowerCase())
     : null;
+
+  /* ── 질문 탭: 문답을 쌍으로 묶고 최신이 위로 오게 뒤집는다 ── */
+  const qaPairs = useMemo(() => {
+    const pairs = [];
+    for (let i = 0; i < askLog.length; i += 2) {
+      if (askLog[i]) pairs.push({ q: askLog[i], a: askLog[i + 1] || null, i });
+    }
+    return pairs.reverse();
+  }, [askLog]);
+
+  const pickModel = (id) => {
+    const next = { ...cfg, askModel: id };
+    setCfg(next); cfgRef.current = next; persist();
+    setMdlMenuOpen(false);
+  };
+
+  /* 상태줄을 "보냄·배정·생각·답변" 4단계로 뭉뚱그린다.
+     wait(헤더는 왔지만 토큰 전)와 think(속생각)는 둘 다 "아직 답이 안 나왔다"는 같은 뜻이라
+     한 칸(생각)으로 합친다 — 다르게 나누면 4칸이 애매해진다. */
+  const statSteps = aiStat?.running
+    ? (() => {
+        const idx = { send: 1, wait: 2, think: 2, stream: 3 }[aiStat.phase] ?? 0;
+        return ["보냄", "배정", "생각", "답변"].map((label, i) => ({
+          label, cls: i < idx ? "done" : i === idx ? "now" : "",
+        }));
+      })()
+    : null;
+
+  // 드롭다운(대화·모델) 바깥을 누르면 닫는다
+  useEffect(() => {
+    if (!sessMenuOpen && !mdlMenuOpen) return;
+    const onDown = (e) => {
+      if (sessMenuOpen && !e.target.closest(".vb-sessbtn") && !e.target.closest(".vb-dropmenu")) setSessMenuOpen(false);
+      if (mdlMenuOpen && !e.target.closest(".vb-mdlbtn") && !e.target.closest(".vb-dropmenu")) setMdlMenuOpen(false);
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [sessMenuOpen, mdlMenuOpen]);
+
+  /* ── 기록 탭: 단어·해석·질문 이력을 시각순으로 병합 ── */
+  const logItems = useMemo(() => {
+    const items = [];
+    // ★ 단어장이 아니라 "이 문서에서 찾아본 단어" — lookups 는 문서별로 저장되므로 doc 로 거른다
+    for (const l of lookups) {
+      if (l.doc !== docName) continue;
+      items.push({ id: "l" + l.id, at: l.at || 0, type: "word", title: l.word, sub: l.mean || l.ctx || "", data: l });
+    }
+    for (const it of interpLog) {
+      if (it.doc !== docName) continue;
+      items.push({
+        id: it.id, at: it.at, type: "interp",
+        title: it.quote.length > 44 ? it.quote.slice(0, 44) + "…" : it.quote, sub: it.trans, data: it,
+      });
+    }
+    for (const s of sessions) {
+      const firstQ = s.msgs.find((m) => m.role === "me");
+      if (firstQ) items.push({ id: "s" + s.id, at: s.at || 0, type: "ask", title: s.title, sub: firstQ.text || "", data: s });
+    }
+    return items.sort((a, b) => b.at - a.at).slice(0, 200);
+  }, [lookups, interpLog, sessions, docName]);
+
+  const openLogItem = (it) => {
+    if (it.type === "word") {
+      const v = it.data;
+      setWord({ head: v.word, pos: "", senses: (v.mean || "").split(/\s*\/\s*/).filter(Boolean), ctx: v.ctx || "", quote: v.quote || "", live: false });
+      setTab("word");
+    } else if (it.type === "ask") {
+      setCurSess(it.data.id);
+      setTab("ask");
+    } else if (it.data.page) {
+      setTab("word");
+      scrollToPage(it.data.page);
+    }
+  };
   /* 접힌 항목의 하위(depth 가 더 깊은 뒤따르는 항목)는 숨긴다 */
   const visibleOutline = (() => {
     const v = [];
@@ -2437,9 +2833,7 @@ export default function VerbatimReader() {
   const inLib = libOpen || numPages === 0;
 
   return (
-    <div className={"vb-root" + (wide ? " wide" : "")} ref={rootRef}>
-      <style dangerouslySetInnerHTML={{ __html: CSS }} />
-
+    <div className={"vb-root" + (wide ? " wide" : "") + (theme === "light" ? " light" : "")} ref={rootRef}>
       {authed === false && (
         <div className="vb-modal" style={{ zIndex: 100 }}>
           <form className="vb-card" onSubmit={(e) => { e.preventDefault(); submitPw(pw); }}>
@@ -2486,15 +2880,21 @@ export default function VerbatimReader() {
           onClick={() => { setLibOpen(true); refreshLib(); }} aria-label="서재">
           <svg viewBox="0 0 24 24"><path d="M4 4.5h4V20H4zM10 4.5h4V20h-4zM15.6 6l3.9-1L22 19l-3.9 1z" /></svg>
         </button>
-        <button className="vb-tool" onClick={() => fileRef.current?.click()} aria-label="PDF 열기">
-          <svg viewBox="0 0 24 24"><path d="M12 16V4m0 0L8 8m4-4l4 4M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2" /></svg>
-        </button>
-        {numPages > 0 && (
-          <button className="vb-tool" onClick={downloadCur} aria-label="PDF 다운로드">
-            <svg viewBox="0 0 24 24"><path d="M12 4v10m0 0l-4-4m4 4l4-4M4 17v2a1 1 0 001 1h14a1 1 0 001-1v-2" /></svg>
+        {renaming !== null ? (
+          <input className="vb-nameedit" autoFocus value={renaming}
+            onChange={(e) => setRenaming(e.target.value)}
+            onBlur={() => renameCur(renaming)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") { e.preventDefault(); renameCur(renaming); }
+              if (e.key === "Escape") { e.preventDefault(); setRenaming(null); }
+            }} />
+        ) : (
+          <button className="vb-name" disabled={!numPages}
+            onClick={() => numPages && setRenaming(docName)}
+            title={numPages ? "탭해서 이름 바꾸기" : undefined}>
+            {busy ? "여는 중…" : docName || "PDF를 열어 시작하세요"}
           </button>
         )}
-        <span className="vb-name">{busy ? "여는 중…" : docName || "PDF를 열어 시작하세요"}</span>
         {numPages > 0 && <span className="vb-pill">{curPage} / {numPages}</span>}
         <span className={"vb-eng" + (engine === "NIM" ? " c" : engine === "Gemini" ? " g" : "")}>
           {engine || "대기"}
@@ -2505,14 +2905,52 @@ export default function VerbatimReader() {
             <svg viewBox="0 0 24 24"><path d="M3 8V4h4M21 8V4h-4M3 16v4h4M21 16v4h-4" /><rect x="8" y="8" width="8" height="8" strokeDasharray="2.5 2" /></svg>
           </button>
         )}
+        {IS_SAFARI && numPages > 0 && (
+          <button className={"vb-tool" + (penCapture ? " on" : "")}
+            onClick={() => {
+              const v = !penCapture;
+              setPenCapture(v); penCaptureRef.current = v; persist();
+            }}
+            aria-label="애플펜슬로 긋기 캡처" title="애플펜슬로 그으면 자동으로 캡처 영역을 그린다">
+            <svg viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+          </button>
+        )}
         <button className="vb-tool" onClick={() => zoomBy(1 / 1.2)} aria-label="축소">−</button>
         <button className="vb-tool" onClick={() => zoomBy(1.2)} aria-label="확대">+</button>
         <button className="vb-tool" onClick={() => setSetOpen(true)} aria-label="설정">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 00.3 1.8 2 2 0 11-2.8 2.8 1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5 2 2 0 11-4 0 1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3 2 2 0 11-2.8-2.8 1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1 2 2 0 110-4 1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8 2 2 0 112.8-2.8 1.6 1.6 0 001.8.3 1.6 1.6 0 001-1.5 2 2 0 114 0 1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3 2 2 0 112.8 2.8 1.6 1.6 0 00-.3 1.8 1.6 1.6 0 001.5 1 2 2 0 110 4 1.6 1.6 0 00-1.5 1z" /></svg>
         </button>
-        <button className={"vb-tool" + (sheetOpen && tab === "ask" ? " on" : "")}
-          onClick={() => { setTab("ask"); setSheetOpen(true); }}>질문</button>
-        <button className={"vb-tool" + (sheetOpen ? " on" : "")} onClick={() => setSheetOpen((v) => !v)}>풀이</button>
+        <button className="vb-tool" style={{ background: "var(--t-fill)" }}
+          onClick={() => {
+            const t = theme === "dark" ? "light" : "dark";
+            setTheme(t); themeRef.current = t; persist();
+          }} aria-label="테마 전환">
+          {theme === "dark" ? "☀" : "☾"}
+        </button>
+        <div className="vb-vsep" />
+        {wide && (
+          <div className="vb-seg2" role="group" aria-label="패널·카드 배치">
+            <button className={panelMode === "panel" ? "on" : ""}
+              onClick={() => { setPanelMode("panel"); panelModeRef.current = "panel"; persist(); }}>
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M14 4v16" /></svg>
+              패널
+            </button>
+            <button className={panelMode === "card" ? "on" : ""}
+              onClick={() => { setPanelMode("card"); panelModeRef.current = "card"; persist(); }}>
+              <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" /><rect x="8" y="8" width="8" height="8" /></svg>
+              카드
+            </button>
+          </div>
+        )}
+        <div className="vb-seg2" style={{ marginLeft: 6 }} role="group" aria-label="단어·질문·기록">
+          {[["word", "단어"], ["ask", "질문"], ["log", "기록"]].map(([k, label]) => (
+            <button key={k} className={sheetOpen && tab === k ? "on" : ""}
+              onClick={() => {
+                if (sheetOpen && tab === k) setSheetOpen(false);
+                else { setTab(k); setSheetOpen(true); }
+              }}>{label}</button>
+          ))}
+        </div>
       </div>}
 
       <div className="vb-body">
@@ -2523,6 +2961,15 @@ export default function VerbatimReader() {
             {outline.length === 0 && numPages > 0 && (
               <>
                 <div className="vb-oempty">이 PDF에는 목차 정보가 없습니다. 페이지로 바로 이동하세요.</div>
+                {curFileRef.current?.id && (
+                  <div style={{ padding: "0 8px 12px" }}>
+                    <button className="vb-libbtn" style={{ width: "100%", justifyContent: "center" }}
+                      disabled={outlineGen} onClick={generateOutline}>
+                      {outlineGen ? "목차 만드는 중…" : "AI로 목차 만들기"}
+                    </button>
+                    {outlineErr && <div className="vb-err" style={{ marginTop: 8, padding: "0 2px" }}>{outlineErr}</div>}
+                  </div>
+                )}
                 <div className="vb-pgrid">
                   {Array.from({ length: numPages }, (_, i) => (
                     <button key={i} className={"vb-pg" + (curPage === i + 1 ? " on" : "")}
@@ -2558,7 +3005,7 @@ export default function VerbatimReader() {
         </aside>
         <div className={"vb-scrim" + (outOpen && !wide ? " on" : "")} onClick={() => setOutOpen(false)} />
 
-        <div className={"vb-view" + (wide && sheetOpen ? " shr" : "")} ref={viewRef}>
+        <div className={"vb-view" + (wide && sheetOpen && panelMode === "panel" ? " shr" : "")} ref={viewRef}>
           <div className="vb-pages" ref={stageRef} />
         </div>
 
@@ -2577,11 +3024,23 @@ export default function VerbatimReader() {
               e.preventDefault();
               setBubble(null);
               lastSentRef.current = selRef.current;
-              setSheetOpen(true); setTab("sent");
+              setSentPos({ left: bubble.left, top: bubble.top + 36 });
               runSentence(selRef.current);
             }}>
             선택 구간 해석
           </button>
+        )}
+
+        {sentPos && sent && (
+          <div className="vb-sentcard" style={{ left: sentPos.left, top: sentPos.top }}>
+            <div className="vb-lbl">
+              해석
+              <button onClick={() => setSentPos(null)} aria-label="닫기">✕</button>
+            </div>
+            {sent.err
+              ? <p className="vb-err">답을 받지 못했습니다 — {sent.err}</p>
+              : <p className={sent.live ? "vb-cur" : ""}>{sent.trans}</p>}
+          </div>
         )}
 
         {inLib && (
@@ -2589,51 +3048,81 @@ export default function VerbatimReader() {
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               e.preventDefault();
-              const f = e.dataTransfer?.files?.[0];
-              if (f) readFile(f); // 파일 앱에서 끌어다 놓으면 바로 저장하고 연다
+              readFiles(e.dataTransfer?.files); // 파일 앱에서 끌어다 놓으면 저장하고(한 개면 바로 연다)
             }}>
             <div className="vb-libhead">
-              <div className="vb-mk">여<em>백</em></div>
-              <div className="vb-crumb">
-                <button className={dropTgt === "__root__" ? "tgt" : ""}
-                  onClick={() => setLibFolder("")}
-                  onDragOver={(e) => { if (dragId && libFolder) { e.preventDefault(); setDropTgt("__root__"); } }}
-                  onDragLeave={() => setDropTgt((t) => (t === "__root__" ? "" : t))}
-                  onDrop={(e) => {
-                    e.preventDefault(); e.stopPropagation();
-                    setDropTgt("");
-                    if (dragId) moveFile(dragId, ""); // 최상위로 꺼내기
-                  }}>
-                  서재
-                </button>
-                {libFolder && <><span>›</span><button onClick={() => {}}>{curFolName}</button></>}
+              <div className="vb-brandmk">
+                <img className="vb-brandicon" src="/brand/yeobaek-icon.svg" alt="" />
+                <span className="vb-brandword">여백</span>
+                <span className="vb-branddiv" />
+                <span className="vb-brandlbl">YEOBAEK</span>
               </div>
+              {/* 시안 8a 헤더에는 경로가 없다 — 콘텐츠 영역의 메타 줄이 그 역할을 한다.
+                  wide 에서는 사이드바가 이동을 맡으므로 헤더 경로를 접고,
+                  사이드바가 없는 narrow 에서만 남긴다(최상위로 꺼내는 드롭 타깃도 겸한다). */}
+              {!wide && (
+                <div className="vb-crumb">
+                  <button className={dropTgt === "__root__" ? "tgt" : ""}
+                    onClick={() => setLibFolder("")}
+                    onDragOver={(e) => { if (dragId && libFolder) { e.preventDefault(); setDropTgt("__root__"); } }}
+                    onDragLeave={() => setDropTgt((t) => (t === "__root__" ? "" : t))}
+                    onDrop={(e) => {
+                      e.preventDefault(); e.stopPropagation();
+                      setDropTgt("");
+                      if (dragId) moveFile(dragId, ""); // 최상위로 꺼내기
+                    }}>
+                    서재
+                  </button>
+                  {libFolder && <><span>›</span><button onClick={() => {}}>{curFolName}</button></>}
+                </div>
+              )}
+              <div className="vb-libsearch">
+                <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7" /><path d="M16.5 16.5L21 21" /></svg>
+                <input value={libQuery} onChange={(e) => changeLibQuery(e.target.value)}
+                  placeholder="제목이나 본문으로 찾기" />
+                {libQuery && (
+                  <button onClick={clearLibQuery} aria-label="검색어 지우기" title="지우기">✕</button>
+                )}
+              </div>
+              {/* 시안 8a 의 헤더 우측은 ★단어장 · ☾다크 · ⚙설정 셋뿐이고 알약 묶음이 없다.
+                  "새 폴더"와 "자료 넣기"는 시안에서 사이드바로 내려갔으므로 wide 에서는 헤더에 두지 않는다
+                  (사이드바가 없는 narrow 에서만 남긴다). "읽던 문서로"는 시안에 없는 이 앱 고유 기능이라 유지. */}
               <div className="vb-libact">
-                <div className="vb-seg">
-                  <button className="vb-libbtn" onClick={() => { setTab("vocab"); setSheetOpen(true); }}
-                    aria-label="단어장" title="단어장">
-                    <svg viewBox="0 0 24 24"><path d="M12 3.8l2.6 5.3 5.8.8-4.2 4.1 1 5.8-5.2-2.7-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z" /></svg>
+                <button className="vb-libbtn" onClick={() => { setTab("log"); setSheetOpen(true); }}
+                  aria-label="단어장·기록" title="단어장·기록">
+                  <svg viewBox="0 0 24 24"><path d="M12 3.5l2.6 5.6 6.1.7-4.5 4.2 1.2 6-5.4-3-5.4 3 1.2-6-4.5-4.2 6.1-.7z" /></svg>
+                </button>
+                {/* 리더 툴바(.vb-bar)에만 있던 다크 토글 — 서재에 머무는 동안엔 테마를 못 바꿨어서 추가 */}
+                <button className="vb-libbtn" onClick={() => {
+                  const t = theme === "dark" ? "light" : "dark";
+                  setTheme(t); themeRef.current = t; persist();
+                }} aria-label="다크 모드" title="다크 모드">
+                  {theme === "dark" ? "☀" : "☾"}
+                </button>
+                <button className="vb-libbtn" onClick={() => setSetOpen(true)} aria-label="설정" title="설정">
+                  <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 00.3 1.8 2 2 0 11-2.8 2.8 1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5 2 2 0 11-4 0 1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3 2 2 0 11-2.8-2.8 1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1 2 2 0 110-4 1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8 2 2 0 112.8-2.8 1.6 1.6 0 001.8.3 1.6 1.6 0 001-1.5 2 2 0 114 0 1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3 2 2 0 112.8 2.8 1.6 1.6 0 00-.3 1.8 1.6 1.6 0 001.5 1 2 2 0 110 4 1.6 1.6 0 00-1.5 1z" /></svg>
+                </button>
+                {numPages > 0 && (
+                  <button className="vb-libbtn" onClick={() => setLibOpen(false)} aria-label="읽던 문서로" title="읽던 문서로">
+                    <svg viewBox="0 0 24 24"><path d="M2.5 5.6C5 4.3 8 4.3 12 6.1v12.3C8 16.7 5 16.7 2.5 17.9zM21.5 5.6C19 4.3 16 4.3 12 6.1v12.3c4-1.7 7-1.7 9.5-.5z" /></svg>
                   </button>
-                  <button className="vb-libbtn" onClick={() => setSetOpen(true)} aria-label="설정" title="설정">
-                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 00.3 1.8 2 2 0 11-2.8 2.8 1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5 2 2 0 11-4 0 1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3 2 2 0 11-2.8-2.8 1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1 2 2 0 110-4 1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8 2 2 0 112.8-2.8 1.6 1.6 0 001.8.3 1.6 1.6 0 001-1.5 2 2 0 114 0 1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3 2 2 0 112.8 2.8 1.6 1.6 0 00-.3 1.8 1.6 1.6 0 001.5 1 2 2 0 110 4 1.6 1.6 0 00-1.5 1z" /></svg>
-                  </button>
+                )}
+                {!wide && (
                   <button className="vb-libbtn" onClick={() => setFolInput(folInput === null ? "" : null)}
                     aria-label="새 폴더" title="새 폴더">
                     <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /><path d="M12 10.5v5M9.5 13h5" /></svg>
                   </button>
-                  {numPages > 0 && (
-                    <button className="vb-libbtn" onClick={() => setLibOpen(false)} aria-label="읽던 문서로" title="읽던 문서로">
-                      <svg viewBox="0 0 24 24"><path d="M2.5 5.6C5 4.3 8 4.3 12 6.1v12.3C8 16.7 5 16.7 2.5 17.9zM21.5 5.6C19 4.3 16 4.3 12 6.1v12.3c4-1.7 7-1.7 9.5-.5z" /></svg>
-                    </button>
-                  )}
+                )}
+                {!wide && (
                   <button className="vb-libbtn pri" disabled={!ready} onClick={() => fileRef.current?.click()}
                     aria-label={ready ? "PDF 추가" : "준비 중"} title="PDF 추가">
                     <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
                   </button>
-                </div>
+                )}
               </div>
             </div>
-            {folInput !== null && (
+            {!wide && folInput !== null && (
+              // wide 에서는 사이드바 안에 인라인 입력이 따로 있다(같은 folInput 상태 공유)
               <form className="vb-newfol" onSubmit={(e) => { e.preventDefault(); makeFolder(folInput); }}>
                 <input value={folInput} autoFocus placeholder="폴더 이름"
                   onChange={(e) => setFolInput(e.target.value)} />
@@ -2643,105 +3132,303 @@ export default function VerbatimReader() {
             {(libErr || loadErr) && (
               <div className="vb-err" style={{ padding: "10px 20px 0" }}>{libErr || loadErr}</div>
             )}
-            <div className="vb-libbody">
-              {libFolder === "" && folders.length > 0 && (
-                <>
-                  <div className="vb-sect">폴더 {folders.length}</div>
-                  <div className="vb-grid">
-                    {folders.map((fo) => (
-                      <div key={fo.id}
-                        className={"vb-fol" + (dropTgt === fo.id ? " over" : "")}
-                        onClick={() => setLibFolder(fo.id)}
-                        onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTgt(fo.id); } }}
-                        onDragLeave={() => setDropTgt((t) => (t === fo.id ? "" : t))}
-                        onDrop={(e) => {
-                          e.preventDefault(); e.stopPropagation();
-                          setDropTgt("");
-                          if (dragId) moveFile(dragId, fo.id);
-                        }}>
-                        <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
-                        <div className="vb-fname">{fo.name}</div>
-                        <div className="vb-fmeta">{lib.files.filter((f) => f.folder === fo.id).length}개</div>
-                        <div className="vb-dact">
-                          <button className={"vb-ib del" + (delAsk === "fo" + fo.id ? " ask" : "")}
+            {!wide ? (
+              /* 좁은 화면 — 사이드바를 얹을 폭이 안 나와서 기존 방식(폴더 카드 클릭해서 들어가기,
+                 고정 3:4 표지, 호버 아이콘)을 그대로 쓴다. 아이패드 세로 등. */
+              <div className="vb-libbody">
+                {isSearchMode ? (
+                  <>
+                    <div className="vb-sect">
+                      검색 결과
+                      {libSearching ? " · 찾는 중…" : libSearchRes ? ` ${libSearchRes.length}건` : ""}
+                    </div>
+                    {!libSearching && libSearchRes && libSearchRes.length === 0 ? (
+                      <div className="vb-oempty">"{libQuery.trim()}"에 해당하는 자료가 없습니다.</div>
+                    ) : (
+                      <div className="vb-grid">
+                        {(libSearchRes || []).map((f) => (
+                          <div key={f.id} className="vb-doc" onClick={() => openLibFile(f)}>
+                            {renderPaper(f, NARROW_S)}
+                            <div className="vb-fname" title={f.name}>{f.name}</div>
+                            <div className="vb-fmeta">
+                              {f.folder ? folderName(f.folder) + " · " : ""}{lastMeta(f)}{fmtSize(f.size)} · {fmtDate(f.at)}
+                            </div>
+                            {f.matches?.length > 0 && (
+                              <div className="vb-hits">
+                                {f.matches.map((m) => (
+                                  <button key={m.page} className="vb-hit"
+                                    onClick={(e) => { e.stopPropagation(); openLibFile(f, m.page); }}>
+                                    <span className="vb-hitpg">{m.page}쪽</span>{m.snippet}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : (
+                  <>
+                    {libFolder === "" && greet && (
+                      <div className="vb-greet">
+                        <div className="vb-greetstamp">{greet.stamp}</div>
+                        <div className="vb-greetline">{greet.line}</div>
+                        <div className="vb-greetsub">{greet.sub}</div>
+                      </div>
+                    )}
+                    {libFolder === "" && folders.length > 0 && (
+                      <>
+                        <div className="vb-sect">폴더 {folders.length}</div>
+                        <div className="vb-grid">
+                          {folders.map((fo) => (
+                            <div key={fo.id}
+                              className={"vb-fol" + (dropTgt === fo.id ? " over" : "")}
+                              onClick={() => setLibFolder(fo.id)}
+                              onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTgt(fo.id); } }}
+                              onDragLeave={() => setDropTgt((t) => (t === fo.id ? "" : t))}
+                              onDrop={(e) => {
+                                e.preventDefault(); e.stopPropagation();
+                                setDropTgt("");
+                                if (dragId) moveFile(dragId, fo.id);
+                              }}>
+                              <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
+                              <div className="vb-fname">{fo.name}</div>
+                              <div className="vb-fmeta">{lib.files.filter((f) => f.folder === fo.id).length}개</div>
+                              <div className="vb-dact">
+                                <button className={"vb-ib del" + (delAsk === "fo" + fo.id ? " ask" : "")}
+                                  onClick={(e) => { e.stopPropagation(); tapDel("fo" + fo.id, () => delFolder(fo.id)); }}
+                                  aria-label="폴더 삭제">
+                                  {delAsk === "fo" + fo.id ? "삭제?" : "✕"}
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                    {!(libFolder === "" && folders.length === 0 && shownFiles.length === 0) && (
+                      <div className="vb-sect">
+                        {libFolder ? "이 폴더의 PDF" : "PDF"} {shownFiles.length}권
+                      </div>
+                    )}
+                    {shownFiles.length === 0 ? (
+                      libFolder === "" && folders.length === 0 ? (
+                        <div className="vb-hero">
+                          <img className="vb-herobrand" src="/brand/yeobaek-icon.svg" alt="" />
+                          <p>PDF를 추가하면 표지와 함께 이 서재에 꽂힙니다.<br />
+                            읽을 때는 단어 한 번 탭 = 뜻 · 두 번 탭 = 문장 해석 · 드래그 = 구간 해석.</p>
+                          <button className="vb-libbtn pri" style={{ padding: "13px 26px", fontSize: 15 }}
+                            disabled={!ready} onClick={() => fileRef.current?.click()}>
+                            {ready ? "첫 PDF 추가" : "준비 중…"}
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="vb-oempty">
+                          {libFolder
+                            ? "이 폴더는 비어 있습니다. 서재에서 PDF를 끌어다 놓으세요."
+                            : "아직 저장된 PDF가 없습니다. 'PDF 추가'를 누르거나 파일을 끌어다 놓으세요."}
+                        </div>
+                      )
+                    ) : (
+                      <div className="vb-grid">
+                        {shownFiles.map((f) => (
+                          <div key={f.id} draggable
+                            className={"vb-doc" + (dragId === f.id ? " drag" : "")}
+                            onClick={() => openLibFile(f)}
+                            onDragStart={(e) => {
+                              setDragId(f.id);
+                              e.dataTransfer.setData("text/plain", f.id);
+                              e.dataTransfer.effectAllowed = "move";
+                            }}
+                            onDragEnd={() => { setDragId(""); setDropTgt(""); }}>
+                            {renderPaper(f, NARROW_S)}
+                            <div className="vb-fname" title={f.name}>{f.name}</div>
+                            <div className="vb-fmeta">{lastMeta(f)}{fmtSize(f.size)} · {fmtDate(f.at)}</div>
+                            <div className="vb-dact">
+                              <a className="vb-ib" href={"/api/library/file/" + f.id + "?dl=1"} download
+                                onClick={(e) => e.stopPropagation()} aria-label="다운로드">⤓</a>
+                              <button className={"vb-ib del" + (delAsk === f.id ? " ask" : "")}
+                                onClick={(e) => { e.stopPropagation(); tapDel(f.id, () => delFile(f.id)); }}
+                                aria-label="삭제">
+                                {delAsk === f.id ? "삭제?" : "✕"}
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                )}
+                <div className="vb-hint" style={{ marginTop: 26 }}>
+                  <b>탭</b> 열기 · <b>끌어서 폴더에 놓기</b> 이동 · <b>⤓</b> 다운로드 · <b>✕ 두 번</b> 삭제<br />
+                  읽기 화면 — <b>탭</b> 단어 풀이 · <b>길게 눌러 선택</b> 구간 해석 · <b>두 손가락</b> 확대
+                </div>
+              </div>
+            ) : (
+              /* wide — 8a 시안: 왼쪽 고정 사이드바 + 매트 처리한 문서 그리드 */
+              <div className="vb-libwrap">
+                {docMenuId && (
+                  <div className="vb-menuscrim" onClick={() => { setDocMenuId(""); setDocMoveId(""); }} />
+                )}
+                <div className="vb-libside">
+                  <div className="vb-smartnav">
+                    {/* 헤더 경로를 접었으므로 "최상위로 꺼내기" 드롭 타깃은 여기가 맡는다 */}
+                    <button className={"vb-navitem" + (libFolder === "" && libView === "" ? " on" : "") +
+                        (dropTgt === "__root__" ? " over" : "")}
+                      onClick={() => { setLibFolder(""); setLibView(""); }}
+                      onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTgt("__root__"); } }}
+                      onDragLeave={() => setDropTgt((t) => (t === "__root__" ? "" : t))}
+                      onDrop={(e) => {
+                        e.preventDefault(); e.stopPropagation();
+                        setDropTgt("");
+                        if (dragId) moveFile(dragId, "");
+                      }}>
+                      <span>전체 문서</span><span className="vb-navn">{lib.files.length}</span>
+                    </button>
+                    <button className={"vb-navitem" + (libView === "recent" ? " on" : "")}
+                      onClick={() => setLibView("recent")}>
+                      <span>최근 연 문서</span><span className="vb-navn">{recentFiles.length}</span>
+                    </button>
+                  </div>
+                  {folders.length > 0 && (
+                    <div className="vb-folnavlist">
+                      {folders.map((fo) => (
+                        <div key={fo.id}
+                          className={"vb-folnav" +
+                            (dropTgt === fo.id ? " over" : "") +
+                            (folDragId === fo.id ? " dragging" : "") +
+                            (libFolder === fo.id && libView === "" ? " on" : "")}
+                          draggable
+                          onClick={() => { setLibFolder(fo.id); setLibView(""); }}
+                          onDragStart={(e) => {
+                            setFolDragId(fo.id);
+                            e.dataTransfer.setData("text/plain", fo.id);
+                            e.dataTransfer.effectAllowed = "move";
+                          }}
+                          onDragEnd={() => setFolDragId("")}
+                          onDragOver={(e) => { e.preventDefault(); if (dragId) setDropTgt(fo.id); }}
+                          onDragLeave={() => setDropTgt((t) => (t === fo.id ? "" : t))}
+                          onDrop={(e) => {
+                            e.preventDefault(); e.stopPropagation();
+                            if (dragId) { setDropTgt(""); moveFile(dragId, fo.id); return; }
+                            if (folDragId && folDragId !== fo.id) {
+                              const ids = folders.map((x) => x.id);
+                              const from = ids.indexOf(folDragId), to = ids.indexOf(fo.id);
+                              ids.splice(to, 0, ids.splice(from, 1)[0]);
+                              reorderFolders(ids);
+                            }
+                            setFolDragId("");
+                          }}>
+                          <span className="vb-folnavname">{fo.name}</span>
+                          <span className="vb-navn">{lib.files.filter((f) => f.folder === fo.id).length}</span>
+                          <button className={"vb-ib del sm" + (delAsk === "fo" + fo.id ? " ask" : "")}
                             onClick={(e) => { e.stopPropagation(); tapDel("fo" + fo.id, () => delFolder(fo.id)); }}
                             aria-label="폴더 삭제">
                             {delAsk === "fo" + fo.id ? "삭제?" : "✕"}
                           </button>
                         </div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-              {!(libFolder === "" && folders.length === 0 && shownFiles.length === 0) && (
-                <div className="vb-sect">
-                  {libFolder ? "이 폴더의 PDF" : "PDF"} {shownFiles.length}권
-                </div>
-              )}
-              {shownFiles.length === 0 ? (
-                libFolder === "" && folders.length === 0 ? (
-                  <div className="vb-hero">
-                    <div className="vb-mk" style={{ fontSize: 56 }}>여<em>백</em></div>
-                    <p>PDF를 추가하면 표지와 함께 이 서재에 꽂힙니다.<br />
-                      읽을 때는 단어 한 번 탭 = 뜻 · 두 번 탭 = 문장 해석 · 드래그 = 구간 해석.</p>
-                    <button className="vb-libbtn pri" style={{ padding: "13px 26px", fontSize: 15 }}
-                      disabled={!ready} onClick={() => fileRef.current?.click()}>
-                      {ready ? "첫 PDF 추가" : "준비 중…"}
-                    </button>
-                  </div>
-                ) : (
-                  <div className="vb-oempty">
-                    {libFolder
-                      ? "이 폴더는 비어 있습니다. 서재에서 PDF를 끌어다 놓으세요."
-                      : "아직 저장된 PDF가 없습니다. 'PDF 추가'를 누르거나 파일을 끌어다 놓으세요."}
-                  </div>
-                )
-              ) : (
-                <div className="vb-grid">
-                  {shownFiles.map((f) => (
-                    <div key={f.id} draggable
-                      className={"vb-doc" + (dragId === f.id ? " drag" : "")}
-                      onClick={() => openLibFile(f)}
-                      onDragStart={(e) => {
-                        setDragId(f.id);
-                        e.dataTransfer.setData("text/plain", f.id);
-                        e.dataTransfer.effectAllowed = "move";
-                      }}
-                      onDragEnd={() => { setDragId(""); setDropTgt(""); }}>
-                      <div className="vb-cov">
-                        {f.thumb ? (
-                          <img src={"/api/library/thumb/" + f.id} alt="" loading="lazy" />
-                        ) : (
-                          <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6" /></svg>
-                        )}
-                      </div>
-                      <div className="vb-fname">{f.name}</div>
-                      <div className="vb-fmeta">{fmtSize(f.size)} · {fmtDate(f.at)}</div>
-                      <div className="vb-dact">
-                        <a className="vb-ib" href={"/api/library/file/" + f.id + "?dl=1"} download
-                          onClick={(e) => e.stopPropagation()} aria-label="다운로드">⤓</a>
-                        <button className={"vb-ib del" + (delAsk === f.id ? " ask" : "")}
-                          onClick={(e) => { e.stopPropagation(); tapDel(f.id, () => delFile(f.id)); }}
-                          aria-label="삭제">
-                          {delAsk === f.id ? "삭제?" : "✕"}
-                        </button>
-                      </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
+                  {folInput !== null ? (
+                    <form className="vb-folnewinline" onSubmit={(e) => { e.preventDefault(); makeFolder(folInput); }}>
+                      <input value={folInput} autoFocus placeholder="폴더 이름"
+                        onChange={(e) => setFolInput(e.target.value)}
+                        onBlur={() => { if (!folInput.trim()) setFolInput(null); }}
+                        onKeyDown={(e) => { if (e.key === "Escape") setFolInput(null); }} />
+                    </form>
+                  ) : (
+                    <button className="vb-foladd" onClick={() => setFolInput("")}>＋ 폴더 추가</button>
+                  )}
+                  <span className="vb-sidespacer" />
+                  <button className="vb-sideadd" disabled={!ready} onClick={() => fileRef.current?.click()}>
+                    ＋ 자료 넣기
+                  </button>
                 </div>
-              )}
-              <div className="vb-hint" style={{ marginTop: 26 }}>
-                <b>탭</b> 열기 · <b>끌어서 폴더에 놓기</b> 이동 · <b>⤓</b> 다운로드 · <b>✕ 두 번</b> 삭제<br />
-                읽기 화면 — <b>한 번 탭</b> 단어 풀이 · <b>두 번 탭</b> 문장 해석 · <b>길게 눌러 선택</b> 구간 해석 · <b>두 손가락</b> 확대
+
+                <div className="vb-libbody">
+                  {isSearchMode ? (
+                    <>
+                      <div className="vb-sect">
+                        검색 결과
+                        {libSearching ? " · 찾는 중…" : libSearchRes ? ` ${libSearchRes.length}건` : ""}
+                      </div>
+                      {!libSearching && libSearchRes && libSearchRes.length === 0 ? (
+                        <div className="vb-oempty">"{libQuery.trim()}"에 해당하는 자료가 없습니다.</div>
+                      ) : (
+                        <div className="vb-mgrid">
+                          {(libSearchRes || []).map((f) => renderDocCard(f, {
+                            matches: f.matches,
+                            folderLabel: f.folder ? folderName(f.folder) : "",
+                          }))}
+                        </div>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      {libFolder === "" && libView === "" && greet && (
+                        <div className="vb-greet">
+                          <div className="vb-greetstamp">{greet.stamp}</div>
+                          <div className="vb-greetline">{greet.line}</div>
+                          <div className="vb-greetsub">{greet.sub}</div>
+                        </div>
+                      )}
+                      {/* 시안 8a 의 메타 줄 — 경로 / 정렬 / 개수 */}
+                      <div className="vb-libmeta">
+                        <span className="f">서재</span>
+                        <span className="f">/</span>
+                        <span className="cur">
+                          {libView === "recent" ? "최근 연 문서" : libFolder ? curFolName : "전체 문서"}
+                        </span>
+                        <span className="sp" />
+                        <span className="f">{libView === "recent" ? "최근 연 순" : "최근 추가 순"}</span>
+                        <span className="div" />
+                        <span className="f">{(libView === "recent" ? recentFiles : shownFiles).length}개</span>
+                      </div>
+                      {(libView === "recent" ? recentFiles : shownFiles).length === 0 ? (
+                        libView !== "recent" && libFolder === "" && folders.length === 0 ? (
+                          <div className="vb-hero">
+                            <img className="vb-herobrand" src="/brand/yeobaek-icon.svg" alt="" />
+                            <p>PDF를 추가하면 표지와 함께 이 서재에 꽂힙니다.<br />
+                              읽을 때는 단어 한 번 탭 = 뜻 · 두 번 탭 = 문장 해석 · 드래그 = 구간 해석.</p>
+                            <button className="vb-libbtn pri" style={{ padding: "13px 26px", fontSize: 15 }}
+                              disabled={!ready} onClick={() => fileRef.current?.click()}>
+                              {ready ? "첫 PDF 추가" : "준비 중…"}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="vb-oempty">
+                            {libView === "recent"
+                              ? "아직 연 문서가 없습니다."
+                              : libFolder
+                              ? "이 폴더는 비어 있습니다. 서재에서 PDF를 끌어다 놓으세요."
+                              : "아직 저장된 PDF가 없습니다. 'PDF 추가'를 누르거나 파일을 끌어다 놓으세요."}
+                          </div>
+                        )
+                      ) : (
+                        <div className="vb-mgrid">
+                          {(libView === "recent" ? recentFiles : shownFiles).map((f) => renderDocCard(f))}
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div className="vb-hint" style={{ marginTop: 26 }}>
+                    <b>탭</b> 열기 · <b>⋮</b> 이름 바꾸기·이동·다운로드·삭제 · <b>끌어서 폴더에 놓기</b> 이동<br />
+                    읽기 화면 — <b>탭</b> 단어 풀이 · <b>길게 눌러 선택</b> 구간 해석 · <b>두 손가락</b> 확대
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
           </div>
         )}
 
-        <section className={"vb-sheet" + (sheetOpen ? " open" : "")}
-          style={{ height: wide ? "100%" : sheetFrac * 100 + "%" }}>
-          <div className="vb-grip"
+        <div className={"vb-scrim" + (panelMode === "card" && sheetOpen ? " on" : "")}
+          onClick={() => panelMode === "card" && setSheetOpen(false)} />
+
+        <section className={"vb-surf " + panelMode + " t-" + tab + (sheetOpen ? " open" : "")}
+          style={!wide && panelMode === "panel" ? { height: sheetFrac * 100 + "%" } : undefined}>
+          <div className="vb-griphandle"
             onPointerDown={(e) => { dragRef.current = { y: e.clientY, h: sheetFrac }; e.currentTarget.setPointerCapture(e.pointerId); }}
             onPointerMove={(e) => {
               if (!dragRef.current) return;
@@ -2751,155 +3438,268 @@ export default function VerbatimReader() {
             onPointerUp={(e) => { dragRef.current = null; e.currentTarget.releasePointerCapture(e.pointerId); }}>
             <i />
           </div>
-          <div className="vb-tabs">
-            <div className="vb-seg">
-              {[["word", "단어"], ["sent", "문장"], ["ask", "질문"], ["vocab", "단어장"]].map(([k, label]) => (
-                <button key={k} className={"vb-tab" + (tab === k ? " on" : "")} onClick={() => setTab(k)}>{label}</button>
-              ))}
-            </div>
-            <button className="vb-x" onClick={() => setSheetOpen(false)}>✕</button>
+
+          <div className="vb-shead">
+            {[["word", "단어"], ["ask", "질문"], ["log", "기록"]].map(([k, label]) => (
+              <button key={k} className={"vb-shtab" + (tab === k ? " on" : "")} onClick={() => setTab(k)}>
+                {label}<i />
+              </button>
+            ))}
+            {wide && (
+              <button className="vb-modebtn" title="패널/카드 전환"
+                onClick={() => {
+                  const m = panelMode === "panel" ? "card" : "panel";
+                  setPanelMode(m); panelModeRef.current = m; persist();
+                }}>
+                <svg viewBox="0 0 24 24"><path d="M4 9V5a1 1 0 011-1h4M20 15v4a1 1 0 01-1 1h-4M20 9V5a1 1 0 00-1-1h-4M4 15v4a1 1 0 001 1h4" /></svg>
+              </button>
+            )}
+            <button className="vb-closebtn" style={!wide ? { marginLeft: "auto" } : undefined}
+              onClick={() => setSheetOpen(false)} aria-label="닫기">✕</button>
           </div>
 
-          <div className="vb-panes" ref={panesRef}>
-            {tab === "word" && (!word ? (
-              <div className="vb-ph">본문에서 단어를 한 번 누르면 여기에 뜻이 나옵니다.</div>
-            ) : (
-              <>
-                <div className="vb-head">
-                  <span className="vb-hw">{word.head}</span>
-                  {word.pos && <span className="vb-pos">{word.pos}</span>}
-                  <button className={"vb-star" + (savedVocab ? " on" : "")}
-                    onClick={() => (savedVocab ? delVocab(savedVocab.id) : addVocab())}
-                    aria-label={savedVocab ? "단어장에서 빼기" : "단어장에 담기"}>
-                    <svg viewBox="0 0 24 24"><path d="M12 3.6l2.5 5.1 5.6.8-4 3.9.9 5.6-5-2.6-5 2.6.9-5.6-4-3.9 5.6-.8z" /></svg>
+          {tab === "word" && (
+            <div className="vb-panes">
+              <div className="vb-pe">
+                {!word ? (
+                  <div className="vb-ph">본문에서 단어를 탭하면 여기에 뜻이 나옵니다.</div>
+                ) : (
+                  <div className="vb-wpane">
+                    <div className="vb-head">
+                      <div>
+                        <div className="vb-hw">{word.head}</div>
+                        {word.pos && <span className="vb-pos">{word.pos}</span>}
+                      </div>
+                      <button className={"vb-star" + (savedVocab ? " on" : "")}
+                        onClick={() => (savedVocab ? delVocab(savedVocab.id) : addVocab())}
+                        aria-label={savedVocab ? "단어장에서 빼기" : "단어장에 담기"}>
+                        <svg viewBox="0 0 24 24"><path d="M12 3.6l2.5 5.1 5.6.8-4 3.9.9 5.6-5-2.6-5 2.6.9-5.6-4-3.9 5.6-.8z" /></svg>
+                      </button>
+                    </div>
+                    <div className="vb-accbox">
+                      <p className="vb-lbl">이 문맥에서</p>
+                      <p className={"vb-acctxt" + (word.live ? " vb-cur" : "")}>{word.ctx}</p>
+                      {word.err && <p className="vb-err">답을 받지 못했습니다 — {word.err}</p>}
+                    </div>
+                    <p className="vb-lbl" style={{ marginTop: 22 }}>사전</p>
+                    <ol className="vb-senses">
+                      {(word.senses || []).map((s, i) => <li key={i}><i>{i + 1}</i><span>{s}</span></li>)}
+                    </ol>
+                    <p className="vb-lbl" style={{ marginTop: 22 }}>원문 · {curPage}쪽</p>
+                    <p className="vb-quote">{word.quote}</p>
+                    <div className="vb-wacts">
+                      <button className="vb-wactbtn"
+                        onClick={() => showQuoteInterp(word.quote)}>
+                        문장 해석
+                      </button>
+                      <button className="vb-wactbtn"
+                        onClick={() => { setAskVal(`"${word.head}" — `); setTab("ask"); setSheetOpen(true); }}>
+                        이 낱말로 질문
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === "ask" && (
+            <div className="vb-askwrap">
+              <div className="vb-atop">
+                <div className="vb-sessrow">
+                  <div style={{ position: "relative" }}>
+                    <button className={"vb-sessbtn" + (sessMenuOpen ? " open" : "")}
+                      onClick={() => { setSessMenuOpen((v) => !v); setMdlMenuOpen(false); }}>
+                      <i />
+                      <span>{sess ? sess.title : "대화 없음"}</span>
+                      <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+                    </button>
+                    {sessMenuOpen && (
+                      <div className="vb-dropmenu" style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, minWidth: 230, zIndex: 5 }}>
+                        <div className="vb-dropscroll">
+                          {sessions.length === 0 && <div className="vb-dropfoot">대화가 없습니다.</div>}
+                          {sessions.map((s) => (
+                            <div key={s.id} className={"vb-sessitem" + (s.id === curSess ? " on" : "")}
+                              style={{ cursor: "pointer" }}
+                              onClick={() => { setCurSess(s.id); setSessMenuOpen(false); }}>
+                              <i />
+                              <span className="t">{s.img ? "◨ " : ""}{s.title}</span>
+                              <span className="m">{fmtDate(s.at)}</span>
+                              <button className={"x" + (delAsk === "as" + s.id ? " ask" : "")}
+                                onClick={(e) => { e.stopPropagation(); tapDel("as" + s.id, () => delSess(s.id)); }}
+                                aria-label="대화 삭제">
+                                {delAsk === "as" + s.id ? "삭제?" : "✕"}
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="vb-dropfoot">
+                          한 대화 안에서만 앞의 문답을 기억합니다 · 마지막 질문에서 2시간 뒤 사라짐 · 영역을 오려내면 새 대화가 열립니다
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {ttlLeft && <span className="vb-ttl">{ttlLeft}</span>}
+                  <button className="vb-newsess" onClick={() => { newSess("새 대화"); setSessMenuOpen(false); }}>＋ 새 대화</button>
+                </div>
+
+                <div className="vb-composer">
+                  <textarea className="vb-askin" rows={1} value={askVal} placeholder={`${curPage}쪽을 근거로 물어보기`}
+                    onChange={(e) => setAskVal(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && wide) { e.preventDefault(); sendAsk(); } }} />
+                  <button className="vb-send" disabled={asking || !askVal.trim()} onClick={sendAsk} aria-label="보내기">
+                    <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
                   </button>
                 </div>
-                <p className="vb-lbl" style={{ marginTop: 14 }}>뜻</p>
-                <ol className="vb-senses">{(word.senses || []).map((s, i) => <li key={i}>{s}</li>)}</ol>
-                <div className="vb-rule" />
-                <p className="vb-lbl">이 문맥에서</p>
-                <p className={"vb-txt" + (word.live ? " vb-cur" : "")}>{word.ctx}</p>
-                {word.err && <p className="vb-err">답을 받지 못했습니다 — {word.err}</p>}
-                <div className="vb-rule" />
-                <p className="vb-lbl">원문</p>
-                <p className="vb-txt vb-quote">{word.quote}</p>
-              </>
-            ))}
 
-            {tab === "sent" && (!sent ? (
-              <div className="vb-ph">단어를 두 번 연속으로 누르면 그 문장 전체를 해석합니다.</div>
-            ) : (
-              <>
-                <p className="vb-lbl" style={{ marginTop: 6 }}>해석</p>
-                <p className={"vb-txt" + (sent.live ? " vb-cur" : "")}>{sent.trans}</p>
-                {sent.err && <p className="vb-err">답을 받지 못했습니다 — {sent.err}</p>}
-                <div className="vb-rule" />
-                <p className="vb-lbl">원문</p>
-                <p className="vb-txt vb-quote">{sent.quote}</p>
-              </>
-            ))}
-
-            {tab === "ask" && (
-              <>
-                <div className="vb-asktop">
-                  <div className="vb-sesstrip">
-                    <button className="vb-sessnew" onClick={() => newSess("새 대화")}>＋ 새 대화</button>
-                    {sessions.map((s) => (
-                      <span key={s.id} className={"vb-sesschip" + (s.id === curSess ? " on" : "")}>
-                        <button className="vb-sesslbl" onClick={() => setCurSess(s.id)}>
-                          {s.img ? "◨ " : ""}{s.title}
-                        </button>
-                        <button className={"vb-sessx" + (delAsk === "as" + s.id ? " ask" : "")}
-                          onClick={() => tapDel("as" + s.id, () => delSess(s.id))} aria-label="대화 삭제">
-                          {delAsk === "as" + s.id ? "삭제?" : "✕"}
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                  <div className="vb-askmeta">
-                    {models.length > 0 && (
-                      <select className="vb-mdl" value={cfg.askModel || ""} aria-label="질문 탭 모델"
-                        onChange={(e) => {
-                          // persist 는 cfgRef 를 읽는다. 동기화 useEffect 를 기다리지 않고 직접 맞춘다.
-                          const next = { ...cfg, askModel: e.target.value };
-                          setCfg(next); cfgRef.current = next; persist();
-                        }}>
-                        <option value="">기본{defLabel ? ` — ${defLabel}` : ""}</option>
-                        {models.map((m) => (
-                          <option key={m.id} value={m.id}>{m.label}</option>
-                        ))}
-                      </select>
-                    )}
-                    {ttlLeft && <span className="vb-sessttl">{ttlLeft}</span>}
-                  </div>
-                </div>
-
-                {askLog.length === 0 ? (
-                  <div className="vb-ph">
-                    <p style={{ margin: "0 0 8px" }}>
-                      책 본문을 근거로 답합니다 — 짧은 책은 전체를, 긴 책은 지금 보는 {curPage}쪽 주변과 목차를 함께 보냅니다.
-                    </p>
-                    <p style={{ margin: 0 }}>
-                      한 대화 안에서는 앞의 문답을 기억하므로 이어서 되물을 수 있습니다. 대화는 마지막 질문에서 2시간 뒤 사라집니다.
-                    </p>
-                  </div>
-                ) : askLog.map((m, i) => (
-                  <div key={i} className={"vb-msg " + m.role}>
-                    {m.img && <img className="vb-msgimg" src={m.img} alt="오려낸 영역" />}
-                    {m.err ? <span className="vb-err">답을 받지 못했습니다 — {m.err}</span>
-                      : m.role === "ai" ? <Rich text={m.text} live={!!m.live} />
-                      : m.text}
-                    {m.stopped && <div className="vb-stopped">여기서 중단했습니다</div>}
-                  </div>
-                ))}
-
-                <div className="vb-askfoot">
-                  {statView && (
-                    <div className={"vb-stat" + (statView.warn ? " warn" : "")}>
-                      <i className="vb-statdot" />
-                      <span className="vb-stattx">{statView.text}</span>
-                      <button className="vb-statstop" onClick={stopAsk}>중단</button>
+                <div className="vb-attrow">
+                  {sess?.img && sendFig && (
+                    <span className="vb-chip">
+                      <img src={"data:image/jpeg;base64," + sess.img} alt="" />
+                      영역 1
+                      <button onClick={() => setSendFig(false)} aria-label="첨부 빼기">✕</button>
+                    </span>
+                  )}
+                  <button className="vb-capchip" onClick={enterCap}>＋ 오려내기</button>
+                  {models.length > 0 && (
+                    <div style={{ position: "relative", marginLeft: "auto" }}>
+                      <button className={"vb-mdlbtn" + (mdlMenuOpen ? " open" : "")}
+                        onClick={() => { setMdlMenuOpen((v) => !v); setSessMenuOpen(false); }}>
+                        {cfg.askModel ? (models.find((m) => m.id === cfg.askModel)?.label || "모델") : `기본${defLabel ? " — " + defLabel : ""}`}
+                        <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
+                      </button>
+                      {mdlMenuOpen && (
+                        <div className="vb-dropmenu" style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, minWidth: 270, zIndex: 5 }}>
+                          <div className="vb-dropscroll">
+                            <button className={"vb-mdlitem" + (!cfg.askModel ? " on" : "")} onClick={() => pickModel("")}>
+                              <span className="vb-mdlrow">
+                                <span className="n">기본{defLabel ? ` — ${defLabel}` : ""}</span>
+                                {!cfg.askModel && <span className="c">✓</span>}
+                              </span>
+                            </button>
+                            {["chat", "reason"].map((grp) => {
+                              const list = models.filter((m) => (m.think ? "reason" : "chat") === grp);
+                              if (!list.length) return null;
+                              return (
+                                <div key={grp}>
+                                  <div className="vb-mdlgrp">{grp === "reason" ? "추론 모델 — 속생각을 먼저 흘린 뒤 답한다" : "일반 모델"}</div>
+                                  {list.map((m) => (
+                                    <button key={m.id} className={"vb-mdlitem" + (cfg.askModel === m.id ? " on" : "")}
+                                      onClick={() => pickModel(m.id)}>
+                                      <span className="vb-mdlrow">
+                                        <span className="n">{m.label}</span>
+                                        {m.id === defModel && <span className="d">기본</span>}
+                                        {cfg.askModel === m.id && <span className="c">✓</span>}
+                                      </span>
+                                      <span className="vb-mdlnote">{m.note}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              );
+                            })}
+                          </div>
+                          <div className="vb-dropfoot">
+                            단어·문장 탭은 반응 속도 때문에 빠른 모델을 그대로 씁니다 — 이 선택은 질문 탭에만 적용됩니다.
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
-                  <div className="vb-askbar">
-                    {sess?.img && (
-                      <button className={"vb-figtog" + (sendFig ? " on" : "")}
-                        onClick={() => setSendFig((v) => !v)}
-                        title="켜면 오려낸 그림을 함께 보냅니다 (그림을 볼 수 있는 모델이 답합니다)">
-                        🖼 그림
-                      </button>
-                    )}
-                    <textarea className="vb-askin" rows={1} value={askVal} placeholder="이 부분에 대해 물어보세요"
-                      onChange={(e) => setAskVal(e.target.value)}
-                      onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && wide) { e.preventDefault(); sendAsk(); } }} />
-                    <button className="vb-send" disabled={asking || !askVal.trim()} onClick={sendAsk}>보내기</button>
-                  </div>
                 </div>
-              </>
-            )}
+              </div>
 
-            {tab === "vocab" && (vocab.length === 0 ? (
-              <div className="vb-ph">단어 풀이에서 ★ 를 누르면 여기에 모입니다.</div>
-            ) : (
-              <div style={{ marginTop: 6 }}>
-                {vocab.map((v) => (
-                  <div key={v.id} className="vb-vi">
-                    <div className="vb-vihead">
-                      <span className="vb-viw">{v.word}</span>
-                      <span className="vb-vimeta">{v.doc ? v.doc + " · " : ""}{fmtDate(v.at)}</span>
-                      <button className={"vb-ib del" + (delAsk === "v" + v.id ? " ask" : "")}
-                        onClick={() => tapDel("v" + v.id, () => delVocab(v.id))} aria-label="단어장에서 삭제">
-                        {delAsk === "v" + v.id ? "삭제?" : "✕"}
-                      </button>
+              <div className="vb-scroll" ref={panesRef}>
+                {statView && (
+                  <div className={"vb-statcard" + (statView.warn ? " warn" : "")}>
+                    <div className="vb-statrow1">
+                      <i className="vb-statdot" />
+                      <span className="vb-statlbl">{statView.text}</span>
+                      <button className="vb-statstop" onClick={stopAsk}>중단</button>
                     </div>
-                    {v.mean && <p className="vb-vim">{v.mean}</p>}
-                    {v.ctx && <p className="vb-vic">{v.ctx}</p>}
-                    {v.quote && <p className="vb-txt vb-quote" style={{ fontSize: 13, marginTop: 6 }}>{v.quote}</p>}
+                    {statSteps && (
+                      <div className="vb-statsteps">
+                        {statSteps.map((s) => (
+                          <div key={s.label} className={"vb-statstep" + (s.cls ? " " + s.cls : "")}>
+                            <b /><span>{s.label}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    <div className="vb-statmeta">
+                      {aiStat?.engine && <span className="eng">{aiStat.engine}</span>}
+                      {aiStat?.model && <span>{aiStat.model.split("/").pop()}</span>}
+                      <span>질문 탭</span>
+                      {ttlLeft && <span style={{ marginLeft: "auto" }}>대화 {ttlLeft}</span>}
+                    </div>
                   </div>
+                )}
+
+                {qaPairs.length === 0 ? (
+                  <div className="vb-ph">
+                    <p>책 본문을 근거로 답합니다 — 짧은 책은 전체를, 긴 책은 지금 보는 {curPage}쪽 주변과 목차를 함께 보냅니다.</p>
+                    <p style={{ margin: 0 }}>한 대화 안에서는 앞의 문답을 기억하므로 이어서 되물을 수 있습니다. 대화는 마지막 질문에서 2시간 뒤 사라집니다.</p>
+                  </div>
+                ) : (
+                  <>
+                    <div className="vb-recent">최신<b /></div>
+                    {qaPairs.map((p, k) => {
+                      const latest = k === 0;
+                      const ek = (sess?.id || "") + ":" + p.i;
+                      const expanded = latest || expandSet.has(ek);
+                      return (
+                        <div key={p.i} className={"vb-qa" + (latest ? " vb-pe" : " past")}>
+                          {p.q.img && <img className="vb-msgimg" src={p.q.img} alt="오려낸 영역" />}
+                          <div className="vb-qbubble">{p.q.text}</div>
+                          {p.a && (
+                            <div className={"vb-abody" + (!expanded ? " clamp" : "")}>
+                              {p.a.err
+                                ? <span className="vb-err">답을 받지 못했습니다 — {p.a.err}</span>
+                                : <Rich text={p.a.text} live={!!p.a.live} />}
+                              {p.a.stopped && <div className="vb-stopped">여기서 중단했습니다</div>}
+                            </div>
+                          )}
+                          {!latest && p.a && !p.a.err && (
+                            <button className="vb-expand"
+                              onClick={() => setExpandSet((s) => {
+                                const n = new Set(s);
+                                n.has(ek) ? n.delete(ek) : n.add(ek);
+                                return n;
+                              })}>
+                              {expanded ? "접기" : "펼치기"}
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
+          {tab === "log" && (
+            <div className="vb-panes">
+              <div className="vb-lpane vb-pe">
+                <div className="vb-lhead"><span>{curPage}쪽</span><b /></div>
+                {logItems.length === 0 ? (
+                  <div className="vb-ph">단어를 탭해 ★ 로 담거나, 문장을 해석하거나, 질문을 하면 여기 모입니다.</div>
+                ) : logItems.map((it) => (
+                  <button key={it.id} className="vb-litem" onClick={() => openLogItem(it)}>
+                    <span className="vb-lrow">
+                      <i className="vb-ldot" style={{
+                        background: it.type === "word" ? "var(--t-star)" : it.type === "ask" ? "#FFD84D" : "var(--t-mark2)",
+                      }} />
+                      <span className="vb-ltitle" style={it.type === "word" ? { fontFamily: "var(--serif)" } : undefined}>
+                        {it.title}
+                      </span>
+                      <span className="vb-lat">{fmtDate(it.at)}</span>
+                    </span>
+                    {it.sub && <span className="vb-lsub">{it.sub}</span>}
+                  </button>
                 ))}
               </div>
-            ))}
-          </div>
+            </div>
+          )}
         </section>
 
         {setOpen && (
@@ -2940,6 +3740,13 @@ export default function VerbatimReader() {
         )}
       </div>
 
+      {/* 애플펜슬로 긋는 동안의 미리보기 — 오버레이와 같은 .vb-root 직속(position:fixed).
+          pointer-events:none 이라 진행 중인 터치를 건드리지 않는다. */}
+      {penSel && (
+        <div className="vb-pensel"
+          style={{ left: penSel.left, top: penSel.top, width: penSel.w, height: penSel.h }} />
+      )}
+
       {/* 영역 캡처 오버레이 — .vb-root 직속이라 position:fixed 가 뷰포트 기준으로 잡힌다 */}
       {capMode && capBox && (
         <div className={"vb-cap" + (capBusy ? " busy" : "")}
@@ -2957,7 +3764,7 @@ export default function VerbatimReader() {
               ))}
               <div className="vb-capmenu"
                 style={{
-                  left: Math.max(4, Math.min((capBox.width || 0) - 250, capSel.x + capSel.w / 2 - 125)),
+                  left: Math.max(4, Math.min((capBox.width || 0) - 310, capSel.x + capSel.w / 2 - 155)),
                   top: capSel.y > 62 ? capSel.y - 58 : capSel.y + capSel.h + 10,
                 }}
                 onPointerDown={(e) => e.stopPropagation()}>
@@ -2967,6 +3774,9 @@ export default function VerbatimReader() {
                 <button className="vb-capbtn" disabled={!!capBusy} onClick={() => runCapture("solve")}>
                   {capBusy === "solve" ? "읽는 중…" : "문제풀이"}
                 </button>
+                <button className="vb-capbtn" disabled={!!capBusy} onClick={runCaptureAsk}>
+                  {capBusy === "ask" ? "여는 중…" : "질문"}
+                </button>
                 <button className="vb-capbtn ghost" disabled={!!capBusy} onClick={() => setCapSel(null)}>다시</button>
                 <button className="vb-capbtn ghost" disabled={!!capBusy} onClick={exitCap}>닫기</button>
               </div>
@@ -2975,8 +3785,8 @@ export default function VerbatimReader() {
         </div>
       )}
 
-      <input ref={fileRef} type="file" accept="application/pdf" style={{ display: "none" }}
-        onChange={(e) => { const f = e.target.files?.[0]; if (f) readFile(f); e.target.value = ""; }} />
+      <input ref={fileRef} type="file" accept="application/pdf" multiple style={{ display: "none" }}
+        onChange={(e) => { readFiles(e.target.files); e.target.value = ""; }} />
     </div>
   );
 }

@@ -1,0 +1,15 @@
+{
+  "name": "여백",
+  "short_name": "여백",
+  "description": "탭 한 번으로 단어 풀이, 두 번 탭으로 문장 해석 — 아이패드에 맞춘 한글 PDF 리더",
+  "lang": "ko",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#141312",
+  "theme_color": "#141312",
+  "icons": [
+    { "src": "/brand/png/icon-128.png", "sizes": "128x128", "type": "image/png", "purpose": "any" },
+    { "src": "/brand/png/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/brand/png/icon-1024.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" }
+  ]
+}
