@@ -66,7 +66,11 @@ app.use(express.json({ limit: "12mb" })); // 서재 검색용 본문 캐시(책 
 
 /* ───────────────── 세션 (단일 비밀번호) ───────────────── */
 const COOKIE = "yb_sess";
-const MAX_AGE = 30 * 24 * 60 * 60 * 1000; // 30일
+/* 세션 수명 — "놀고 있던 시간" 기준이다. 30일짜리 쿠키를 기기에 남겨두지 않으려고 짧게 잡되,
+   요청이 있을 때마다 갱신(sliding)하므로 계속 쓰는 동안에는 끊기지 않는다. 기기를 덮어두고
+   이 시간이 지나야 로그아웃된다. SESSION_HOURS 로 조절할 수 있다. */
+const SESSION_HOURS = Math.min(Math.max(Number(process.env.SESSION_HOURS) || 4, 0.5), 720);
+const MAX_AGE = SESSION_HOURS * 60 * 60 * 1000;
 
 function sign(exp) {
   return crypto.createHmac("sha256", SESSION_SECRET).update(String(exp)).digest("base64url");
@@ -79,6 +83,10 @@ function validToken(tok) {
   if (!tok) return false;
   const [exp, mac] = String(tok).split(".");
   if (!exp || !mac || Number(exp) < Date.now()) return false;
+  /* 지금 정책보다 더 긴 수명을 주장하는 토큰은 안 받는다. 이게 없으면 수명을 줄여도 이미
+     기기에 나가 있는 옛 쿠키(30일짜리)가 만료일까지 그대로 살아 있어서, 정작 줄이려던
+     쿠키만 안 줄어든다. 여유 1분은 발급 직후의 시계 오차용. */
+  if (Number(exp) - Date.now() > MAX_AGE + 60 * 1000) return false;
   const good = sign(exp);
   // 길이가 다르면 timingSafeEqual 이 던지므로 먼저 거른다
   if (mac.length !== good.length) return false;
@@ -112,20 +120,68 @@ app.post("/api/login", (req, res) => {
     return res.status(401).json({ error: "비밀번호가 맞지 않습니다." });
   }
   pwFails.delete(ip);
+  setSession(req, res);
+  res.json({ ok: true });
+});
+
+function setSession(req, res) {
   res.setHeader(
     "Set-Cookie",
     `${COOKIE}=${makeToken()}; HttpOnly; SameSite=Lax; Path=/; Max-Age=${MAX_AGE / 1000}` +
       (req.secure ? "; Secure" : "")
   );
-  res.json({ ok: true });
-});
+}
+
+/* 남은 수명이 절반 밑으로 떨어졌을 때만 쿠키를 다시 내려준다 — 매 요청마다 Set-Cookie 를
+   붙이면 헤더만 늘고 얻는 게 없다. 이 갱신이 "쓰는 동안에는 안 끊긴다"를 만든다. */
+function slide(req, res, tok) {
+  const exp = Number(String(tok).split(".")[0]);
+  if (exp - Date.now() < MAX_AGE / 2) setSession(req, res);
+}
 
 app.get("/api/me", (req, res) => {
-  res.json({ authed: validToken(readCookie(req, COOKIE)) });
+  if (tokenOK(req)) return res.json({ authed: true, via: "token", sessionHours: SESSION_HOURS });
+  const tok = readCookie(req, COOKIE);
+  const ok = validToken(tok);
+  if (ok) slide(req, res, tok);
+  res.json({ authed: ok, sessionHours: SESSION_HOURS });
 });
 
+/* ── 점검용 토큰 통로 ──────────────────────────────────────────────────────
+   세션 쿠키 대신 `Authorization: Bearer <DEV_TOKEN>` 으로도 통과시킨다. 비밀번호를 쓰지
+   않고 API 를 직접 두드려 볼 수 있고, 쿠키를 안 남기므로 기기에 흔적도 안 남는다.
+   .env 에 DEV_TOKEN 이 없으면 이 통로는 아예 없다(기본 비활성).
+
+   지금은 "이 서버 안에서 보낸 요청"만 받는다. 근거 두 가지:
+   - nginx 는 프록시할 때 X-Forwarded-For 를 반드시 붙인다 → 밖에서 nginx 를 거쳐 온 요청은
+     그 헤더 때문에 걸린다. 공격자가 nginx 더러 헤더를 빼게 만들 수는 없다.
+   - 8787 이 0.0.0.0 에 열려 있어 nginx 를 건너뛴 직접 접속도 가능한데, 그건 TCP 상대 주소가
+     루프백이 아니라서 걸린다(이 주소는 헤더와 달리 위조가 안 된다).
+
+   나중에 공개 API 로 열 때는 fromThisMachine 조건만 풀고, 그 자리에 토큰별 권한과 쿼터를
+   붙이면 된다 — 인증 지점은 여기 하나로 이미 모여 있다. */
+const DEV_TOKEN = process.env.DEV_TOKEN || "";
+if (DEV_TOKEN && DEV_TOKEN.length < 24)
+  console.warn("[여백] DEV_TOKEN 이 너무 짧습니다 — 24자 이상 무작위 문자열을 쓰세요.");
+
+function fromThisMachine(req) {
+  if (req.headers["x-forwarded-for"] || req.headers["x-real-ip"]) return false;
+  const a = req.socket.remoteAddress || "";
+  return a === "127.0.0.1" || a === "::1" || a === "::ffff:127.0.0.1";
+}
+
+function tokenOK(req) {
+  if (!DEV_TOKEN || !fromThisMachine(req)) return false;
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+  if (!m) return false;
+  const a = Buffer.from(m[1]), b = Buffer.from(DEV_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 function requireAuth(req, res, next) {
-  if (validToken(readCookie(req, COOKIE))) return next();
+  if (tokenOK(req)) return next(); // 쿠키를 새로 내려주지 않는다 — 흔적을 안 남기는 게 목적이다
+  const tok = readCookie(req, COOKIE);
+  if (validToken(tok)) { slide(req, res, tok); return next(); }
   res.status(401).json({ error: "로그인이 필요합니다." });
 }
 
