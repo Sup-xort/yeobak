@@ -454,6 +454,8 @@ export default function VerbatimReader() {
   const [pwBusy, setPwBusy] = useState(false);
   const [models, setModels] = useState([]);      // 질문 탭에서 고를 수 있는 모델
   const [defModel, setDefModel] = useState("");  // 서버 기본값
+  const [health, setHealth] = useState({});      // 모델 id → {ok, status, at, ms}
+  const [healthBusy, setHealthBusy] = useState(false);
   const [libOpen, setLibOpen] = useState(true);  // 서재 화면 (문서가 없으면 항상 열림)
   const [lib, setLib] = useState({ folders: [], files: [] });
   const [libFolder, setLibFolder] = useState(""); // "" = 최상위
@@ -826,7 +828,7 @@ export default function VerbatimReader() {
     })();
   }, []);
 
-  /* 질문 탭 모델 목록 — 로그인 뒤 한 번만 */
+  /* 질문 탭 모델 목록 — 로그인 뒤 한 번만. 목록 자체는 캐시된 상태와 함께 즉시 온다. */
   useEffect(() => {
     if (authed !== true) return;
     (async () => {
@@ -836,9 +838,37 @@ export default function VerbatimReader() {
         const j = await r.json();
         setModels(Array.isArray(j.models) ? j.models : []);
         setDefModel(j.default || "");
+        setHealth(j.health || {});
       } catch {}
+      refreshHealth(); // 접속하자마자 한 번 재 둬서, 드롭다운을 처음 열 때 이미 채워져 있게
     })();
   }, [authed]);
+
+  /* 모델 상태 재측정 — ?probe=1 은 기록이 60초 넘게 오래된 모델만 max_tokens 1 로 찔러 본다.
+     절대 await 해서 UI 를 막지 않는다. 드롭다운은 가진 값으로 곧바로 열리고, 응답이 오면
+     배지만 갱신된다. 실패하면 그냥 아무 배지도 안 뜬다 — 기능은 그대로 돌아간다. */
+  const healthAt = useRef(0);
+  const refreshHealth = () => {
+    if (Date.now() - healthAt.current < 20_000) return; // 여닫기를 반복해도 안 쏟아지게
+    healthAt.current = Date.now();
+    setHealthBusy(true);
+    fetch("/api/models?probe=1")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => { if (j?.health) setHealth(j.health); })
+      .catch(() => {})
+      .finally(() => setHealthBusy(false));
+  };
+
+  /* 상태 한 줄 요약. 판단이 애매하면 아무 말도 안 하는 쪽을 고른다 —
+     멀쩡한 모델을 "붐빈다"고 적어 두는 게 제일 나쁘다(note 에서 수치를 걷어낸 이유). */
+  const healthOf = (id) => {
+    const h = health[id];
+    if (!h) return healthBusy ? { cls: "wait", text: "확인 중" } : null;
+    if (h.ok) return h.ms > 4000 ? { cls: "busy", text: "혼잡" } : { cls: "ok", text: "정상" };
+    if (h.status >= 429) return { cls: "jam", text: "붐빔" };    // 529 Overloaded 등
+    if (h.status === -1) return { cls: "busy", text: "느림" };   // 8초 안에 무응답 — 콜드스타트일 수 있다
+    return { cls: "jam", text: "응답 없음" };                     // 연결 자체가 안 됐다
+  };
 
   /* 모델 id → 드롭다운에 보이는 이름. 목록에 없으면 id 의 뒷부분을 그대로 쓴다. */
   const modelName = (id) =>
@@ -3883,7 +3913,11 @@ export default function VerbatimReader() {
                   {models.length > 0 && (
                     <div style={{ position: "relative", marginLeft: "auto" }}>
                       <button className={"vb-mdlbtn" + (mdlMenuOpen ? " open" : "")}
-                        onClick={() => { setMdlMenuOpen((v) => !v); setSessMenuOpen(false); }}>
+                        onClick={() => {
+                          // 열기는 곧바로 하고 측정은 뒤따라 붙는다 — await 하지 않는다
+                          setMdlMenuOpen((v) => { if (!v) refreshHealth(); return !v; });
+                          setSessMenuOpen(false);
+                        }}>
                         {cfg.askModel ? (models.find((m) => m.id === cfg.askModel)?.label || "모델") : `기본${defLabel ? " — " + defLabel : ""}`}
                         <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
                       </button>
@@ -3902,17 +3936,21 @@ export default function VerbatimReader() {
                               return (
                                 <div key={grp}>
                                   <div className="vb-mdlgrp">{grp === "reason" ? "추론 모델 — 속생각을 먼저 흘린 뒤 답한다" : "일반 모델"}</div>
-                                  {list.map((m) => (
-                                    <button key={m.id} className={"vb-mdlitem" + (cfg.askModel === m.id ? " on" : "")}
-                                      onClick={() => pickModel(m.id)}>
-                                      <span className="vb-mdlrow">
-                                        <span className="n">{m.label}</span>
-                                        {m.id === defModel && <span className="d">기본</span>}
-                                        {cfg.askModel === m.id && <span className="c">✓</span>}
-                                      </span>
-                                      <span className="vb-mdlnote">{m.note}</span>
-                                    </button>
-                                  ))}
+                                  {list.map((m) => {
+                                    const hp = healthOf(m.id);
+                                    return (
+                                      <button key={m.id} className={"vb-mdlitem" + (cfg.askModel === m.id ? " on" : "")}
+                                        onClick={() => pickModel(m.id)}>
+                                        <span className="vb-mdlrow">
+                                          <span className="n">{m.label}</span>
+                                          {m.id === defModel && <span className="d">기본</span>}
+                                          {hp && <span className={"vb-mdlhp " + hp.cls}><i />{hp.text}</span>}
+                                          {cfg.askModel === m.id && <span className="c">✓</span>}
+                                        </span>
+                                        <span className="vb-mdlnote">{m.note}</span>
+                                      </button>
+                                    );
+                                  })}
                                 </div>
                               );
                             })}
