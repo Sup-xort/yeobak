@@ -2526,7 +2526,14 @@ export default function VerbatimReader() {
     poke({ image: cv.toDataURL("image/jpeg").split(",")[1] }); // 비전 모델
     poke({ ask: true, model: cfgRef.current.askModel || "" }); // 풀이 담당 모델
   };
-  const enterCap = () => {
+  /* continueSid 를 넘기면 이번 캡처의 "질문" 은 새 세션이 아니라 그 세션에 이어 붙는다.
+     질문 탭에서 대화 중에 "＋ 오려내기" 를 누른 경우가 이거다 — 지금 보고 있는 대화에
+     그림 하나를 새로 얹고 싶은 거지, 그 문제만 따로 새 대화를 열고 싶은 게 아니다.
+     해석·문제풀이는 여전히 늘 새 세션이다(다른 문제의 조건이 섞이면 안 되므로) — 아래
+     runCapture 참고. 인자를 안 주면(툴바 버튼·펜슬 제스처) null 로 리셋돼 원래대로 돈다. */
+  const capContinueRef = useRef(null);
+  const enterCap = (continueSid = null) => {
+    capContinueRef.current = continueSid;
     measureCap(); setCapSel(null); setCapBusy(""); setCapMode(true);
     warmModels();
   };
@@ -2746,8 +2753,21 @@ export default function VerbatimReader() {
     exitCap();
     setTab("ask");
     setSheetOpen(true);
-    // vision:true 로 세션을 열면 기존 "그림 함께" 로직이 이 첨부를 기본으로 켜 둔다.
-    newSess(`${shot.page}쪽 질문`, { img: b64, vision: true });
+
+    const continueSid = capContinueRef.current;
+    const target = continueSid && findSess(continueSid);
+    if (target) {
+      /* 대화 중에 그림만 새로 얹는다 — 앞의 문답은 그대로 두고, 다음 질문부터 이 그림이
+         딸려 간다. askLog 에 me/ai 를 넣지 않는다 — qaPairs 가 두 개씩 묶어 읽으므로
+         짝 없는 me 하나를 끼우면 그다음 진짜 질문·답이 한 칸씩 밀려 잘못 묶인다.
+         첨부 사실은 입력창 위 vb-chip(기존 "그림 함께" 표시)이 그대로 보여준다 —
+         새 그림이 오면 그 칩의 썸네일도 자동으로 바뀐다. */
+      patchSess(target.id, { img: b64, vision: true });
+      setSendFig(true);
+    } else {
+      // vision:true 로 세션을 열면 기존 "그림 함께" 로직이 이 첨부를 기본으로 켜 둔다.
+      newSess(`${shot.page}쪽 질문`, { img: b64, vision: true });
+    }
     setCapBusy("");
   };
 
@@ -3922,7 +3942,7 @@ export default function VerbatimReader() {
                       <button onClick={() => setSendFig(false)} aria-label="첨부 빼기">✕</button>
                     </span>
                   )}
-                  <button className="vb-capchip" onClick={enterCap}>＋ 오려내기</button>
+                  <button className="vb-capchip" onClick={() => enterCap(curSessRef.current)}>＋ 오려내기</button>
                   {models.length > 0 && (
                     <div style={{ position: "relative", marginLeft: "auto" }}>
                       <button className={"vb-mdlbtn" + (mdlMenuOpen ? " open" : "")}
