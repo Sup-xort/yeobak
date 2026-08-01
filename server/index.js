@@ -21,17 +21,21 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
 /* 질문 탭 전용 모델 목록.
    단어·문장 탭은 첫 토큰 속도가 생명이라 NIM_MODEL 을 그대로 쓰고,
    질문 탭만 아래에서 고른 모델로 부른다. 클라이언트가 이 목록을 받아 설정에 띄운다.
-   note 는 2026-07-29 에 같은 질문으로 직접 재본 값이다(TTFT = 첫 글자까지).
-   think: true 는 reasoning_content(속생각)를 실제로 흘리는 걸 2026-07-31 에 직접 스트리밍으로
-   확인한 모델이다 — 클라이언트 드롭다운이 이 값으로 "추론 모델"/"일반 모델"을 가른다. */
+   note 는 2026-08-01 에 7개 모델에 같은 질문(논리회로 2의 보수 오버플로우 설명, 같은 SYS_ASK)을
+   던져 직접 잰 값이다 — 첫 글자까지 걸린 시간, 완료까지 걸린 시간, 답 길이, 표/수식 사용량.
+   숫자를 적어두는 건 이 서버·이 계정 기준이라는 뜻이다: 같은 모델도 콜드스타트에 따라
+   크게 흔들리고(Llama 3.3 은 이날 90초 동안 무응답), 답 길이는 같은 질문에도 편차가 있다.
+   think: true 는 reasoning_content(속생각)를 실제로 흘리는 걸 스트리밍으로 확인한 모델이다 —
+   클라이언트 드롭다운이 이 값으로 "추론 모델"/"일반 모델"을 가른다.
+   (2026-08-01 재측정에서 DeepSeek V4 Flash 도 속생각을 흘리는 걸 확인해 false → true 로 고쳤다.) */
 const ASK_MODELS = [
-  { id: "deepseek-ai/deepseek-v4-pro",           label: "DeepSeek V4 Pro",        think: false, note: "설명이 가장 정확하고 말투가 자연스럽다. 첫 응답 ~1초." },
-  { id: "deepseek-ai/deepseek-v4-flash",         label: "DeepSeek V4 Flash",      think: false, note: "Pro의 경량판. 2026-07-31 재보니 이 서버 기준 첫 응답이 80초 넘게 걸렸다(콜드스타트로 보인다) — 붙자마자 답이 안 와도 죽은 게 아니다." },
-  { id: "nvidia/nemotron-3-super-120b-a12b",     label: "Nemotron 3 Super 120B",  think: true,  note: "속생각을 흘린 뒤 답한다(실측 첫 속생각 0.4초). 답 자체는 짧은 편." },
-  { id: "minimaxai/minimax-m3",                  label: "MiniMax M3",             think: false, note: "가장 길고 꼼꼼하다. 속생각은 안 흘리지만 첫 응답까지 종종 40초를 넘긴다." },
-  { id: "openai/gpt-oss-120b",                   label: "GPT-OSS 120B",           think: true,  note: "단어·문장 탭과 같은 계열. 속생각을 흘리며 빠르게 답하지만 마크다운을 섞는다." },
-  { id: "mistralai/mistral-medium-3.5-128b",     label: "Mistral Medium 3.5",     think: false, note: "다국어에 강하지만 첫 응답이 20초, 드물게 그 이상 걸릴 때가 있다." },
-  { id: "meta/llama-3.3-70b-instruct",           label: "Llama 3.3 70B",          think: false, note: "단어·문장 탭 기본 모델(NIM_MODEL)과 같은 모델. 2026-07-31 재보니 이 서버 기준 첫 응답이 50초대였다 — 콜드스타트 편차가 큰 편." },
+  { id: "deepseek-ai/deepseek-v4-pro",           label: "DeepSeek V4 Pro",        think: false, note: "가장 촘촘하다. 표와 수식으로 단계를 다 펼쳐 보여준다(실측 1,900자·표 10개). 첫 글자는 0.6초로 바로 나오지만 끝까지 48초 — 길게 읽을 각오라면 이게 최선이다. 답 길이 편차가 커서 같은 질문에도 1,000자와 1,900자를 오간다." },
+  { id: "deepseek-ai/deepseek-v4-flash",         label: "DeepSeek V4 Flash",      think: true,  note: "이 목록에서 균형이 가장 좋다 — 첫 글자 1초·완료 6초에 1,400자를 표와 수식까지 갖춰 쓴다. 짧게 여러 번 되물으며 공부할 때 제일 낫다. Pro보다 얕지만 빠지는 내용은 적다." },
+  { id: "nvidia/nemotron-3-super-120b-a12b",     label: "Nemotron 3 Super 120B",  think: true,  note: "설명량은 Pro급인데 완료가 16초로 훨씬 빠르고, 표를 가장 많이 쓴다(실측 1,900자·표 13개). 대신 첫 글자까지 9초 동안 속생각만 흐른다 — 화면이 비어 있어도 멈춘 게 아니다. 표로 정리된 답을 원할 때." },
+  { id: "minimaxai/minimax-m3",                  label: "MiniMax M3",             think: false, note: "지금 이 서버에서는 권하지 않는다. 첫 글자까지 40초가 걸리고, 그러고도 90초 상한에 걸려 답이 중간에 끊겼다(실측). 붙어 있는 동안 다른 탭도 느려진다." },
+  { id: "openai/gpt-oss-120b",                   label: "GPT-OSS 120B",           think: true,  note: "단어·문장 탭과 같은 모델이라 늘 데워져 있어 제일 빠른 축이다(첫 글자 1초·완료 7초·1,600자). 다만 수식을 가끔 \\[ \\] 로 써서 화면에 날것으로 보일 수 있다 — 이 앱은 $…$ 를 그린다." },
+  { id: "mistralai/mistral-medium-3.5-128b",     label: "Mistral Medium 3.5",     think: false, note: "표 없이 줄글로 차분하게 쓴다(실측 1,050자, 표 0개). 문장이 깔끔하고 다국어에 강해 번역 섞인 질문에 어울린다. 첫 글자 6초·완료 36초로 중간이고, 정보량은 이 목록에서 적은 편." },
+  { id: "meta/llama-3.3-70b-instruct",           label: "Llama 3.3 70B",          think: false, note: "실측일 기준 90초 동안 한 글자도 오지 않았다. 단어·문장 탭 기본 모델과 같은 모델인데 질문 탭 경로에서는 응답이 없다(콜드스타트로 보인다) — 다른 모델을 쓰는 편이 낫다." },
 ];
 const ASK_MODEL_IDS = new Set(ASK_MODELS.map((m) => m.id));
 const NIM_ASK_MODEL = process.env.NIM_ASK_MODEL || "deepseek-ai/deepseek-v4-pro";
@@ -689,7 +693,9 @@ async function callNIM({ system, user, image, history = [], maxTokens, signal, m
   });
   if (!res.ok) {
     const d = await res.text().catch(() => "");
-    throw new Error(`NIM(${model || NIM_MODEL}) ${res.status}${d ? ": " + d.slice(0, 200) : ""}`);
+    const e = new Error(`NIM(${model || NIM_MODEL}) ${res.status}${d ? ": " + d.slice(0, 200) : ""}`);
+    e.status = res.status; // 붐빔(429/5xx)인지 판별해 재시도할 수 있게 남긴다
+    throw e;
   }
   return res; // 이미 OpenAI 형식 SSE — 그대로 통과시킨다
 }
@@ -755,7 +761,9 @@ let nimDownUntil = 0;
    이미지는 전부 버린다 — 비전 체인을 타는 이미지는 현재 턴의 image 하나뿐이다.
    (이전 턴 이미지까지 실으면 텍스트 전용 모델이 받아 삼키지 못하고 400 을 낸다.) */
 const HIST_TURNS = 16;      // 최근 몇 턴까지
-const HIST_TURN_CHARS = 6000;   // 턴 하나의 상한
+/* 턴 하나의 상한 — 답변 예산이 8000 토큰으로 올라가면서 6000자로는 지난 답이 문장 중간에서
+   잘려 히스토리에 들어갔다. 잘린 답은 없느니만 못해서(모델이 그 뒤를 지어낸다) 넉넉히 잡는다. */
+const HIST_TURN_CHARS = 16000;
 const HIST_TOTAL_CHARS = 48000; // 전체 상한
 function trimHistory(h) {
   if (!Array.isArray(h)) return [];
@@ -805,17 +813,30 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   const tryNIM = !forceGemini && NIM_KEY && Date.now() > nimDownUntil;
 
   if (tryNIM) {
+    outer:
     for (const m of chain) {
-      try {
-        upstream = await callNIM({ ...args, model: m });
-        engine = "NIM";
-        usedModel = m;
-        break;
-      } catch (e) {
-        if (ac.signal.aborted) return;
-        // 기본 모델까지 실패했을 때만 NIM 전체가 죽었다고 본다.
-        if (m === NIM_MODEL) nimDownUntil = Date.now() + 3 * 60 * 1000;
-        console.warn(`[여백] NIM(${m}) 실패:`, e.message);
+      /* 고른 모델은 붐벼서(429/5xx, 특히 529 Overloaded) 실패하면 잠깐 쉬었다 다시 부른다.
+         한 번 만에 폴백으로 넘어가던 탓에, 붐비는 시간대에는 드롭다운에서 무엇을 고르든
+         답은 늘 NIM_MODEL(gpt-oss-120b)이 하고 있었다. 붐빔은 대개 몇 백 ms 뒤에 풀린다. */
+      const tries = m === picked ? 3 : 1;
+      for (let i = 0; i < tries; i++) {
+        try {
+          upstream = await callNIM({ ...args, model: m });
+          engine = "NIM";
+          usedModel = m;
+          break outer;
+        } catch (e) {
+          if (ac.signal.aborted || signal.aborted) return;
+          // 상태 코드가 붙은 실패만 재시도한다 — 타임아웃·네트워크 끊김은 다시 걸어도 같다.
+          if (i + 1 < tries && e.status >= 429) {
+            console.warn(`[여백] NIM(${m}) ${e.status} — ${i + 1}번째, 잠시 뒤 재시도`);
+            await new Promise((r) => setTimeout(r, 500 * (i + 1)));
+            continue;
+          }
+          // 기본 모델까지 실패했을 때만 NIM 전체가 죽었다고 본다.
+          if (m === NIM_MODEL) nimDownUntil = Date.now() + 3 * 60 * 1000;
+          console.warn(`[여백] NIM(${m}) 실패:`, e.message);
+        }
       }
     }
   }
@@ -836,7 +857,10 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.setHeader("X-Engine", engine);
   res.setHeader("X-Model", usedModel);
-  res.setHeader("Access-Control-Expose-Headers", "X-Engine, X-Model");
+  // 고른 모델이 답하지 못해 다른 모델이 대신 답할 때, 원래 고른 쪽을 알려 준다.
+  // 이걸 안 알려 주면 "드롭다운을 바꿔도 늘 같은 모델이 답한다"로만 보인다.
+  if (ask && usedModel && usedModel !== picked) res.setHeader("X-Wanted", picked);
+  res.setHeader("Access-Control-Expose-Headers", "X-Engine, X-Model, X-Wanted");
   res.setHeader("X-Accel-Buffering", "no"); // nginx 앞단 버퍼링 방지
   res.flushHeaders();
 

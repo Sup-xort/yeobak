@@ -120,12 +120,14 @@ function pickGreeting(libData) {
 
 
 /* ───────────────── AI 호출 (Claude → Gemini) ───────────────── */
-async function readSSE(res, pick, onDelta, onThink) {
+async function readSSE(res, pick, onDelta, onThink, onStop) {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("event-stream")) {
     const j = await res.json();
     const t = pick.whole(j);
     if (t) onDelta?.(t);
+    const fr = pick.stop?.(j);
+    if (fr) onStop?.(fr);
     return t;
   }
   const reader = res.body.getReader();
@@ -148,6 +150,8 @@ async function readSSE(res, pick, onDelta, onThink) {
       // 추론 모델의 속생각. 화면에는 안 쓰지만 "살아 있다"는 유일한 증거다.
       const k = pick.think?.(j);
       if (k) onThink?.(k);
+      const fr = pick.stop?.(j);
+      if (fr) onStop?.(fr);
     }
   }
   return out;
@@ -161,6 +165,8 @@ const PICK_OPENAI = {
   delta: (j) => j.choices?.[0]?.delta?.content || "",
   think: (j) => j.choices?.[0]?.delta?.reasoning_content || "",
   whole: (j) => j.choices?.[0]?.message?.content || "",
+  // "length" 면 상한에 걸려 말이 끊긴 것이다 — 정상 종료("stop")와 반드시 갈라야 한다
+  stop: (j) => j.choices?.[0]?.finish_reason || "",
 };
 
 class AuthError extends Error {
@@ -178,7 +184,9 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
       image: opts.image || "",
       // 같은 세션의 지난 문답. 서버가 system 과 현재 user 사이에 끼워 넣는다.
       history: opts.history || [],
-      maxTokens: opts.maxTokens ?? (opts.ask ? 2000 : 1000),
+      // 질문 탭은 길게 쓰는 모델(DeepSeek V4 Pro·MiniMax M3)이 2000 에서 말을 하다 말았다.
+      // 추론 모델은 이 예산으로 속생각까지 쓰므로 더 빨리 닿는다 — 서버 상한(8000)까지 연다.
+      maxTokens: opts.maxTokens ?? (opts.ask ? 8000 : 1000),
       forceGemini: !!cfg.forceGemini,
       ask: !!opts.ask,
       model: opts.ask ? cfg.askModel || "" : "",
@@ -192,12 +200,16 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
   }
   const engine = res.headers.get("X-Engine") || "";
   const model = res.headers.get("X-Model") || "";
+  // 고른 모델이 붐벼서 다른 모델이 대신 답했으면 서버가 원래 고른 쪽을 여기 담아 준다.
+  const wanted = res.headers.get("X-Wanted") || "";
+  if (wanted) opts.onPhase?.("swap", { wanted, model });
   /* 여기까지 왔다는 건 서버가 업스트림에 붙는 데 성공했다는 뜻이다.
      이 시점부터 첫 글자까지의 침묵은 "모델이 생각 중"과 "죽었다"를 구분할 수 없다 —
      그래서 상태만 알리고 끊는 판단은 사람에게 맡긴다. */
   opts.onPhase?.("wait", { engine, model });
   let first = true;
   let think = 0;
+  let stop = "";
   const text = await readSSE(res, PICK_OPENAI, (c) => {
     if (first) { first = false; opts.onPhase?.("stream", { engine, model }); }
     opts.onPhase?.("tick");
@@ -207,8 +219,10 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
     // 속생각이 흐르는 동안은 답이 한 글자도 안 나온다. 그래도 모델은 일하고 있다.
     think += k.length;
     opts.onPhase?.("think", { engine, model, think });
-  });
-  return { text, engine, model };
+  }, (fr) => { stop = fr; });
+  // 상한에 걸려 끊긴 걸 조용히 넘기면 화면에는 "다 답했다"로 보인다 — 호출자에게 알린다
+  if (stop === "length") opts.onPhase?.("cut", { engine, model });
+  return { text, engine, model, truncated: stop === "length" };
 }
 
 /* ───────────────── 텍스트 유틸 ───────────────── */
@@ -304,7 +318,18 @@ const SYS_WORD = `너는 한국 대학생이 영어 원서·논문을 읽을 때
 답은 한국어로, 군더더기 없이 짧게. 인사·서론·마무리 문장 금지. 마크다운 기호 금지.
 반드시 아래 두 줄 형식만 출력한다:
 뜻: <사전적 의미 1~3개를 ' / '로 구분해 한 줄>
-문맥: <이 문장 안에서 어떤 의미와 역할로 쓰였는지 1~2문장>`;
+문맥: <"여기서는 '…'" 로 그 낱말이 취한 뜻을 말하는 한 문장. 그게 전부다.>
+
+문맥 줄에서 설명할 대상은 문장이 아니라 낱말 하나다. 이걸 어기는 답이 제일 흔하다.
+- 한 문장으로 끝낸다. 뜻을 말한 뒤에 이 문장이 무슨 얘기인지 덧붙이지 않는다.
+- 문장을 번역하거나 요약하지 않는다. 문장이 무슨 상황을 말하는지도 쓰지 않는다.
+  그건 이 앱의 다른 기능(문장 해석)이 따로 한다.
+- 문장에 나오는 다른 낱말(주어·목적어·수식)의 내용을 옮겨 적지 않는다.
+- 뜻이 정말 갈리는 낱말일 때만 "…가 아니라" 로 아닌 쪽을 짚어준다.
+  거의 같은 뜻끼리 억지로 대비시키지 않는다("'산출하다'가 아니라 '초래한다'" 같은 건 틀린 대비다).
+- 보기) 문장 "The reaction yields a stable compound." 의 낱말 yields
+  좋음 → 문맥: 여기서는 '양보하다'가 아니라 '(결과로) 내놓다·산출하다'. 무엇이 나오는지를 이끄는 동사다.
+  나쁨 → 문맥: 그 반응이 안정한 화합물을 만들어낸다는 뜻이다. (낱말이 아니라 문장을 풀었으므로 안 된다)`;
 
 const SYS_SENT = `너는 영어 원서·논문을 읽는 한국 대학생의 번역 파트너다.
 입력 문장을 자연스러운 한국어로 옮긴다. 직역투를 피하고 전문 용어는 원어를 괄호로 병기한다.
@@ -317,10 +342,18 @@ const FMT_RICH = `마크다운으로 쓴다. 소제목·목록·표·굵게를 �
 (예: $O(n\\log n)$, $\\frac{\\partial f}{\\partial x}$) 유니코드 첨자나 ASCII 흉내는 쓰지 않는다.`;
 
 const SYS_ASK = `너는 한국 대학생이 읽고 있는 문서를 함께 보는 튜터다.
-주어진 본문(책 전체 또는 표시된 범위)을 근거로 한국어로 답한다. 짧고 정확하게, 필요하면 원문 표현을 쪽수와 함께 인용한다.
-독자가 지금 보고 있는 쪽과 방금 짚은 문장이 표시되어 있으면 그 맥락을 우선 고려한다.
-이전 대화가 함께 주어지면 그 흐름을 이어서 답한다 — "아까 그거", "그럼 왜" 같은 말은 앞의 문답을 가리킨다.
-본문에 없는 내용은 추측이라고 밝힌다. 인사말 없이 바로 답한다.
+아래에 [문서] 블록이 이어진다. 그건 상대가 방금 건넨 말이 아니라 둘이 같이 펼쳐 놓고 보는 자료다.
+질문은 오직 대화 쪽에만 있다. 문서에서 근거를 찾아 한국어로 답하고, 필요하면 원문 표현을 쪽수와 함께 인용한다.
+
+이건 이어지는 하나의 대화다. 답하기 전에 앞에서 무엇을 물었고 무엇이라 답했는지부터 떠올린다.
+- "그럼", "왜", "그거", "아까 그건", "더 자세히", "예를 들면" 처럼 혼자서는 뜻이 서지 않는 말은
+  전부 바로 앞 문답을 가리킨다. 무엇을 말하는 거냐고 되묻지 말고 그대로 이어받는다.
+- 앞에서 이미 한 설명을 처음부터 다시 늘어놓지 않는다. 이어질 부분만 말한다.
+- 앞에서 쓴 기호·용어·가정을 그대로 유지한다. 바꿔야 하면 바뀌었다고 밝히고 바꾼다.
+- 화제가 정말 바뀐 게 아니면 앞의 화제 안에서 답한다. 읽는 쪽이 넘어갔다고 화제까지 넘기지 않는다.
+- 앞의 답이 틀렸다는 지적을 받으면 변명하지 말고 고쳐서 다시 답한다.
+
+짧고 정확하게. 본문에 없는 내용은 추측이라고 밝힌다. 인사말 없이 바로 답한다.
 ${FMT_RICH}`;
 
 /* ── 이름 정리 프롬프트 ──
@@ -693,6 +726,9 @@ export default function VerbatimReader() {
   const isCur = (ac) => jobRef.current?.ac === ac;
   const phaseHook = (ac, getChars) => (p, info) => {
     if (!isCur(ac)) return;
+    // swap 은 단계가 아니라 "어느 모델이 대신 답했다"는 사실이다. 상태줄의 phase 를 덮으면
+    // "차례를 기다리는 중"이 엉뚱하게 "답변 받는 중"으로 바뀐다 — 호출자가 따로 받는다.
+    if (p === "swap") return;
     if (p === "tick") { bumpStat({ at: Date.now(), chars: getChars?.() ?? 0 }); return; }
     if (p === "think") {
       // 속생각도 토큰 단위로 쏟아진다 — 단계가 처음 바뀔 때만 그리고, 나머지는 ref 만 민다.
@@ -800,6 +836,10 @@ export default function VerbatimReader() {
       } catch {}
     })();
   }, [authed]);
+
+  /* 모델 id → 드롭다운에 보이는 이름. 목록에 없으면 id 의 뒷부분을 그대로 쓴다. */
+  const modelName = (id) =>
+    models.find((m) => m.id === id)?.label || String(id || "").split("/").pop();
 
   /* ── 서재 ── */
   const libApi = useCallback(async (url, opt) => {
@@ -1624,11 +1664,14 @@ export default function VerbatimReader() {
   };
 
   /* 질문에 딸려 보낼 본문 — 짧은 책은 통째로, 긴 책은 현재 쪽 주변으로 한도까지.
-     후속 질문은 한도를 줄여서 보낸다(ASK_CAP_MORE): 지난 문답이 함께 실리는 데다
-     본문까지 매번 48,000자를 다시 보내면 두 번째 질문부터 눈에 띄게 느려진다.
-     세션 안에서 화제는 대개 보고 있는 쪽 근처에 머물러 있다. */
+     통째로 들어가는 책은 후속 질문에서도 통째로 보낸다(아래 done 가지가 늘 ASK_CAP 을 본다).
+     여기서 한도를 줄였더니 두 번째 질문부터 근거가 사라져, 모델이 "앞에서 말한 그거"를
+     문서에서 못 찾고 딴소리를 했다 — 대화가 끊겨 보이던 원인의 절반이 이것이었다.
+     한도 축소(ASK_CAP_MORE)는 애초에 통째로 안 들어가는 긴 책에만 남긴다. 그런 책은
+     매번 48,000자를 다시 실으면 두 번째 질문부터 눈에 띄게 느려지고, 세션 안에서 화제는
+     대개 보고 있는 쪽 근처에 머문다. */
   const ASK_CAP = 48000;
-  const ASK_CAP_MORE = 14000;
+  const ASK_CAP_MORE = 24000;
   const buildAskContext = (cap = ASK_CAP) => {
     const pdf = pdfRef.current;
     if (!pdf) return { scope: "", text: "(본문 없음)" };
@@ -1639,7 +1682,7 @@ export default function VerbatimReader() {
     const done = Array.from({ length: N }, (_, i) => pages[i]).every((t) => t != null);
     if (done) {
       const total = pages.reduce((s, t) => s + t.length + 8, 0);
-      if (total <= cap)
+      if (total <= ASK_CAP)
         return { scope: `책 전체 ${N}쪽`, text: pages.map((t, i) => `[${i + 1}쪽] ${t}`).join("\n") };
     }
     const cur = curRef.current;
@@ -2141,6 +2184,28 @@ export default function VerbatimReader() {
       stage.style.transform = `scale(${factor})`;
       setZoomPill(Math.round(next * 100) + "%");
     };
+    /* 제스처를 중간에 버린다 — 확대율은 손대지 않고 임시 상태만 원상복구한다.
+       onStart 가 걸어둔 것들(pinching, gestureRef, stage 의 임시 transform, 끊어둔
+       IntersectionObserver)은 오직 onEnd 에서만 풀리는데, onEnd 에는
+       `e.touches.length >= 2` 가드가 있다. iOS 는 앱을 나갈 때 진행 중이던 터치를
+       touchcancel 로 끊으면서 e.touches 에 그 손가락들을 그대로 담아 보내기 때문에,
+       touchcancel 을 onEnd 로 보내면 이 가드에 걸려 아무것도 안 풀고 돌아간다.
+
+       그러면 다른 앱에 갔다 온 뒤 이렇게 된다:
+       - IO 가 끊긴 채라 스크롤해도 새 페이지가 안 그려지고 prune 도 안 돈다
+       - gestureRef 가 켜진 채라 pickCur 이 계속 조기 반환해 현재 쪽이 굳는다
+       - stage 에 지난 제스처의 transform 과 transformOrigin 이 남아, 다음에 축소하면
+         내용이 화면 밖으로 밀려 데스크 배경만 보인다(까만 화면)
+       앱을 껐다 켜면 멀쩡해지는 게 이게 전부 메모리 상태라서다. */
+    const abort = () => {
+      if (!pinching) return;
+      pinching = false;
+      gestureRef.current = false;
+      reset();
+      lastMid = null;
+      observe();
+    };
+
     const onEnd = (e) => {
       if (!pinching || e.touches.length >= 2) return;
       pinching = false;
@@ -2159,15 +2224,22 @@ export default function VerbatimReader() {
         observe();
       }
     };
+    /* 화면이 가려질 때도 제스처를 버린다 — touchcancel 이 항상 오리라고 믿을 수 없다.
+       (앱 전환·전화 수신·제어센터 등 경로마다 iOS 가 주는 이벤트가 다르다.) */
+    const onHide = () => { if (document.visibilityState !== "visible") abort(); };
     view.addEventListener("touchstart", onStart, { passive: true });
     view.addEventListener("touchmove", onMove, { passive: false });
     view.addEventListener("touchend", onEnd, { passive: true });
-    view.addEventListener("touchcancel", onEnd, { passive: true });
+    view.addEventListener("touchcancel", abort, { passive: true });
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", abort);
     return () => {
       view.removeEventListener("touchstart", onStart);
       view.removeEventListener("touchmove", onMove);
       view.removeEventListener("touchend", onEnd);
-      view.removeEventListener("touchcancel", onEnd);
+      view.removeEventListener("touchcancel", abort);
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", abort);
     };
   }, [relayout, persist, findAnchor]);
 
@@ -2226,12 +2298,32 @@ export default function VerbatimReader() {
       clearTimeout(timer);
       timer = setTimeout(commit, 140);
     };
+    // 굴리는 도중에 화면이 가려지면 140ms 타이머를 기다리지 않고 바로 확정한다 —
+    // 정지된 탭에서 타이머가 언제 깨어날지는 보장이 없고, 그동안 stage 에 임시 transform 과
+    // 끊어진 IO 가 남는다(터치 핀치 쪽 abort 주석과 같은 사고).
+    const onHide = () => { if (document.visibilityState !== "visible") { clearTimeout(timer); commit(); } };
     view.addEventListener("wheel", onWheel, { passive: false });
+    document.addEventListener("visibilitychange", onHide);
     return () => {
       view.removeEventListener("wheel", onWheel);
+      document.removeEventListener("visibilitychange", onHide);
       clearTimeout(timer);
     };
   }, [relayout, persist, findAnchor]);
+
+  /* 돌아왔을 때의 마지막 그물 — 어떤 경로로든 관찰이 끊긴 채였다면 여기서 되살린다.
+     제스처 뒷정리는 각 핸들러가 하지만, iOS 가 어떤 이벤트를 주는지는 경로마다 달라서
+     "관찰이 끊겨 스크롤해도 아무것도 안 그려지는" 상태만은 무조건 풀고 시작한다.
+     observe() 는 끊고 다시 거는 함수라 여러 번 불러도 안전하다. */
+  useEffect(() => {
+    const onShow = () => {
+      if (document.visibilityState !== "visible") return;
+      if (!pdfRef.current || gestureRef.current) return;
+      observe();
+    };
+    document.addEventListener("visibilitychange", onShow);
+    return () => document.removeEventListener("visibilitychange", onShow);
+  }, []);
 
   /* ── 드래그 선택 ── */
   useEffect(() => {
@@ -2286,18 +2378,38 @@ export default function VerbatimReader() {
        비전 모델이 답한다(회로도·그래프는 그래야 답이 나온다). */
     const image = sendFig && s?.img ? s.img : "";
 
+    /* 본문·쪽·짚은 문장은 user 턴이 아니라 system 에 싣는다. user 턴에 얹으면 지난 턴들은
+       질문 한 줄인데 이번 턴만 수만 자짜리 덩어리가 되어, 모델이 "지금 새 자료를 받았다"로
+       읽고 앞의 문답을 놓친다 — "아까 그거"가 안 통하던 이유가 이거다. system 으로 옮기면
+       대화 쪽에는 사람 말만 남아 history 와 모양이 같아지고, 흐름이 그대로 보인다. */
     const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP);
-    const user =
-      `[문서: ${docName || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
-      `[지금 보는 쪽] ${curRef.current}쪽\n\n[방금 짚은 문장]\n${lastSentRef.current || "(없음)"}\n\n[질문]\n${q}`;
+    const sys =
+      `${SYS_ASK}\n\n[문서: ${docName || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
+      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}`;
     let buf = "";
+    let cut = false;   // 길이 상한에 걸려 말이 끊겼는가
+    let swap = null;   // 고른 모델이 붐벼서 다른 모델이 대신 답했는가
     const ac = startJob(sid, image ? "그림과 함께" : "");
     try {
-      await ask(SYS_ASK, user, (c) => {
+      const hook = phaseHook(ac, () => buf.length);
+      await ask(sys, q, (c) => {
         buf += c;
         patchMsg(sid, idx, { text: buf });
-      }, ac.signal, { ask: true, history, image, onPhase: phaseHook(ac, () => buf.length) });
-      patchMsg(sid, idx, { text: buf, live: false });
+      }, ac.signal, {
+        ask: true, history, image,
+        onPhase: (p, info) => {
+          if (p === "cut") cut = true;
+          if (p === "swap") swap = info;
+          hook(p, info);
+        },
+      });
+      // 끊긴 걸 표시해 두지 않으면 답이 원래 그렇게 끝난 줄 안다.
+      // swap 은 text 가 아니라 별도 칸에 둔다 — text 에 섞으면 다음 턴 히스토리까지 따라간다.
+      patchMsg(sid, idx, {
+        text: buf + (cut ? "\n\n*(길이 제한에 걸려 여기서 끊겼습니다 — 이어서 물어보세요)*" : ""),
+        live: false,
+        swap: swap && { wanted: modelName(swap.wanted), model: modelName(swap.model) },
+      });
     } catch (e) {
       // 사용자가 [중단]을 눌렀으면 여기까지 받은 답은 남긴다 — 다 지우면 억울하다.
       if (e.name === "AbortError") patchMsg(sid, idx, { text: buf, live: false, stopped: true });
@@ -3851,6 +3963,11 @@ export default function VerbatimReader() {
                                 ? <span className="vb-err">답을 받지 못했습니다 — {p.a.err}</span>
                                 : <Rich text={p.a.text} live={!!p.a.live} />}
                               {p.a.stopped && <div className="vb-stopped">여기서 중단했습니다</div>}
+                              {p.a.swap && (
+                                <div className="vb-swap">
+                                  {p.a.swap.wanted}가 붐벼서 {p.a.swap.model}가 대신 답했습니다
+                                </div>
+                              )}
                             </div>
                           )}
                           {!latest && p.a && !p.a.err && (
