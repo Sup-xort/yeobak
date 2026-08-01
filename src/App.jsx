@@ -649,7 +649,10 @@ export default function VerbatimReader() {
      무엇을 시켰는지 문장으로 알려야 하기 때문이다. */
   const histOf = (sid) =>
     (findSess(sid)?.msgs || [])
-      .filter((m) => !m.err && !m.live && (m.hist || m.text || "").trim())
+      /* err 가 붙었어도 받아 둔 답이 있으면 히스토리에 넣는다 — 끊긴 답을 빼 버리면
+         "이어서 말해 줘"가 앞을 못 보고, 방금 고친 흐름 문제가 그대로 재현된다.
+         답이 아예 없는 실패는 아래 text 검사에서 이미 걸러진다. */
+      .filter((m) => !m.live && (m.hist || m.text || "").trim())
       .map((m) => ({ role: m.role === "me" ? "user" : "assistant", text: m.hist || m.text }));
 
   /* 복원 + 2시간 지난 세션 청소 */
@@ -2411,9 +2414,18 @@ export default function VerbatimReader() {
         swap: swap && { wanted: modelName(swap.wanted), model: modelName(swap.model) },
       });
     } catch (e) {
-      // 사용자가 [중단]을 눌렀으면 여기까지 받은 답은 남긴다 — 다 지우면 억울하다.
-      if (e.name === "AbortError") patchMsg(sid, idx, { text: buf, live: false, stopped: true });
-      else patchMsg(sid, idx, { text: "", live: false, err: e.message });
+      /* 여기까지 받은 답은 무슨 일이 있어도 지우지 않는다. [중단]을 눌렀을 때는 원래 남겼는데,
+         스트림이 끊겨서 온 예외는 text 를 ""로 덮어쓰고 있었다 — 잘 나오던 답이 통째로
+         사라지고 "답을 받지 못했습니다"만 남았다. 아이패드에서 망이 잠깐 끊기거나 앱을
+         나갔다 오면 늘 이 경로다. 서버 로그에는 아무것도 안 남는다(연결만 끊긴 것이라). */
+      const stopped = e.name === "AbortError";
+      patchMsg(sid, idx, {
+        text: buf,
+        live: false,
+        stopped: stopped && !!buf,
+        // 답이 이미 있으면 "못 받았다"가 아니라 "여기서 끊겼다"가 맞는 말이다
+        err: stopped ? "" : buf ? "연결이 끊겨 여기서 멈췄습니다 — " + e.message : e.message,
+      });
     } finally {
       endJob(ac);
       setAsking(false);
@@ -3959,9 +3971,13 @@ export default function VerbatimReader() {
                           <div className="vb-qbubble">{p.q.text}</div>
                           {p.a && (
                             <div className={"vb-abody" + (!expanded ? " clamp" : "")}>
-                              {p.a.err
-                                ? <span className="vb-err">답을 받지 못했습니다 — {p.a.err}</span>
-                                : <Rich text={p.a.text} live={!!p.a.live} />}
+                              {/* 끊겼어도 받아 둔 답이 있으면 그걸 먼저 보여 주고, 사정은 아래에 적는다 */}
+                              {p.a.text && <Rich text={p.a.text} live={!!p.a.live} />}
+                              {p.a.err && (
+                                <span className="vb-err">
+                                  {p.a.text ? p.a.err : `답을 받지 못했습니다 — ${p.a.err}`}
+                                </span>
+                              )}
                               {p.a.stopped && <div className="vb-stopped">여기서 중단했습니다</div>}
                               {p.a.swap && (
                                 <div className="vb-swap">

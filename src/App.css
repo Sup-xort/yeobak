@@ -516,7 +516,8 @@
 .vb-cur::after{content:'';display:inline-block;width:7px;height:15px;margin-left:2px;
   background:var(--t-star);vertical-align:-2px;animation:vbblink .9s steps(2) infinite}
 @keyframes vbblink{0%,50%{opacity:1}50.01%,100%{opacity:0}}
-.vb-err{color:var(--t-warnFg);font-size:13.5px;line-height:1.6}
+/* 끊긴 답 아래에 이어 붙을 때가 있어 블록으로 둔다 — 인라인이면 마지막 문단에 붙어 버린다 */
+.vb-err{display:block;color:var(--t-warnFg);font-size:13.5px;line-height:1.6}
 .vb-ph{color:var(--t-faint);font-size:14px;line-height:1.75;padding:22px 0}
 .vb-ph p{margin:0 0 8px}
 
