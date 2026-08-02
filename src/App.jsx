@@ -289,13 +289,13 @@ const markSpans = (els, cls) => {
 };
 const fmtSize = (b) =>
   b >= 1048576 ? (b / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(b / 1024)) + " KB";
-const fmtDate = (t) => {
+export const fmtDate = (t) => {
   const d = new Date(t || 0);
   return `${d.getFullYear()}.${d.getMonth() + 1}.${d.getDate()}`;
 };
 /* 서재 카드 메타 줄용 상대 시간 — "3일 전"이 "2026.7.28"보다 한눈에 들어온다.
    1주 넘어가면 다시 절대 날짜로(오래된 날짜의 "N일 전"은 오히려 안 읽힌다). */
-const fmtRel = (t) => {
+export const fmtRel = (t) => {
   if (!t) return "";
   const diff = Date.now() - t;
   const min = Math.floor(diff / 60000);
