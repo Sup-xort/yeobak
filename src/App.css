@@ -656,6 +656,10 @@
 .vb-abody{font-size:15px;line-height:1.85;color:var(--t-ink);margin-top:14px}
 .vb-qa.past .vb-abody{font-size:14px;line-height:1.75;color:var(--t-sub);margin-top:12px}
 .vb-abody.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* 펼친 지난 문답은 최신 문답만큼 또렷하게 — 흐린 채로 펼치면 펼쳐도 읽을 수가 없다 */
+.vb-qa.past.open{opacity:1}
+.vb-qa.past.open .vb-qbubble{color:var(--t-ink)}
+.vb-qa.past.open .vb-abody{color:var(--t-ink);font-size:15px;line-height:1.85}
 .vb-msgimg{display:block;max-width:min(100%,320px);border-radius:9px;border:1px solid var(--t-line2);
   margin:2px 0 8px;background:#fff}
 .vb-expand{margin-top:10px;height:30px;padding:0 11px;border-radius:10px;border:1px solid var(--t-line2);

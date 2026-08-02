@@ -4040,7 +4040,7 @@ export default function VerbatimReader() {
                       const ek = (sess?.id || "") + ":" + p.i;
                       const expanded = latest || expandSet.has(ek);
                       return (
-                        <div key={p.i} className={"vb-qa" + (latest ? " vb-pe" : " past")}>
+                        <div key={p.i} className={"vb-qa" + (latest ? " vb-pe" : " past" + (expanded ? " open" : ""))}>
                           {p.q.img && <img className="vb-msgimg" src={p.q.img} alt="오려낸 영역" />}
                           <div className="vb-qbubble">{p.q.text}</div>
                           {p.a && (
