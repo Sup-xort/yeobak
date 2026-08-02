@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { PDFDocument, PDFName, PDFHexString, PDFNumber } from "pdf-lib";
+import { mountRemote } from "./remote.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -262,6 +263,8 @@ const LIB_FILE = path.join(DATA_DIR, "library.json");
 fs.mkdirSync(PDF_DIR, { recursive: true });
 fs.mkdirSync(THUMB_DIR, { recursive: true });
 fs.mkdirSync(TEXT_DIR, { recursive: true });
+
+mountRemote(app, { requireAuth, DATA_DIR });
 
 let lib = { folders: [], files: [] };
 try {
