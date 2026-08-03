@@ -841,7 +841,10 @@
 .vb-rm-lib{display:flex;flex-direction:column;height:100%}
 .vb-rm-brand{flex:0 0 auto;display:flex;align-items:center;gap:10px;
   padding:calc(22px + env(safe-area-inset-top)) 22px 0}
-.vb-rm-hero{flex:0 0 auto;overflow:hidden;padding:0 26px;transition:height .2s ease,opacity .2s ease}
+/* 접힘/펼침은 스크롤 추적이 아니라 스냅 전환 — JS 가 height/opacity 와 transition 을
+   직접 건드린다(접을 땐 즉시 스냅, pull-to-reveal 드래그 중엔 transition 없이 손가락을 따라감) */
+.vb-rm-hero{flex:0 0 auto;overflow:hidden;padding:0 26px;height:420px;opacity:1;
+  display:flex;flex-direction:column;justify-content:center}
 .vb-rm-cta{align-self:flex-start;margin-top:18px;height:42px;padding:0 20px;border-radius:11px;
   background:var(--t-fill);border:1px solid var(--t-line2);color:var(--t-sub);
   font-size:13.5px;font-weight:600;touch-action:manipulation}
@@ -852,20 +855,30 @@
 .vb-rm-sec span{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--t-faint)}
 .vb-rm-sec b{height:1px;flex:1;background:var(--t-line);font-weight:400}
 
-.vb-rm-mat{width:100%;text-align:left;display:flex;align-items:center;gap:12px;
+.vb-rm-mat{width:100%;display:flex;align-items:center;gap:6px;
   padding:10px 4px;border-top:1px solid var(--t-line)}
+.vb-rm-mattap{flex:1;min-width:0;text-align:left;display:flex;align-items:center;gap:12px}
 .vb-rm-thumb{position:relative;width:34px;height:44px;flex:0 0 auto;border-radius:3px;
   background:var(--paper);box-shadow:0 1px 2px rgba(0,0,0,.3),0 4px 10px rgba(0,0,0,.24);
-  overflow:hidden}
-.vb-rm-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+  overflow:hidden;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:3px}
+.vb-rm-thumb.sm{width:22px;height:28px;gap:2px}
+.vb-rm-thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
 .vb-rm-thumb i{position:absolute;top:0;right:5px;width:6px;height:12px;
   clip-path:polygon(0 0,100% 0,100% 100%,50% 75%,0 100%)}
 .vb-rm-mtitle{flex:1;min-width:0;font-size:14px;color:var(--t-ink);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .vb-rm-msub{font-size:11.5px;color:var(--t-faint);margin-top:2px}
+.vb-rm-menubtn{flex:0 0 auto;width:30px;height:30px;border-radius:9px;display:flex;
+  align-items:center;justify-content:center;font-size:15px;color:var(--t-faint)}
+.vb-rm-menubtn:active{background:var(--t-fill)}
+.vb-rm-filemenu{display:flex;flex-direction:column;padding:5px}
+.vb-rm-filemenuitem{display:block;padding:9px 11px;border-radius:9px;font-size:13px;
+  color:var(--t-ink);text-decoration:none}
+.vb-rm-filemenuitem:active{background:var(--t-fill)}
 
-.vb-rm-tree{display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+.vb-rm-tree{display:flex;align-items:center;gap:6px;width:100%;
   padding:8px 4px;border-top:1px solid var(--t-line)}
+.vb-rm-treetap{flex:1;min-width:0;text-align:left;display:flex;align-items:center;gap:8px}
 .vb-rm-tname{font-size:13.5px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 .vb-rm-top{flex:0 0 auto;display:flex;align-items:center;gap:10px;

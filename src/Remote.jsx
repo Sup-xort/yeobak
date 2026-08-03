@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import "./App.css";
 import Rich from "./rich.jsx";
-import { fmtDate, fmtRel } from "./App.jsx";
+import { fmtDate, fmtRel, pickGreeting } from "./App.jsx";
 
 /* ───────────────────────── 여백 리모트 (폰) ─────────────────────────
    설계 원칙(server/remote.js 의 주석과 같다): 아이패드가 유일하게 모델을 부르고
@@ -35,6 +35,45 @@ function jfetch(url, opts) {
     if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || String(r.status));
     return r.json();
   });
+}
+
+// 썸네일이 아직 없는 파일의 자리표시자(문서 없이도 "파일이다"는 알아보게)
+function FileIcon() {
+  return (
+    <>
+      <div style={{ width: "72%", height: 1.4, background: "var(--t-line2)" }} />
+      <div style={{ width: "72%", height: 1.4, background: "var(--t-line2)" }} />
+      <div style={{ width: "44%", height: 1.4, background: "var(--t-line2)" }} />
+    </>
+  );
+}
+
+// 서재 히어로 아래 목록의 파일 한 줄 — 최근 본 자료·전체 파일 트리 양쪽에서 같이 쓴다.
+// 탭하면 리모트 패널로, ⋮ 는 새 탭 보기·다운로드(모두 아이패드 없이 폰 혼자 되는 것들이다).
+function FileRow({ f, sub, small, onOpen, menuOpen, onToggleMenu, dot }) {
+  return (
+    <div className="vb-rm-mat">
+      <button className="vb-rm-mattap" onClick={onOpen}>
+        <div className={"vb-rm-thumb" + (small ? " sm" : "")}>
+          {f.thumb ? <img src={`/api/library/thumb/${f.id}`} alt="" /> : <FileIcon />}
+          {dot && <i style={{ background: dot }} />}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="vb-rm-mtitle">{f.name}</div>
+          {sub && <div className="vb-rm-msub">{sub}</div>}
+        </div>
+      </button>
+      <div style={{ position: "relative" }}>
+        <button className="vb-rm-menubtn" onClick={(e) => { e.stopPropagation(); onToggleMenu(); }} aria-label="파일 메뉴">⋮</button>
+        {menuOpen && (
+          <div className="vb-dropmenu vb-rm-filemenu" style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, minWidth: 150, zIndex: 6 }}>
+            <a className="vb-rm-filemenuitem" href={`/api/library/file/${f.id}`} target="_blank" rel="noopener noreferrer">새 탭에서 보기</a>
+            <a className="vb-rm-filemenuitem" href={`/api/library/file/${f.id}?dl=1`}>다운로드</a>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 export default function Remote() {
@@ -158,6 +197,81 @@ export default function Remote() {
     [lib.files]
   );
 
+  const greet = useMemo(() => pickGreeting(lib, "yeobaek.greet.remote"), [lib]);
+
+  // 서재 히어로 접힘 — 연속 추적이 아니라 스냅 전환이다: 한 번 스크롤(또는 위로 스와이프)하면
+  // 인사말 컨테이너가 즉시 접히고 파일 목록이 그 자리로 튀어 오른다. 다시 열리는 건 목록이 맨
+  // 위일 때 아래로 더 당기는(pull-to-reveal) 제스처로만 — 그래서 위로 스크롤할 땐 목록 자체가
+  // 이중으로 움직이지 않는다(목록과 히어로가 서로 다른 박스). ref 로 DOM 을 직접 건드려
+  // 매 프레임 리렌더를 피한다(hot path).
+  const HERO_H = 420;
+  const heroRef = useRef(null);
+  const heroOpenRef = useRef(true);
+  const dragRef = useRef(null); // {y, top, mode}
+
+  const setHero = (px, animate) => {
+    const h = heroRef.current;
+    if (!h) return;
+    h.style.transition = animate ? "height .32s cubic-bezier(.22,.8,.24,1), opacity .32s ease" : "none";
+    const clamped = Math.max(0, Math.min(HERO_H, px));
+    h.style.height = clamped + "px";
+    h.style.opacity = String(clamped / HERO_H);
+  };
+
+  const onLibScroll = (e) => {
+    if (heroOpenRef.current && e.target.scrollTop > 8) {
+      heroOpenRef.current = false;
+      setHero(0, true);
+    }
+  };
+  const onLibTouchStart = (e) => {
+    if (e.touches.length !== 1) { dragRef.current = null; return; }
+    dragRef.current = { y: e.touches[0].clientY, top: e.currentTarget.scrollTop, mode: null };
+  };
+  const onLibTouchMove = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    const dy = e.touches[0].clientY - d.y;
+    if (!d.mode) {
+      if (Math.abs(dy) < 6) return;
+      if (heroOpenRef.current && dy < 0 && d.top <= 0) {
+        d.mode = "collapse";
+        heroOpenRef.current = false;
+        setHero(0, true);
+      } else if (!heroOpenRef.current && dy > 0 && d.top <= 0) {
+        d.mode = "reveal";
+      } else {
+        d.mode = "scroll";
+      }
+    }
+    if (d.mode === "reveal") {
+      if (!e.cancelable) return;
+      e.preventDefault();
+      setHero(dy * 0.6, false);
+    }
+  };
+  const onLibTouchEnd = () => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    if (!d || d.mode !== "reveal") return;
+    const h = heroRef.current;
+    const cur = h ? parseFloat(h.style.height) || 0 : 0;
+    if (cur > HERO_H * 0.32) {
+      heroOpenRef.current = true;
+      setHero(HERO_H, true);
+    } else setHero(0, true);
+  };
+
+  const [fileMenuOpen, setFileMenuOpen] = useState(""); // 열려 있는 파일의 id (⋮ 메뉴)
+  useEffect(() => {
+    if (!fileMenuOpen) return;
+    const onDown = (e) => {
+      if (!e.target.closest(".vb-rm-menubtn") && !e.target.closest(".vb-rm-filemenu")) setFileMenuOpen("");
+    };
+    document.addEventListener("pointerdown", onDown);
+    return () => document.removeEventListener("pointerdown", onDown);
+  }, [fileMenuOpen]);
+
   /* ── 단어장 · 조회 기록(기록 탭) ── */
   const [vocab, setVocab] = useState([]);
   const [lookups, setLookups] = useState([]);
@@ -269,6 +383,9 @@ export default function Remote() {
           method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: image.blob,
         }).then((r) => { if (!r.ok) throw new Error("업로드 실패"); return r.json(); });
         imgId = up.id;
+      } else if (sess?.img) {
+        // 아이패드가 오려내기로 이 세션에 미리 얹어 둔 그림 — 다시 올리지 않고 그대로 쓴다.
+        imgId = sess.img;
       }
       await jfetch(`/api/remote/sessions/${sid}/msgs`, {
         method: "POST",
@@ -371,36 +488,25 @@ export default function Remote() {
             <div style={{ fontFamily: "var(--serif)", fontSize: 19, letterSpacing: ".05em", color: "var(--t-ink)" }}>여백</div>
           </div>
 
-          <div className="vb-rm-hero">
-            <div className="vb-greet" style={{ padding: "26px 0 0" }}>
-              <div className="vb-greetstamp">리모트</div>
-              <div className="vb-greetline" style={{ fontSize: 26 }}>
-                {mode.on && mode.doc ? "아이패드가 지금 읽고 있어요." : "아이패드에서 리모트를 켜지 않았어요."}
-              </div>
-              <div className="vb-greetsub">
-                {mode.on && mode.doc
-                  ? `《${mode.doc.name}》 ${mode.doc.page}쪽을 보고 있습니다.`
-                  : "아이패드의 여백 앱에서 리모트 모드를 켜면 여기서 단어·질문·기록을 이어볼 수 있어요."}
-              </div>
+          <div className="vb-rm-hero" ref={heroRef}>
+            <div className="vb-greet" style={{ padding: 0 }}>
+              <div className="vb-greetstamp">{greet.stamp}</div>
+              <div className="vb-greetline" style={{ fontSize: 26 }}>{greet.line}</div>
+              <div className="vb-greetsub">{greet.sub}</div>
               <button className="vb-rm-cta" onClick={goPanel}>리모트 시작 →</button>
             </div>
           </div>
 
-          <div className="vb-rm-scroll">
+          <div className="vb-rm-scroll" onScroll={onLibScroll}
+            onTouchStart={onLibTouchStart} onTouchMove={onLibTouchMove} onTouchEnd={onLibTouchEnd}>
             {recentFiles.length > 0 && (
               <>
                 <div className="vb-rm-sec"><span>최근 본 자료</span><b /></div>
                 {recentFiles.map((f) => (
-                  <button key={f.id} className="vb-rm-mat" onClick={goPanel}>
-                    <div className="vb-rm-thumb">
-                      {f.thumb ? <img src={`/api/library/thumb/${f.id}`} alt="" /> : null}
-                      <i style={{ background: f.id === mode.doc?.id ? "var(--mark)" : "var(--t-line2)" }} />
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div className="vb-rm-mtitle">{f.name}</div>
-                      <div className="vb-rm-msub">{f.lastPage || 1}쪽 · {fmtRel(f.lastOpenedAt || f.at)}</div>
-                    </div>
-                  </button>
+                  <FileRow key={f.id} f={f} onOpen={goPanel}
+                    sub={`${f.lastPage || 1}쪽 · ${fmtRel(f.lastOpenedAt || f.at)}`}
+                    dot={f.id === mode.doc?.id ? "var(--mark)" : "var(--t-line2)"}
+                    menuOpen={fileMenuOpen === f.id} onToggleMenu={() => setFileMenuOpen((v) => (v === f.id ? "" : f.id))} />
                 ))}
               </>
             )}
@@ -408,24 +514,26 @@ export default function Remote() {
             <div className="vb-rm-sec"><span>전체 파일</span><b /></div>
             {lib.folders.map((fo) => (
               <div key={fo.id}>
-                <button className="vb-rm-tree" onClick={() => setOpenFolders((s) => ({ ...s, [fo.id]: !s[fo.id] }))}>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                    style={{ transform: `rotate(${openFolders[fo.id] ? 90 : 0}deg)`, transition: "transform .15s" }}>
-                    <path d={CHEV_DOWN} stroke="var(--t-faint)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" transform="rotate(-90 12 12)" />
-                  </svg>
-                  <span className="vb-rm-tname" style={{ color: "var(--t-sub)" }}>{fo.name}</span>
-                </button>
-                {openFolders[fo.id] && lib.files.filter((f) => f.folder === fo.id).map((f) => (
-                  <button key={f.id} className="vb-rm-tree" style={{ paddingLeft: 26 }} onClick={goPanel}>
-                    <span className="vb-rm-tname">{f.name}</span>
+                <div className="vb-rm-tree">
+                  <button className="vb-rm-treetap" onClick={() => setOpenFolders((s) => ({ ...s, [fo.id]: !s[fo.id] }))}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                      style={{ transform: `rotate(${openFolders[fo.id] ? 90 : 0}deg)`, transition: "transform .15s", flex: "0 0 auto" }}>
+                      <path d={CHEV_DOWN} stroke="var(--t-faint)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" transform="rotate(-90 12 12)" />
+                    </svg>
+                    <span className="vb-rm-tname" style={{ color: "var(--t-sub)" }}>{fo.name}</span>
                   </button>
+                </div>
+                {openFolders[fo.id] && lib.files.filter((f) => f.folder === fo.id).map((f) => (
+                  <div key={f.id} style={{ paddingLeft: 22 }}>
+                    <FileRow f={f} small onOpen={goPanel}
+                      menuOpen={fileMenuOpen === f.id} onToggleMenu={() => setFileMenuOpen((v) => (v === f.id ? "" : f.id))} />
+                  </div>
                 ))}
               </div>
             ))}
             {lib.files.filter((f) => !f.folder).map((f) => (
-              <button key={f.id} className="vb-rm-tree" onClick={goPanel}>
-                <span className="vb-rm-tname">{f.name}</span>
-              </button>
+              <FileRow key={f.id} f={f} small onOpen={goPanel}
+                menuOpen={fileMenuOpen === f.id} onToggleMenu={() => setFileMenuOpen((v) => (v === f.id ? "" : f.id))} />
             ))}
             {!lib.folders.length && !lib.files.length && (
               <div className="vb-ph">서재가 비어 있습니다. 아이패드에서 PDF를 추가해 보세요.</div>
@@ -568,11 +676,19 @@ export default function Remote() {
                 </div>
 
                 <div className="vb-attrow">
-                  {image && (
+                  {image ? (
                     <span className="vb-rm-attach">
                       <img src={image.url} alt="" />
                       이미지 1개
                       <button onClick={clearImage} aria-label="첨부 빼기">✕</button>
+                    </span>
+                  ) : sess?.img && (
+                    <span className="vb-rm-attach">
+                      <img src={`/api/remote/sessions/${sess.id}/image/${sess.img}`} alt="" />
+                      오려낸 그림
+                      <button onClick={() => jfetch(`/api/remote/sessions/${sess.id}`, {
+                        method: "PATCH", body: JSON.stringify({ patch: { img: "" } }),
+                      }).catch(() => {})} aria-label="첨부 빼기">✕</button>
                     </span>
                   )}
                   <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onPickImage} />

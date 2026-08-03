@@ -86,7 +86,7 @@ const greetResume = (at) => [
   ],
 ];
 
-function pickGreeting(libData) {
+export function pickGreeting(libData, storageKey = "yeobaek.greet") {
   const now = new Date();
   const timeIdx = greetTimeIdx(now.getHours());
   const stamp = `${GREET_STAMP[timeIdx]} ${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
@@ -106,13 +106,13 @@ function pickGreeting(libData) {
   else { mode = "resume"; pool = greetResume(at)[timeIdx]; }
 
   let last = "";
-  try { last = localStorage.getItem("yeobaek.greet") || ""; } catch {}
+  try { last = localStorage.getItem(storageKey) || ""; } catch {}
   const keyOf = (i) => `${mode}:${timeIdx}:${i}`;
   const idxPool = pool.map((_, i) => i);
   const candidates = idxPool.filter((i) => keyOf(i) !== last);
   const pick = candidates.length ? candidates : idxPool;
   const idx = pick[Math.floor(Math.random() * pick.length)];
-  try { localStorage.setItem("yeobaek.greet", keyOf(idx)); } catch {}
+  try { localStorage.setItem(storageKey, keyOf(idx)); } catch {}
 
   const [line, sub] = pool[idx];
   return { stamp, line, sub };
@@ -433,6 +433,7 @@ export default function VerbatimReader() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [tab, setTab] = useState("word");
   const [engine, setEngine] = useState("");
+  const [remoteOn, setRemoteOn] = useState(false); // 리모트(폰) 모드 — server/remote.js 참고
   const [word, setWord] = useState(null);
   const [sent, setSent] = useState(null);
   const [sessions, setSessions] = useState([]);   // 질문 탭 대화 묶음. 최신이 앞
@@ -545,6 +546,16 @@ export default function VerbatimReader() {
   const panelModeRef = useRef(panelMode);
   useEffect(() => { themeRef.current = theme; }, [theme]);
   useEffect(() => { panelModeRef.current = panelMode; }, [panelMode]);
+
+  /* 리모트 모드용 거울 ref — SSE 리스너는 remoteOn 이 켜질 때 한 번 붙고 오래 살아남으므로,
+     그 안에서 docName/outline 을 state 로 직접 읽으면 그 뒤의 리로드·목차 생성 결과를
+     못 보고 낡은 값에 갇힌다(다른 *Ref 거울들과 같은 이유). */
+  const remoteOnRef = useRef(remoteOn);
+  const docNameRef = useRef(docName);
+  const outlineRef = useRef(outline);
+  useEffect(() => { remoteOnRef.current = remoteOn; }, [remoteOn]);
+  useEffect(() => { docNameRef.current = docName; }, [docName]);
+  useEffect(() => { outlineRef.current = outline; }, [outline]);
   useEffect(() => {
     try {
       const raw = localStorage.getItem("yeobaek");
@@ -917,6 +928,22 @@ export default function VerbatimReader() {
     }, 1200);
     return () => clearTimeout(lastPageTimer.current);
   }, [curPage, libApi]);
+
+  /* 리모트(폰)에 지금 쪽을 흘려준다 — 리모트가 꺼져 있으면 서버가 조용히 무시한다
+     (server/remote.js). remoteOn 이 막 켜졌을 때도 이 effect 가 다시 돌아 즉시 한 번
+     쏘도록 의존성에 넣는다. */
+  const remotePageTimer = useRef(null);
+  useEffect(() => {
+    if (!remoteOn || !curPage) return;
+    clearTimeout(remotePageTimer.current);
+    remotePageTimer.current = setTimeout(() => {
+      fetch("/api/remote/page", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ docId: curFileRef.current?.id || "", docName: docNameRef.current, page: curRef.current }),
+      }).catch(() => {});
+    }, 300);
+    return () => clearTimeout(remotePageTimer.current);
+  }, [curPage, remoteOn, docName]);
 
   /* 디바운스 타이머가 돌기 전에 탭을 닫거나 앱을 스와이프해 나가면 마지막 몇 쪽이
      안 남는다 — pagehide 에서 한 번 더 즉시 쏜다(keepalive 로 응답을 안 기다려도 전송은 됨).
@@ -1442,6 +1469,23 @@ export default function VerbatimReader() {
     }
   }, []);
 
+  /* ask() 와 같지만 질문 탭 모델을 그때그때 다른 값으로 지정할 수 있다 — 리모트(폰)가
+     고른 모델로 답해야 하는데, cfgRef.current.askModel 을 건드리면 동시에 도는 아이패드
+     자체 질문과 서로 값을 덮어써서 경합한다. */
+  const remoteAsk = useCallback(async (system, user, model, onDelta, signal, opts) => {
+    try {
+      const { text, engine } = await callServer(
+        { ...cfgRef.current, askModel: model || cfgRef.current.askModel },
+        system, user, onDelta, signal, opts
+      );
+      if (engine) setEngine(engine);
+      return text;
+    } catch (e) {
+      if (e.name === "AuthError") setAuthed(false);
+      throw e;
+    }
+  }, []);
+
   /* ── 레이아웃 계산 ── */
   const contentWidth = () => {
     const { w } = boxRef.current;
@@ -1750,8 +1794,8 @@ export default function VerbatimReader() {
     }
     picked.sort((x, y) => x.n - y.n);
     let text = picked.map((p) => `[${p.n}쪽] ${p.t}`).join("\n");
-    if (outline.length) {
-      const toc = outline.slice(0, 40).map((o) => "  ".repeat(o.depth) + "- " + o.title).join("\n").slice(0, 1500);
+    if (outlineRef.current.length) {
+      const toc = outlineRef.current.slice(0, 40).map((o) => "  ".repeat(o.depth) + "- " + o.title).join("\n").slice(0, 1500);
       text = `[목차]\n${toc}\n\n${text}`;
     }
     const from = picked[0]?.n ?? cur;
@@ -2109,6 +2153,34 @@ export default function VerbatimReader() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [word]);
 
+  /* 리모트(폰)의 단어/문장 탭은 이 값이 스트리밍되는 그대로를 받아 그린다(src/Remote.jsx
+     의 word/sent 슬롯). word/sent state 가 바뀔 때마다(토큰 단위 포함) 그대로 흘려보낸다 —
+     끊어 보내지 않고 최신 state 를 매번 통째로 보내는 게 단순하고, seq 로 낡은 응답만
+     걸러내면 되므로 순서만 지키면 된다. */
+  const remoteSeqRef = useRef({ word: 0, sent: 0 });
+  const relay = (slot, payload) => {
+    if (!remoteOnRef.current) return;
+    remoteSeqRef.current[slot] += 1;
+    fetch("/api/remote/relay", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ slot, seq: remoteSeqRef.current[slot], payload }),
+    }).catch(() => {});
+  };
+  useEffect(() => {
+    if (!word) return;
+    relay("word", {
+      head: word.head, pos: word.pos, ctx: word.ctx, senses: word.senses,
+      quote: word.quote, page: curRef.current, doc: docNameRef.current,
+      live: !!word.live, err: word.err || "",
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [word]);
+  useEffect(() => {
+    if (!sent) return;
+    relay("sent", { text: sent.trans, live: !!sent.live, err: sent.err || "" });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sent]);
+
   /* 문장/구간 해석은 캔버스로 렌더된 페이지 위에 뜨는 유리 카드로 보여준다 — 드래그 선택
      ("선택 구간 해석" 말풍선)이나 단어 탭의 "문장 해석" 버튼에서 들어온다.
      두 번 탭 제스처는 리디자인에서 뺐다. */
@@ -2154,7 +2226,9 @@ export default function VerbatimReader() {
       setSentPos(null);
       clearMarks();
       setMark(n, off, off + el.textContent.length, "");
-      setSheetOpen(true);
+      // 리모트 모드에선 폰이 단어 패널을 보여주므로 아이패드 쪽 시트는 자동으로 열지 않는다 —
+      // 탭 버튼을 직접 누르면 그때는 연다(3533번째 줄 토글은 그대로 동작).
+      if (!remoteOnRef.current) setSheetOpen(true);
       setTab("word");
       runWord(wordAt(pd.text, off), s.text);
     };
@@ -2475,9 +2549,161 @@ export default function VerbatimReader() {
     }
   };
 
+  /* ── 리모트(폰)가 만든 질문을 아이패드가 실행 ──
+     폰은 서버 세션(/api/remote/sessions)에 질문 + 빈 답 자리만 만든다(src/Remote.jsx
+     sendChat). 여기 아이패드 쪽 로컬 질문 탭(sessRef/sendAsk, localStorage 에 저장)과는
+     완전히 별개의 저장소다 — 화면에 그리지 않고 백그라운드로 채우기만 하므로 ref 로만
+     들고 있는다. 세션 전체 사본을 들고 있는 건 history(지난 문답)를 구성하려면
+     그 세션의 지난 메시지가 필요한데, SSE 의 sess-msgs 이벤트는 새로 추가된 것만 주기
+     때문이다 — hello 로 받는 최초 스냅샷에는 전체가 있다. */
+  const remoteSessRef = useRef([]);
+  const remoteBusyRef = useRef(new Set()); // 이미 처리했거나 처리 중인 "세션id:메시지인덱스"
+
+  const processRemoteQ = async (sid, idx) => {
+    const key = sid + ":" + idx;
+    if (remoteBusyRef.current.has(key)) return;
+    remoteBusyRef.current.add(key);
+    const s = remoteSessRef.current.find((x) => x.id === sid);
+    const qMsg = s?.msgs[idx - 1];
+    if (!s || !qMsg) return;
+
+    let image = "";
+    if (qMsg.img) {
+      try {
+        const blob = await fetch(`/api/remote/sessions/${sid}/image/${qMsg.img}`).then((r) => r.blob());
+        image = await new Promise((res, rej) => {
+          const fr = new FileReader();
+          fr.onload = () => res(String(fr.result).split(",")[1] || "");
+          fr.onerror = rej;
+          fr.readAsDataURL(blob);
+        });
+      } catch {}
+    }
+
+    // 답이 이미 있는 지난 문답만 history 로 — 지금 채우려는 자리(idx) 자체는 뺀다.
+    const history = s.msgs.slice(0, idx - 1)
+      .filter((m) => (m.text || "").trim())
+      .map((m) => ({ role: m.role, text: m.text }));
+    const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP);
+    const sys =
+      `${SYS_ASK}\n\n[문서: ${docNameRef.current || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
+      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}`;
+    let buf = "";
+    let cut = false;
+    try {
+      await remoteAsk(sys, qMsg.text, qMsg.model, (c) => { buf += c; }, undefined, {
+        ask: true, history, image,
+        onPhase: (p) => { if (p === "cut") cut = true; },
+      });
+      await fetch(`/api/remote/sessions/${sid}/msgs/${idx}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ patch: {
+          text: buf + (cut ? "\n\n*(길이 제한에 걸려 여기서 끊겼습니다 — 이어서 물어보세요)*" : ""),
+          pending: false,
+        } }),
+      });
+    } catch (e) {
+      await fetch(`/api/remote/sessions/${sid}/msgs/${idx}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ patch: { text: buf, pending: false, err: buf ? "연결이 끊겨 여기서 멈췄습니다 — " + e.message : e.message } }),
+      }).catch(() => {});
+    }
+  };
+
+  // 세션의 맨 끝이 "빈 답 + pending" 이면 그 자리가 아직 안 채워진 질문이다.
+  const scanRemotePending = (s) => {
+    const i = s.msgs.length - 1;
+    if (i >= 0 && s.msgs[i]?.role === "assistant" && s.msgs[i]?.pending && !s.msgs[i]?.text) processRemoteQ(s.id, i);
+  };
+
+  /* remoteOn 이 켜져 있는 동안만 붙는다 — 리모트를 안 쓰면 아이패드가 굳이 이 스트림을
+     열어 둘 이유가 없다. hello 로 받는 최초 스냅샷에서 이미 쌓여 있던 미답 질문(아이패드가
+     꺼져 있는 동안 폰이 물어본 것)까지 훑는다. */
+  useEffect(() => {
+    if (!remoteOn) return;
+    const es = new EventSource("/api/remote/stream");
+    es.addEventListener("hello", (e) => {
+      const d = JSON.parse(e.data);
+      remoteSessRef.current = Array.isArray(d.sessions) ? d.sessions : [];
+      for (const s of remoteSessRef.current) scanRemotePending(s);
+    });
+    es.addEventListener("sess-new", (e) => {
+      const s = JSON.parse(e.data);
+      remoteSessRef.current = [s, ...remoteSessRef.current.filter((x) => x.id !== s.id)];
+    });
+    es.addEventListener("sess-del", (e) => {
+      const { id } = JSON.parse(e.data);
+      remoteSessRef.current = remoteSessRef.current.filter((x) => x.id !== id);
+    });
+    es.addEventListener("sess-patch", (e) => {
+      const { id, patch } = JSON.parse(e.data);
+      remoteSessRef.current = remoteSessRef.current.map((s) => (s.id === id ? { ...s, ...patch } : s));
+    });
+    es.addEventListener("sess-msgs", (e) => {
+      const { id, msgs } = JSON.parse(e.data);
+      let updated = null;
+      remoteSessRef.current = remoteSessRef.current.map((s) => {
+        if (s.id !== id) return s;
+        updated = { ...s, msgs: [...s.msgs, ...msgs] };
+        return updated;
+      });
+      if (updated) scanRemotePending(updated);
+    });
+    es.addEventListener("sess-msg-patch", (e) => {
+      const { id, i, patch } = JSON.parse(e.data);
+      remoteSessRef.current = remoteSessRef.current.map((s) => {
+        if (s.id !== id) return s;
+        const msgs = s.msgs.slice();
+        if (msgs[i]) msgs[i] = { ...msgs[i], ...patch };
+        return { ...s, msgs };
+      });
+    });
+    return () => es.close();
+  }, [remoteOn]);
+
+  const toggleRemote = () => {
+    const v = !remoteOn;
+    setRemoteOn(v);
+    fetch("/api/remote/mode", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ on: v }),
+    }).catch(() => {});
+  };
+
   const delSess = (id) => {
     const left = sessRef.current.filter((s) => s.id !== id);
     commitSess(left, id === curSessRef.current ? left[0]?.id || "" : curSessRef.current);
+  };
+
+  /* ── 오려내기 "질문"을 폰에도 그대로 얹는다 ──
+     아이패드의 로컬 질문 탭(sessRef)과 서버 세션(/api/remote/sessions)은 완전히 별개
+     저장소라, 오려낸 그림도 따로 올려야 폰이 볼 수 있다. 세션 자체에 img(=imgId)를
+     얹어 두면(질문 텍스트 없이도) 폰이 "그림 첨부됨" 칩으로 보여주고, 사용자가 폰에서
+     직접 물음을 타이핑해 보내면 이미 있는 processRemoteQ 파이프라인이 그대로 답한다.
+     로컬 세션 하나가 여러 번 이어서 캡처될 수 있어 sid → 원격 세션 id 매핑을 들고
+     있다가, 이미 매핑된 세션이면 새로 만들지 않고 img 만 갈아 끼운다. */
+  const remoteMirrorRef = useRef(new Map()); // 로컬 sid -> 원격 sid
+  const mirrorCaptureToRemote = async (localSid, title, dataURL) => {
+    if (!remoteOnRef.current) return;
+    try {
+      const blob = await fetch(dataURL).then((r) => r.blob());
+      let remoteSid = remoteMirrorRef.current.get(localSid);
+      if (!remoteSid || !remoteSessRef.current.some((s) => s.id === remoteSid)) {
+        const s = await fetch("/api/remote/sessions", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ title }),
+        }).then((r) => r.json());
+        remoteSid = s.id;
+        remoteMirrorRef.current.set(localSid, remoteSid);
+      }
+      const up = await fetch(`/api/remote/sessions/${remoteSid}/image`, {
+        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: blob,
+      }).then((r) => r.json());
+      await fetch(`/api/remote/sessions/${remoteSid}`, {
+        method: "PATCH", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ patch: { img: up.id } }),
+      });
+    } catch {}
   };
 
   /* ── 영역 캡처 ──
@@ -3291,6 +3517,10 @@ export default function VerbatimReader() {
         )}
         <button className="vb-tool" onClick={() => zoomBy(1 / 1.2)} aria-label="축소">−</button>
         <button className="vb-tool" onClick={() => zoomBy(1.2)} aria-label="확대">+</button>
+        <button className={"vb-tool" + (remoteOn ? " on" : "")} onClick={toggleRemote}
+          aria-label="리모트 모드" title="리모트 모드 — 폰에서 이 책을 따라 보고 질문할 수 있게 켭니다">
+          <svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M11 18h2" strokeLinecap="round" /></svg>
+        </button>
         <button className="vb-tool" onClick={() => setSetOpen(true)} aria-label="설정">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 00.3 1.8 2 2 0 11-2.8 2.8 1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5 2 2 0 11-4 0 1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3 2 2 0 11-2.8-2.8 1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1 2 2 0 110-4 1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8 2 2 0 112.8-2.8 1.6 1.6 0 001.8.3 1.6 1.6 0 001-1.5 2 2 0 114 0 1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3 2 2 0 112.8 2.8 1.6 1.6 0 00-.3 1.8 1.6 1.6 0 001.5 1 2 2 0 110 4 1.6 1.6 0 00-1.5 1z" /></svg>
         </button>
