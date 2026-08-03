@@ -875,6 +875,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   let upstream = null;
   let engine = "";
   let usedModel = "";
+  let connT0 = 0; // 성공한 시도의 시작 시각 — 실제 첫 글자 도착까지 걸린 시간을 재는 데 쓴다(아래)
   const tryNIM = !forceGemini && NIM_KEY && Date.now() > nimDownUntil;
 
   if (tryNIM) {
@@ -890,7 +891,12 @@ app.post("/api/chat", requireAuth, async (req, res) => {
           upstream = await callNIM({ ...args, model: m });
           engine = "NIM";
           usedModel = m;
-          markHealth(m, true, 200, Date.now() - t0);
+          // 여기서 바로 markHealth 를 찍지 않는다 — fetch 는 응답 헤더만 오면 resolve 되므로
+          // 이 시점의 ms 는 "연결이 열린 시간"일 뿐이다. 속생각(reasoning_content)이 긴 모델은
+          // 헤더는 금방 오고 진짜 글자(content)는 한참 뒤에 오는데, 그러면 59초를 기다려도
+          // "정상"으로 뜨는 거짓 배지가 된다. 진짜 측정은 아래 스트리밍 구간에서 첫 content
+          // 델타가 실제로 도착했을 때 한다.
+          connT0 = t0;
           break outer;
         } catch (e) {
           // 클라이언트가 떠났을 때만 조용히 끝낸다 — 응답을 기다리는 상대가 없다.
@@ -900,7 +906,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
           // 실사용에서 공짜로 얻는 상태 신호 — 드롭다운의 "지금 붐빔"이 이걸로 산다.
           markHealth(m, false, e.status || 0, Date.now() - t0);
           // 상한이 이미 터졌으면 더 시도해도 즉시 실패한다 — 아래 오류 응답으로 내려간다.
-          if (signal.aborted) break outer;
+          // (이전엔 여기서 바로 break 해서 어느 모델이 시간 초과였는지 로그에 안 남았다)
+          if (signal.aborted) { console.warn(`[여백] NIM(${m}) 실패(상한 초과):`, e.message); break outer; }
           // 상태 코드가 붙은 실패만 재시도한다 — 타임아웃·네트워크 끊김은 다시 걸어도 같다.
           if (i + 1 < tries && e.status >= 429) {
             console.warn(`[여백] NIM(${m}) ${e.status} — ${i + 1}번째, 잠시 뒤 재시도`);
@@ -950,6 +957,31 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         res.end();
       });
       res.on("error", () => rs.destroy());
+
+      // 첫 content 델타가 실제로 도착한 시점을 재서 markHealth 를 여기서 찍는다(위 참고).
+      // 델타를 소비하지 않고 훔쳐보기만 한다 — 실제 전달은 아래 rs.pipe(res) 가 그대로 한다.
+      let marked = false;
+      const markOnce = () => { if (!marked) { marked = true; markHealth(usedModel, true, 200, Date.now() - connT0); } };
+      if (usedModel) {
+        const dec = new TextDecoder();
+        let buf = "";
+        rs.on("data", (chunk) => {
+          if (marked) return;
+          buf += dec.decode(chunk, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop();
+          for (const line of lines) {
+            if (!line.startsWith("data:")) continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+            try {
+              if (JSON.parse(payload).choices?.[0]?.delta?.content) { markOnce(); break; }
+            } catch {}
+          }
+        });
+        rs.on("end", markOnce);
+        rs.on("close", markOnce);
+      }
       rs.pipe(res);
     }
   } catch (e) {
