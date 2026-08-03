@@ -851,7 +851,12 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   res.on("close", () => { if (!res.writableEnded) ac.abort(); });
 
   // 프로바이더가 응답하지 않을 때 탭이 영원히 멈추지 않도록 상한을 둔다.
-  const signal = AbortSignal.any([ac.signal, AbortSignal.timeout(90_000)]);
+  // 단어·문장 탭은 탭-즉시반응이 생명이라 90초로 빡빡하게 잡지만, 질문 탭은 이미
+  // 스트리밍으로 "살아 있다"는 걸 보여주고 있어 더 기다릴 여유가 있다 — Nemotron 3 Super
+  // 120B·MiniMax M3 처럼 첫 글자 전 속생각이 긴 모델이 이 90초 상한에 자주 걸려
+  // "응답 없음"으로 잘못 죽어 보이던 것을 고친다.
+  const timeoutMs = ask ? 180_000 : 90_000;
+  const signal = AbortSignal.any([ac.signal, AbortSignal.timeout(timeoutMs)]);
   // 상한 8000 — 추론 모델은 max_tokens 안에서 속생각(reasoning)까지 함께 쓰기 때문에,
   // 이름 정리처럼 긴 구조화 출력이 필요한 호출은 4000 으로는 답이 통째로 잘린다.
   const args = { system, user, image, history, maxTokens: Math.min(Number(maxTokens) || 1000, 8000), signal };
