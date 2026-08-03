@@ -378,8 +378,11 @@ const SYS_RENAME = `너는 사용자의 문서 서재를 정리하는 사서다.
 - 사용자가 말한 형식을 모든 문서에 같은 방식으로 적용한다.`;
 
 /* ── 영역 캡처 프롬프트 ──
-   "해석"은 비전 모델이 한 번에 처리하고, "문제풀이"는 두 단계로 나눈다:
-   비전 모델이 눈 역할로 옮겨적고(SYS_CAP_OCR), 실제 추론은 질문 탭 모델(DeepSeek 등)이 한다.
+   "해석"만 비전 모델이 한 번에 처리한다 — 오려내고 바로 읽는 가벼운 동작이라
+   옮겨적기가 끝날 때까지 첫 글자를 못 보는 쪽이 더 나쁘고, 원문 번역은 그림을
+   보면서 하는 편이 자연스럽기 때문이다.
+   나머지("문제풀이", 질문 탭에 얹은 그림)는 두 단계로 나눈다: 비전 모델이 눈 역할로
+   옮겨적고(SYS_CAP_DESCRIBE), 실제 추론은 질문 탭 모델(DeepSeek 등)이 한다.
    비전 모델은 글자를 잘 읽지만 추론은 텍스트 전용 모델이 더 낫기 때문이다. */
 const SYS_CAP_READ = `너는 한국 대학생이 읽는 원서·교재의 한 부분을 함께 보는 번역·해설자다.
 주어진 이미지는 지금 읽고 있는 쪽에서 오려낸 영역이다. 이미지에 보이는 것만 근거로 삼는다.
@@ -389,13 +392,18 @@ const SYS_CAP_READ = `너는 한국 대학생이 읽는 원서·교재의 한 �
 이미지가 흐리거나 글자를 알아볼 수 없으면 추측하지 말고 그 사실을 먼저 밝힌다.
 ${FMT_RICH}`;
 
-/* 옮겨적기 결과는 화면에도 그대로 뜨고 2단계 풀이 모델의 입력도 된다.
-   그래서 수식만 LaTeX 로 받고 나머지 마크다운은 시키지 않는다 — 원문 그대로가 중요하다. */
-const SYS_CAP_OCR = `이미지에 보이는 내용을 있는 그대로 옮겨 적는다. 번역·해설·풀이를 하지 않는다.
-수식은 LaTeX 로 옮긴다 — 문장 안에서는 $…$, 따로 세울 때는 $$…$$ (예: $(A+B)' = A'B'$).
-표는 행마다 줄을 나눠 옮기고, 그림·회로도는 [그림: 무엇이 있는지 한 줄]로 적는다.
-문제 번호와 보기 기호(①, (a) 등)를 빠뜨리지 않는다. 알아볼 수 없는 글자는 [?]로 표시한다.
-옮긴 내용만 출력한다.`;
+/* gemma는 "보는" 역할만 하고 실제 풀이·답변은 늘 사용자가 고른 질문 탭 모델이다
+   (그래서 SYS_CAP_SOLVE처럼 풀거나 해설하지 않는다). 그림·회로도·그래프도
+   [그림: 한 줄]로 뭉개지 않고 그 자체를 글로 자세히 옮긴다 — 이 설명이 나간 뒤로는
+   아무도 원본 이미지를 다시 안 보므로, 여기서 빠진 건 영영 없는 셈이 된다.
+   옮긴 결과는 화면에도 그대로 뜬다 — 잘못 읽은 걸 사용자가 알아챌 유일한 창구다.
+   그래서 수식만 LaTeX 로 받고 나머지 마크다운은 시키지 않는다(원문 그대로가 중요하다). */
+const SYS_CAP_DESCRIBE = `이미지에 보이는 내용을 글로 옮긴다. 해석·풀이·요약은 하지 않는다.
+글자·수식은 있는 그대로 옮긴다 — 수식은 LaTeX로($…$, 필요하면 $$…$$).
+그림·회로도·그래프가 있으면, 이걸 못 보는 사람이 이 글만 읽고도 알 수 있도록 자세히 묘사한다
+(부품 종류와 연결 관계, 축 이름과 눈금, 곡선의 모양과 변화 등 — 한 줄로 뭉뚱그리지 않는다).
+표는 행마다 줄을 나눠 옮긴다. 문제 번호와 보기 기호(①, (a) 등)를 빠뜨리지 않는다.
+알아볼 수 없는 글자는 [?]로 표시한다. 옮긴 내용만 출력한다.`;
 
 const SYS_CAP_SOLVE = `너는 한국 대학생의 문제풀이 조교다. 주어진 문제를 한국어로 푼다.
 답만 던지지 말고 풀이 과정을 단계로 나눠 보여주되, 군더더기 없이 짧게.
@@ -698,8 +706,10 @@ export default function VerbatimReader() {
   const sess = useMemo(() => sessions.find((s) => s.id === curSess) || null, [sessions, curSess]);
   const askLog = sess ? sess.msgs : [];
   /* 세션을 옮길 때마다 "그림 함께 보내기" 기본값을 그 세션에 맞춘다.
-     회로도·그래프처럼 글자로 옮길 수 없었던 캡처(vision)에서만 기본으로 켠다. */
-  useEffect(() => { setSendFig(!!(sess?.img && sess?.vision)); }, [curSess, sess?.vision]); // eslint-disable-line react-hooks/exhaustive-deps
+     그림을 옮겨 적어 둔 캡처(imgDesc)면 켠다 — 켜져 있어야 그 설명이 후속 질문에 얹힌다.
+     vision 은 옛 세션 호환용이다: 예전에 비전 모델이 직접 풀던 캡처만 그 표시를 갖는데,
+     그런 세션은 설명이 없으니 지금도 원본 이미지를 그대로 보낸다(sendAsk 참고). */
+  useEffect(() => { setSendFig(!!(sess?.img && (sess?.vision || sess?.imgDesc))); }, [curSess, sess?.vision, sess?.imgDesc]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ───────── 모델 상태와 중단 ─────────
      NIM 은 자주 식고(실측 콜드스타트 52초), 드물게는 연결만 붙은 채 아무것도 보내지 않는다.
@@ -2493,10 +2503,16 @@ export default function VerbatimReader() {
     const idx = (s?.msgs.length || 0) + 1;    // 방금 넣을 ai 자리
     addMsgs(sid, [{ role: "me", text: q }, { role: "ai", text: "", live: true }]);
 
-    /* 그림 문제의 후속 질문이면 오려낸 그림을 다시 붙인다. 서버는 image 가 있으면
-       비전 모델 체인으로 보내므로, 이때는 아래에서 고른 질문 탭 모델이 아니라
-       비전 모델이 답한다(회로도·그래프는 그래야 답이 나온다). */
-    const image = sendFig && s?.img ? s.img : "";
+    /* 그림이 딸린 세션의 질문이면 그림 맥락을 붙인다. imgDesc(gemma가 미리 옮겨 적은 설명)가
+       있으면 그 글만 시스템 프롬프트에 얹고 image 는 안 보낸다 — 그래야 실제로 답하는 건
+       늘 아래에서 고른 질문 탭 모델이다. imgDesc 가 없는(=회로도라 처음부터 직접 봐야 했던,
+       runCapture 의 hasFig 경로로 표시만 된) 옛 세션은 예전처럼 image 를 그대로 보낸다. */
+    let image = "";
+    let figBlock = "";
+    if (sendFig && s?.img) {
+      if (s.imgDesc) figBlock = `\n\n[오려낸 그림 — gemma가 옮겨 적은 내용]\n${s.imgDesc}`;
+      else image = s.img;
+    }
 
     /* 본문·쪽·짚은 문장은 user 턴이 아니라 system 에 싣는다. user 턴에 얹으면 지난 턴들은
        질문 한 줄인데 이번 턴만 수만 자짜리 덩어리가 되어, 모델이 "지금 새 자료를 받았다"로
@@ -2505,11 +2521,12 @@ export default function VerbatimReader() {
     const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP);
     const sys =
       `${SYS_ASK}\n\n[문서: ${docName || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
-      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}`;
+      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}` +
+      figBlock;
     let buf = "";
     let cut = false;   // 길이 상한에 걸려 말이 끊겼는가
     let swap = null;   // 고른 모델이 붐벼서 다른 모델이 대신 답했는가
-    const ac = startJob(sid, image ? "그림과 함께" : "");
+    const ac = startJob(sid, image ? "그림과 함께" : (figBlock ? "그림 설명과 함께" : ""));
     try {
       const hook = phaseHook(ac, () => buf.length);
       await ask(sys, q, (c) => {
@@ -2980,21 +2997,30 @@ export default function VerbatimReader() {
     setTab("ask");
     setSheetOpen(true);
 
+    /* 대화 중에 그림만 새로 얹는다 — 앞의 문답은 그대로 두고, 다음 질문부터 이 그림이
+       딸려 간다. askLog 에 me/ai 를 넣지 않는다 — qaPairs 가 두 개씩 묶어 읽으므로
+       짝 없는 me 하나를 끼우면 그다음 진짜 질문·답이 한 칸씩 밀려 잘못 묶인다.
+       첨부 사실은 입력창 위 vb-chip(기존 "그림 함께" 표시)이 그대로 보여준다 —
+       새 그림이 오면 그 칩의 썸네일도 자동으로 바뀐다. */
     const continueSid = capContinueRef.current;
     const target = continueSid && findSess(continueSid);
-    if (target) {
-      /* 대화 중에 그림만 새로 얹는다 — 앞의 문답은 그대로 두고, 다음 질문부터 이 그림이
-         딸려 간다. askLog 에 me/ai 를 넣지 않는다 — qaPairs 가 두 개씩 묶어 읽으므로
-         짝 없는 me 하나를 끼우면 그다음 진짜 질문·답이 한 칸씩 밀려 잘못 묶인다.
-         첨부 사실은 입력창 위 vb-chip(기존 "그림 함께" 표시)이 그대로 보여준다 —
-         새 그림이 오면 그 칩의 썸네일도 자동으로 바뀐다. */
-      patchSess(target.id, { img: b64, vision: true });
-      setSendFig(true);
-    } else {
-      // vision:true 로 세션을 열면 기존 "그림 함께" 로직이 이 첨부를 기본으로 켜 둔다.
-      newSess(`${shot.page}쪽 질문`, { img: b64, vision: true });
-    }
+    const title = `${shot.page}쪽 질문`;
+    const sid = target ? target.id : newSess(title, { img: b64 });
+    if (target) patchSess(sid, { img: b64, imgDesc: "" }); // 새 그림이 오면 옛 설명은 비운다
+    setSendFig(true);
+    mirrorCaptureToRemote(sid, target ? target.title : title, shot.url);
     setCapBusy("");
+
+    /* gemma 는 "보는" 역할만 한다 — 실제 질문에 답하는 건 늘 사용자가 고른 질문 탭
+       모델이다(SYS_CAP_DESCRIBE 참고). 여기서 미리 옮겨 적어 세션에 박아 두면 sendAsk
+       는 그림을 다시 안 보내고 이 글만 얹는다. 설명이 오기 전에 질문이 먼저 나가면
+       sendAsk 가 원본 이미지로 그 한 턴만 대신 처리한다 — 실패해도 질문 자체는 안 막는다. */
+    try {
+      let desc = "";
+      await ask(SYS_CAP_DESCRIBE, `[${shot.page}쪽에서 오려낸 영역] 이 이미지를 자세히 설명해라.`,
+        (c) => { desc += c; }, undefined, { image: b64 });
+      patchSess(sid, { imgDesc: desc.trim() });
+    } catch (e) { /* 그림(img)은 남아 있으니 sendAsk 가 대신 처리한다 */ }
   };
 
   /* kind: "read" = 해석(비전 모델 한 번) / "solve" = 문제풀이(옮겨적기 → 질문 탭 모델이 풀이) */
@@ -3057,29 +3083,18 @@ export default function VerbatimReader() {
         // 1단계: 비전 모델이 눈 역할 — 옮겨적기. 읽은 내용을 그대로 보여줘서
         // 모델이 수식을 잘못 읽었을 때 사용자가 바로 알아챌 수 있게 한다.
         let ocr = "";
-        await ask(SYS_CAP_OCR, `[${shot.page}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
+        await ask(SYS_CAP_DESCRIBE, `[${shot.page}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
           (c) => { ocr += c; put(`[읽은 내용]\n${ocr}`); }, ac.signal,
           { image: b64, onPhase: stepped("옮겨적는 중", () => ocr.length) });
         if (!ocr.trim()) throw new Error("이미지에서 글자를 읽지 못했습니다.");
         const head = `[읽은 내용]\n${ocr.trim()}\n\n`;
 
-        /* 회로도·그래프는 옮겨적기에서 [그림: …] 한 줄로 줄어든다. 그대로 2단계로 넘기면
-           풀이를 맡은 텍스트 모델은 그림을 못 본 채 답하게 된다. 그럴 때는 2단계를 건너뛰고
-           그림을 볼 수 있는 비전 모델에게 직접 풀린다. */
-        const hasFig = /\[그림\s*:/.test(ocr);
-        if (hasFig) {
-          // 이 세션의 후속 질문도 그림을 봐야 한다 — "그림 함께" 를 기본으로 켜 둔다.
-          patchSess(sid, { vision: true });
-          const note = "(그림이 있어 그림을 볼 수 있는 모델이 직접 풉니다)\n\n";
-          put(head + note + "푸는 중…");
-          let buf = "";
-          await ask(SYS_CAP_SOLVE,
-            `[문서: ${docName || "제목 없음"} / ${shot.page}쪽에서 오려낸 문제]\n이 이미지의 문제를 풀어라.`,
-            (c) => { buf += c; put(head + note + buf); }, ac.signal,
-            { image: b64, onPhase: stepped("그림을 보고 푸는 중", () => buf.length) });
-          put(head + note + buf, { live: false });
-          return;
-        }
+        /* 회로도·그래프가 있어도 2단계는 건너뛰지 않는다 — SYS_CAP_DESCRIBE 가 그림 자체를
+           글로 옮겨 놓으므로 텍스트 모델이 그 글만 읽고 풀 수 있다. 예전에는 여기서
+           [그림: …] 한 줄을 발견하면 비전 모델에게 직접 풀렸는데, 추론 체급이 낮은 쪽에
+           문제를 통째로 넘기는 셈이라 접었다. 옮겨 적은 글은 이 세션의 후속 질문에도
+           그대로 얹힌다(sendAsk 의 imgDesc) — 그래서 그림을 다시 보낼 일이 없다. */
+        patchSess(sid, { imgDesc: ocr.trim() });
 
         put(head + "풀이 중…");
         // 2단계: 추론은 질문 탭 모델(기본 DeepSeek)이 한다 — 이미지 없이 텍스트로.
