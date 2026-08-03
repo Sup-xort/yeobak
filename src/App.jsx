@@ -353,7 +353,15 @@ const SYS_ASK = `너는 한국 대학생이 읽고 있는 문서를 함께 보�
 - 화제가 정말 바뀐 게 아니면 앞의 화제 안에서 답한다. 읽는 쪽이 넘어갔다고 화제까지 넘기지 않는다.
 - 앞의 답이 틀렸다는 지적을 받으면 변명하지 말고 고쳐서 다시 답한다.
 
-짧고 정확하게. 본문에 없는 내용은 추측이라고 밝힌다. 인사말 없이 바로 답한다.
+아는 것을 문서 안으로 가두지 않는다. 셋을 구분해서 쓴다.
+- 문서에 있는 것: 근거를 찾아 답하고, 필요하면 원문 표현을 쪽수와 함께 인용한다.
+- 문서 밖의 일반 지식(용어의 뜻, 배경, 통상적인 방법 등): 알고 있으면 그냥 자신 있게 설명한다.
+  "문서에는 없지만" 정도만 한 번 밝히면 되고, 그걸 추측이라 부르지 않는다. 문서에서 근거를
+  찾지 못했다고 설명을 줄이지 않는다 — 묻는 쪽이 알고 싶은 건 그 뜻이지 그게 몇 쪽에 있는지가 아니다.
+- 정말 확실하지 않은 것: 그때만 추측이라고 밝힌다.
+
+짧고 정확하게. 인사말·마무리 인사 없이 바로 답하고, 답이 끝나면 그대로 끝낸다 —
+"더 궁금한 점 있으신가요", "계속 볼까요" 같은 권유로 맺지 않는다.
 ${FMT_RICH}`;
 
 /* ── 이름 정리 프롬프트 ──
@@ -2611,17 +2619,44 @@ export default function VerbatimReader() {
     const qMsg = s?.msgs[idx - 1];
     if (!s || !qMsg) return;
 
+    /* 폰이 그림을 한 번 얹으면 그 뒤 모든 질문에 같은 그림이 다시 붙는다(Remote.jsx 의
+       sess.img). 그걸 그대로 실어 보내면 서버가 매번 비전 체인으로 돌려서, 폰에서 고른
+       모델이 무엇이든 gemma 가 답한다 — 실사용 로그에서 Nemotron 을 골라 놓고 네 턴 내내
+       gemma 가 답한 게 이것이다. 아이패드 쪽(sendAsk)과 똑같이 처리한다: gemma 는 한 번
+       옮겨 적기만 하고, 그 글을 세션에 박아 두고, 답은 늘 고른 모델이 한다.
+       imgDescFor 에 어느 그림의 설명인지 함께 적어 둔다 — 폰이 새 그림으로 갈아 끼우면
+       id 가 달라지므로 따로 지울 필요 없이 저절로 다시 옮겨 적는다. */
     let image = "";
+    let figBlock = "";
     if (qMsg.img) {
-      try {
-        const blob = await fetch(`/api/remote/sessions/${sid}/image/${qMsg.img}`).then((r) => r.blob());
-        image = await new Promise((res, rej) => {
-          const fr = new FileReader();
-          fr.onload = () => res(String(fr.result).split(",")[1] || "");
-          fr.onerror = rej;
-          fr.readAsDataURL(blob);
-        });
-      } catch {}
+      if (s.imgDesc && s.imgDescFor === qMsg.img) {
+        figBlock = `\n\n${FIG_NOTE}\n${s.imgDesc}`;
+      } else {
+        try {
+          const blob = await fetch(`/api/remote/sessions/${sid}/image/${qMsg.img}`).then((r) => r.blob());
+          image = await new Promise((res, rej) => {
+            const fr = new FileReader();
+            fr.onload = () => res(String(fr.result).split(",")[1] || "");
+            fr.onerror = rej;
+            fr.readAsDataURL(blob);
+          });
+        } catch {}
+        if (image) {
+          try {
+            let desc = "";
+            await ask(SYS_CAP_DESCRIBE, `[${curRef.current}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
+              (c) => { desc += c; }, undefined, { image });
+            if (desc.trim()) {
+              figBlock = `\n\n${FIG_NOTE}\n${desc.trim()}`;
+              image = ""; // 설명이 있으면 원본은 안 보낸다 — 고른 모델이 답해야 한다
+              await fetch(`/api/remote/sessions/${sid}`, {
+                method: "PATCH", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ patch: { imgDesc: desc.trim(), imgDescFor: qMsg.img } }),
+              }).catch(() => {});
+            }
+          } catch { /* 옮겨적기가 실패하면 예전처럼 원본 그림을 실어 보낸다 */ }
+        }
+      }
     }
 
     // 답이 이미 있는 지난 문답만 history 로 — 지금 채우려는 자리(idx) 자체는 뺀다.
@@ -2631,7 +2666,8 @@ export default function VerbatimReader() {
     const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP);
     const sys =
       `${SYS_ASK}\n\n[문서: ${docNameRef.current || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
-      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}`;
+      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}` +
+      figBlock;
     let buf = "";
     let cut = false;
     try {
