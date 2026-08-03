@@ -502,6 +502,7 @@ export default function VerbatimReader() {
   /* ── 리디자인(design_handoff_yeobaek_ai_panel, 채택안 4a) 상태 ──
      테마·패널모드는 기기에 저장한다(cfg 와 같은 persist 에 얹는다). */
   const [theme, setTheme] = useState("dark");           // "dark" | "light"
+  const [invert, setInvert] = useState(false);          // 야간 반전 — 페이지(캔버스+텍스트레이어)만 filter:invert
   const [panelMode, setPanelMode] = useState("panel");  // "panel" | "card"
   const [sessMenuOpen, setSessMenuOpen] = useState(false);
   const [mdlMenuOpen, setMdlMenuOpen] = useState(false);
@@ -551,8 +552,10 @@ export default function VerbatimReader() {
 
   /* 설정 저장 / 복원 */
   const themeRef = useRef(theme);
+  const invertRef = useRef(invert);
   const panelModeRef = useRef(panelMode);
   useEffect(() => { themeRef.current = theme; }, [theme]);
+  useEffect(() => { invertRef.current = invert; }, [invert]);
   useEffect(() => { panelModeRef.current = panelMode; }, [panelMode]);
 
   /* 리모트 모드용 거울 ref — SSE 리스너는 remoteOn 이 켜질 때 한 번 붙고 오래 살아남으므로,
@@ -572,6 +575,7 @@ export default function VerbatimReader() {
       if (s.cfg) setCfg((c) => ({ ...c, ...s.cfg }));
       if (s.zoom) zoomRef.current = s.zoom;
       if (s.theme === "light" || s.theme === "dark") setTheme(s.theme);
+      if (typeof s.invert === "boolean") setInvert(s.invert);
       if (s.panelMode === "panel" || s.panelMode === "card") setPanelMode(s.panelMode);
       if (typeof s.penCapture === "boolean") setPenCapture(s.penCapture);
     } catch {}
@@ -582,7 +586,7 @@ export default function VerbatimReader() {
         "yeobaek",
         JSON.stringify({
           cfg: cfgRef.current, zoom: zoomRef.current,
-          theme: themeRef.current, panelMode: panelModeRef.current,
+          theme: themeRef.current, invert: invertRef.current, panelMode: panelModeRef.current,
           penCapture: penCaptureRef.current,
         })
       );
@@ -3546,6 +3550,15 @@ export default function VerbatimReader() {
           }} aria-label="테마 전환">
           {theme === "dark" ? "☀" : "☾"}
         </button>
+        {numPages > 0 && (
+          <button className={"vb-tool" + (invert ? " on" : "")}
+            onClick={() => {
+              const v = !invert;
+              setInvert(v); invertRef.current = v; persist();
+            }} aria-label="야간 반전" title="야간 반전 — 페이지 색만 뒤집는다">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 3a9 9 0 010 18z" fill="currentColor" stroke="none" /></svg>
+          </button>
+        )}
         <div className="vb-vsep" />
         {wide && (
           <div className="vb-seg2" role="group" aria-label="패널·카드 배치">
@@ -3625,7 +3638,7 @@ export default function VerbatimReader() {
         <div className={"vb-scrim" + (outOpen && !wide ? " on" : "")} onClick={() => setOutOpen(false)} />
 
         <div className={"vb-view" + (wide && sheetOpen && panelMode === "panel" ? " shr" : "")} ref={viewRef}>
-          <div className="vb-pages" ref={stageRef} />
+          <div className={"vb-pages" + (invert ? " inv" : "")} ref={stageRef} />
         </div>
 
         {zoomPill && <div className="vb-zoompill">{zoomPill}</div>}
