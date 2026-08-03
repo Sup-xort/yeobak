@@ -709,11 +709,15 @@ export default function VerbatimReader() {
 
   const sess = useMemo(() => sessions.find((s) => s.id === curSess) || null, [sessions, curSess]);
   const askLog = sess ? sess.msgs : [];
-  /* 세션을 옮길 때마다 "그림 함께 보내기" 기본값을 그 세션에 맞춘다.
-     그림을 옮겨 적어 둔 캡처(imgDesc)면 켠다 — 켜져 있어야 그 설명이 후속 질문에 얹힌다.
-     vision 은 옛 세션 호환용이다: 예전에 비전 모델이 직접 풀던 캡처만 그 표시를 갖는데,
-     그런 세션은 설명이 없으니 지금도 원본 이미지를 그대로 보낸다(sendAsk 참고). */
-  useEffect(() => { setSendFig(!!(sess?.img && (sess?.vision || sess?.imgDesc))); }, [curSess, sess?.vision, sess?.imgDesc]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* "그림 함께 보내기" 기본값은 세션을 옮길 때만 다시 잡는다. 켜는 건 그림을 질문에 딸려
+     보내야 하는 세션(fig)뿐이다 — "해석"은 그 자리에서 끝나고 번역문이 이미 지난 문답에
+     남으므로 후속 질문에 그림을 다시 붙이지 않는다.
+     imgDesc 가 채워질 때 이 effect 가 같이 돌면 안 된다: 오려낸 직후엔 설명이 아직 비어
+     있어서, 방금 켠 것(runCaptureAsk 의 setSendFig(true))을 이 effect 가 곧바로 되돌려
+     칩이 사라지고 그림 없이 질문이 나갔다. 설명이 늦게 와도 sendAsk 가 그때그때 골라
+     쓰므로(있으면 설명, 없으면 원본 이미지) 여기서 다시 손댈 이유가 없다.
+     vision 은 옛 세션 호환용 — 예전에 비전 모델이 직접 풀던 캡처만 그 표시를 갖는다. */
+  useEffect(() => { setSendFig(!!(sess?.img && (sess?.fig || sess?.vision))); }, [curSess]); // eslint-disable-line react-hooks/exhaustive-deps
 
   /* ───────── 모델 상태와 중단 ─────────
      NIM 은 자주 식고(실측 콜드스타트 52초), 드물게는 연결만 붙은 채 아무것도 보내지 않는다.
@@ -3009,8 +3013,9 @@ export default function VerbatimReader() {
     const continueSid = capContinueRef.current;
     const target = continueSid && findSess(continueSid);
     const title = `${shot.page}쪽 질문`;
-    const sid = target ? target.id : newSess(title, { img: b64 });
-    if (target) patchSess(sid, { img: b64, imgDesc: "" }); // 새 그림이 오면 옛 설명은 비운다
+    // fig: 이 세션의 질문에는 그림(또는 그 설명)을 딸려 보낸다는 표시 — 위 sendFig effect 참고
+    const sid = target ? target.id : newSess(title, { img: b64, fig: true });
+    if (target) patchSess(sid, { img: b64, imgDesc: "", fig: true }); // 새 그림이 오면 옛 설명은 비운다
     setSendFig(true);
     mirrorCaptureToRemote(sid, target ? target.title : title, shot.url);
     setCapBusy("");
@@ -3051,8 +3056,10 @@ export default function VerbatimReader() {
     const label = kind === "solve" ? "문제풀이" : "해석";
 
     /* 캡처는 늘 새 세션에서 시작한다. 앞의 대화와 섞이면 모델이 다른 문제의 조건을
-       끌어다 쓴다. 오려낸 그림(b64)은 세션에 남겨 둔다 — 후속 질문에서 다시 붙일 수 있게. */
-    const sid = newSess(`${shot.page}쪽 ${label}`, { img: b64 });
+       끌어다 쓴다. 오려낸 그림(b64)은 세션에 남겨 둔다 — 후속 질문에서 다시 붙일 수 있게.
+       fig 는 문제풀이만 켠다: 후속 질문("이 단계 왜 이래?")이 문제를 다시 봐야 하기 때문이다.
+       해석은 번역문이 이미 지난 문답에 남아 그림을 다시 붙일 이유가 없다. */
+    const sid = newSess(`${shot.page}쪽 ${label}`, { img: b64, fig: kind === "solve" });
     const idx = 1; // 방금 연 세션이라 [me, ai] 중 ai 는 1번
     addMsgs(sid, [
       {
