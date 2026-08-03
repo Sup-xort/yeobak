@@ -940,7 +940,10 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   res.setHeader("X-Model", usedModel);
   // 고른 모델이 답하지 못해 다른 모델이 대신 답할 때, 원래 고른 쪽을 알려 준다.
   // 이걸 안 알려 주면 "드롭다운을 바꿔도 늘 같은 모델이 답한다"로만 보인다.
-  if (ask && usedModel && usedModel !== picked) res.setHeader("X-Wanted", picked);
+  // image 가 있을 땐 비교하지 않는다 — 그때는 chain 자체가 처음부터 VISION_CHAIN 이라
+  // picked(텍스트 모델)는 애초에 시도된 적이 없다. 비교하면 "무엇을 골랐든" 비전 모델이
+  // 아니기만 하면 매번 "붐벼서 대신 답했다"는 거짓 배지가 뜬다(회로도 후속 질문마다 재현됨).
+  if (ask && !image && usedModel && usedModel !== picked) res.setHeader("X-Wanted", picked);
   res.setHeader("Access-Control-Expose-Headers", "X-Engine, X-Model, X-Wanted");
   res.setHeader("X-Accel-Buffering", "no"); // nginx 앞단 버퍼링 방지
   res.flushHeaders();
