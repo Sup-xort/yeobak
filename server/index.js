@@ -14,10 +14,24 @@ const PORT = Number(process.env.PORT || 8787);
 const APP_PASSWORD = process.env.APP_PASSWORD || "";
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const NIM_KEY = process.env.NIM_API_KEY || "";
-const NIM_MODEL = process.env.NIM_MODEL || "meta/llama-3.3-70b-instruct";
+const NIM_MODEL = process.env.NIM_MODEL || "z-ai/glm-5.3-flash";
 const NIM_BASE = process.env.NIM_BASE_URL || "https://integrate.api.nvidia.com/v1";
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
+
+/* 단어·문장 탭과 영역 캡처는 Gemini 를 먼저 부르고, NIM 은 그게 실패할 때만 쓴다.
+   2026-09-18 에 뒤집었다. 그날 NIM 은 gpt-oss-120b(당시 NIM_MODEL)·deepseek-v4-pro·
+   llama-3.3-70b 가 전부 410(수명 종료)였고, 살아 있는 모델도 같은 단어 프롬프트에 첫 글자까지
+   7~66초, 비전 모델(gemma-4·llama-3.2-90b)은 60초 넘게 헤더조차 안 보냈다.
+   gemini-3.5-flash-lite 는 같은 프롬프트에 꾸준히 2초. NIM 이 다시 빨라지면
+   TAP_ENGINE=nim 으로 원래 순서(NIM → Gemini)로 돌릴 수 있다. */
+const TAP_GEMINI_FIRST = (process.env.TAP_ENGINE || "gemini") !== "nim";
+
+/* NIM 한 번의 시도가 응답 헤더를 받기까지 기다리는 상한. 넘기면 다음 모델로 넘어간다.
+   전체 상한(90/180초)만 있을 땐 멈춘 모델 하나가 그 시간을 혼자 다 써서, 폴백은 시도도
+   못 하고 "전부 실패"로 끝났다(2026-09-18 gemma 캡처). 헤더가 온 뒤의 스트림에는 걸지 않는다 —
+   속생각이 긴 모델은 헤더는 금방 오고 글자가 늦게 온다. */
+const NIM_CONNECT_MS = 25_000;
 
 /* 질문 탭 전용 모델 목록.
    단어·문장 탭은 첫 토큰 속도가 생명이라 NIM_MODEL 을 그대로 쓰고,
@@ -31,17 +45,19 @@ const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.0-flash";
    빠르기는 순위(빠름/보통/느림)로만 남긴다 — 순위는 절대 초보다 훨씬 오래 간다.
    think: true 는 reasoning_content(속생각)를 실제로 흘리는 걸 스트리밍으로 확인한 모델이다 —
    클라이언트 드롭다운이 이 값으로 "추론 모델"/"일반 모델"을 가른다. */
+/* id 가 "gemini/" 로 시작하면 NIM 이 아니라 Gemini 로 부른다(뒷부분이 Gemini 모델 이름).
+   2026-09-18 정리: deepseek-v4-pro·v4-flash·minimax-m3·gpt-oss-120b·mistral-medium-3.5·
+   llama-3.3-70b 는 NIM 에서 410(수명 종료) 또는 404 라 뺐다. */
 const ASK_MODELS = [
-  { id: "deepseek-ai/deepseek-v4-pro",           label: "DeepSeek V4 Pro",        think: false, note: "이 목록에서 가장 촘촘하다. 표와 수식으로 단계를 하나도 안 건너뛰고 펼친다. 그만큼 끝까지 오래 걸리고 답 길이 편차도 커서, 길게 읽을 각오가 섰을 때 고른다." },
-  { id: "deepseek-ai/deepseek-v4-flash",         label: "DeepSeek V4 Flash",      think: true,  note: "균형이 가장 좋다. Pro보다 얕지만 표와 수식은 그대로 갖춰 쓰면서 훨씬 빨리 끝난다. 짧게 여러 번 되물으며 공부할 때 제일 낫다." },
+  { id: "gemini/gemini-3.5-flash",               label: "Gemini 3.5 Flash",       think: false, note: "Google 쪽 모델이라 NIM 이 붐비거나 느려도 영향을 안 받는다. 속생각을 보여 주지 않고 조용히 생각한 뒤 한 번에 쓴다. 굵은 글씨와 소제목으로 구조를 잘 잡는다." },
+  { id: "deepseek-ai/deepseek-v4-flash-0731",    label: "DeepSeek V4 Flash",      think: true,  note: "표와 수식을 갖춰 쓰는 촘촘한 편. 속생각이 먼저 흐르고 답이 나온다." },
   { id: "nvidia/nemotron-3-super-120b-a12b",     label: "Nemotron 3 Super 120B",  think: true,  note: "표를 가장 많이 쓴다 — 정리된 표로 받고 싶을 때. 설명량은 Pro급인데 더 빨리 끝난다. 대신 답이 시작되기 전 속생각이 한참 흐르니, 화면이 비어 있어도 멈춘 게 아니다." },
-  { id: "minimaxai/minimax-m3",                  label: "MiniMax M3",             think: false, note: "이 목록에서 가장 느리다. 답이 시작되기까지 오래 걸려 서버의 90초 상한에 걸리는 일이 잦다 — 짧은 질문에만." },
-  { id: "openai/gpt-oss-120b",                   label: "GPT-OSS 120B",           think: true,  note: "단어·문장 탭과 같은 모델이라 늘 데워져 있어 대체로 제일 빠르다. 다만 수식을 가끔 \\[ \\] 로 써서 화면에 날것으로 보일 수 있다 — 이 앱은 $…$ 를 그린다." },
-  { id: "mistralai/mistral-medium-3.5-128b",     label: "Mistral Medium 3.5",     think: false, note: "표 없이 줄글로 차분하게 쓴다. 문장이 깔끔하고 다국어에 강해 번역 섞인 질문에 어울린다. 대신 정보량은 이 목록에서 적은 편." },
-  { id: "meta/llama-3.3-70b-instruct",           label: "Llama 3.3 70B",          think: false, note: "단어·문장 탭이 쓰는 바로 그 모델. 짧고 담백하게 답하고 표는 거의 안 쓴다. 긴 설명이 필요한 질문에는 다른 모델이 낫다." },
+  { id: "nvidia/nemotron-3-ultra-550b-a55b",     label: "Nemotron 3 Ultra 550B",  think: true,  note: "Super 의 큰 형. 뜻풀이에 한 줄 풀이를 덧붙이는 등 조금 더 친절하게 쓴다. 대신 가장 무거워 느린 편." },
+  { id: "z-ai/glm-5.3-flash",                    label: "GLM 5.3 Flash",          think: true,  note: "형식 지시를 잘 지키고 짧게 끝낸다. Gemini 가 실패할 때 단어·문장 탭이 넘어가는 NIM 모델이기도 하다." },
 ];
+const isGeminiId = (id) => String(id).startsWith("gemini/");
 const ASK_MODEL_IDS = new Set(ASK_MODELS.map((m) => m.id));
-const NIM_ASK_MODEL = process.env.NIM_ASK_MODEL || "deepseek-ai/deepseek-v4-pro";
+const NIM_ASK_MODEL = process.env.NIM_ASK_MODEL || "gemini/gemini-3.5-flash";
 
 /* 영역 캡처(이미지)를 읽는 비전 모델. ASK_MODELS 는 전부 텍스트 전용이라 이미지를 못 받는다.
    2026-07-30 에 실제 이미지를 던져 실측한 결과(표지 썸네일, 한국어 프롬프트):
@@ -237,7 +253,7 @@ async function probe(id) {
 function refreshStale() {
   if (!NIM_KEY) return;
   for (const m of ASK_MODELS)
-    if (Date.now() - (health.get(m.id)?.at || 0) > HEALTH_TTL) probe(m.id);
+    if (!isGeminiId(m.id) && Date.now() - (health.get(m.id)?.at || 0) > HEALTH_TTL) probe(m.id);
 }
 
 /* 질문 탭에서 고를 수 있는 모델 목록 + 저장된 상태값.
@@ -760,10 +776,10 @@ async function callNIM({ system, user, image, history = [], maxTokens, signal, m
   return res; // 이미 OpenAI 형식 SSE — 그대로 통과시킨다
 }
 
-async function callGemini({ system, user, image, history = [], maxTokens, signal }) {
+async function callGemini({ system, user, image, history = [], maxTokens, signal, model = GEMINI_MODEL }) {
   if (!GEMINI_KEY) throw new Error("Gemini 키 없음");
   const url =
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(GEMINI_MODEL)}` +
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}` +
     `:streamGenerateContent?alt=sse`;
   const parts = [{ text: user }];
   if (image) parts.push({ inlineData: { mimeType: "image/jpeg", data: image } });
@@ -783,7 +799,9 @@ async function callGemini({ system, user, image, history = [], maxTokens, signal
   });
   if (!res.ok) {
     const d = await res.text().catch(() => "");
-    throw new Error(`Gemini ${res.status}${d ? ": " + d.slice(0, 200) : ""}`);
+    const e = new Error(`Gemini(${model}) ${res.status}${d ? ": " + d.slice(0, 200) : ""}`);
+    e.status = res.status;
+    throw e;
   }
   return res;
 }
@@ -868,15 +886,40 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   // 이 체인에는 NIM_MODEL 이 없으므로, 비전 모델이 죽어도 서킷 브레이커가 돌지 않는다
   // (= 단어·문장 탭이 3분간 Gemini 로 끌려가는 일이 없다).
   const picked = ask ? (ASK_MODEL_IDS.has(model) ? model : NIM_ASK_MODEL) : NIM_MODEL;
+  // 질문 탭에서 Gemini 를 골랐으면 그 모델로, 단어·문장 탭·영역 캡처는 GEMINI_MODEL 로
+  // 먼저 부른다(TAP_GEMINI_FIRST 참고). 실패하면 아래 NIM 체인으로 내려간다.
+  const askGemini = ask && !image && isGeminiId(picked);
+  const geminiFirst = !!GEMINI_KEY && (askGemini || (TAP_GEMINI_FIRST && (!ask || image)));
   const chain = image
     ? VISION_CHAIN
-    : picked === NIM_MODEL ? [NIM_MODEL] : [picked, NIM_MODEL];
+    : picked === NIM_MODEL || askGemini ? [NIM_MODEL] : [picked, NIM_MODEL];
 
   let upstream = null;
   let engine = "";
   let usedModel = "";
   let connT0 = 0; // 성공한 시도의 시작 시각 — 실제 첫 글자 도착까지 걸린 시간을 재는 데 쓴다(아래)
-  const tryNIM = !forceGemini && NIM_KEY && Date.now() > nimDownUntil;
+  if (geminiFirst) {
+    // Gemini 도 붐비면 503 을 낸다(3.5-flash 에서 실제로 봤다). 그럴 땐 NIM(첫 글자 수십 초)으로
+    // 내려가기 전에 가벼운 Gemini 모델을 한 번 더 거친다.
+    const gms = [askGemini ? picked.slice("gemini/".length) : GEMINI_MODEL, GEMINI_MODEL, "gemini-flash-lite-latest"]
+      .filter((m, i, a) => a.indexOf(m) === i);
+    for (const gm of gms) {
+      const t0 = Date.now();
+      try {
+        upstream = await callGemini({ ...args, model: gm });
+        engine = "Gemini";
+        usedModel = askGemini && gm === gms[0] ? picked : gm;
+        if (askGemini && gm === gms[0]) markHealth(picked, true, 200, Date.now() - t0);
+        break;
+      } catch (e) {
+        if (ac.signal.aborted) return;
+        if (askGemini && gm === gms[0]) markHealth(picked, false, e.status || 0, Date.now() - t0);
+        console.warn(`[여백] Gemini(${gm}) 실패:`, e.message.slice(0, 120));
+        if (signal.aborted) break;
+      }
+    }
+  }
+  const tryNIM = !upstream && !forceGemini && NIM_KEY && Date.now() > nimDownUntil;
 
   if (tryNIM) {
     outer:
@@ -887,8 +930,12 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       const tries = m === picked ? 3 : 1;
       for (let i = 0; i < tries; i++) {
         const t0 = Date.now();
+        // 헤더가 NIM_CONNECT_MS 안에 안 오면 이 시도만 끊고 다음 모델로 — 헤더가 오면 타이머를 푼다.
+        const cc = new AbortController();
+        const ct = setTimeout(() => cc.abort(new Error(`헤더 ${NIM_CONNECT_MS / 1000}초 무응답`)), NIM_CONNECT_MS);
         try {
-          upstream = await callNIM({ ...args, model: m });
+          upstream = await callNIM({ ...args, model: m, signal: AbortSignal.any([signal, cc.signal]) });
+          clearTimeout(ct);
           engine = "NIM";
           usedModel = m;
           // 여기서 바로 markHealth 를 찍지 않는다 — fetch 는 응답 헤더만 오면 resolve 되므로
@@ -899,6 +946,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
           connT0 = t0;
           break outer;
         } catch (e) {
+          clearTimeout(ct);
           // 클라이언트가 떠났을 때만 조용히 끝낸다 — 응답을 기다리는 상대가 없다.
           // 90초 상한(signal)은 여기 넣으면 안 된다. 그건 클라이언트가 아직 기다리는 중이라
           // 아무것도 안 보내고 return 하면 탭이 영영 멈춘다.
@@ -921,7 +969,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       }
     }
   }
-  if (!upstream) {
+  if (!upstream && !geminiFirst) {
     try {
       upstream = await callGemini(args);
       engine = "Gemini";
@@ -931,6 +979,11 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       console.error("[여백] 전부 실패:", e.message);
       return res.status(502).json({ error: e.message });
     }
+  }
+  if (!upstream) {
+    // Gemini 를 먼저 불렀고 NIM 까지 실패했거나, NIM 이 서킷 브레이커로 쉬는 중이었다.
+    console.error("[여백] 전부 실패 (Gemini → NIM)");
+    return res.status(502).json({ error: "Gemini 와 NIM 이 모두 응답하지 않았습니다." });
   }
 
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
