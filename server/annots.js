@@ -14,7 +14,7 @@
    pdf-lib 에 주석 고수준 API 가 없어서 buildOutlinePdf(index.js) 처럼 PDFContext 로 직접 조립한다. */
 import { PDFDocument, PDFName, PDFArray, PDFDict, PDFNumber, PDFHexString, PDFString, PDFRef } from "pdf-lib";
 import {
-  viewportMatrix, applyM, invertM, hexToRgb, rgbToHex, tidyPts, HL_ALPHA,
+  curve, viewportMatrix, applyM, invertM, hexToRgb, rgbToHex, tidyPts, HL_ALPHA,
 } from "../src/ink.js";
 
 const num = (o) => (o instanceof PDFNumber ? o.asNumber() : Number.NaN);
@@ -189,11 +189,19 @@ export async function exportWithAnnots(bytes, data) {
         res.ExtGState = { GS0: hlGs(alpha) };
         body += "/GS0 gs\n";
       }
-      // 화면(drawStroke)과 같은 모양: 고정 굵기, 펜은 둥근 캡, 형광펜은 평평한 캡
+      // 화면(drawStroke)과 같은 모양: 고정 굵기, 펜은 둥근 캡, 형광펜은 평평한 캡, 같은 곡선 보정
       body += `${c4} RG ${f2(s.w)} w ${hl ? 0 : 1} J 1 j\n`;
-      body += `${f2(center[0][0])} ${f2(center[0][1])} m\n`;
-      if (center.length === 1) body += `${f2(center[0][0] + 0.01)} ${f2(center[0][1])} l\n`;
-      for (let k = 1; k < center.length; k++) body += `${f2(center[k][0])} ${f2(center[k][1])} l\n`;
+      // 곡선도 화면과 같은 curve()(src/ink.js "필기 보정") — 2차 베지에를 PDF 의 3차 c 로 바꿔 쓴다
+      const cv = curve(s.pts);
+      const P = (x, y) => U(x, y).map(f2).join(" ");
+      let [px, py] = cv.m;
+      body += `${P(px, py)} m\n`;
+      if (!cv.l) body += `${P(px + 0.01, py)} l\n`;
+      for (const [qx, qy, ex, ey] of cv.q) {
+        body += `${P(px + (2 / 3) * (qx - px), py + (2 / 3) * (qy - py))} ${P(ex + (2 / 3) * (qx - ex), ey + (2 / 3) * (qy - ey))} ${P(ex, ey)} c\n`;
+        px = ex; py = ey;
+      }
+      if (cv.l) body += `${P(cv.l[0], cv.l[1])} l\n`;
       body += "S\n";
       // BBox 를 Rect 와 똑같이 두면 외관 → Rect 사상이 항등이라 본문을 사용자 공간 좌표 그대로 쓸 수 있다
       const ap = ctx.register(ctx.flateStream(body, {

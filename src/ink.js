@@ -3,19 +3,45 @@
    만들려고). 그래서 여기엔 DOM·window 를 쓰는 코드를 넣지 않는다.
 
    획(stroke) 모양: {id, t:"pen"|"hl", c:"#rrggbb", w, a?, pts:[[x,y],…]}
+   - pts 는 펜 샘플 그대로다. 그릴 때만 curve() 로 다듬는다(아래 "필기 보정").
    - 좌표는 **그 쪽의 배율 1 뷰포트 단위**(pdf.js page.getViewport({scale:1}), 좌상단 원점,
      /Rotate 반영). 그래서 줌·relayout 과 무관하게 저장된다.
-   - 필압은 쓰지 않는다(2026-09-23 사용자 요청으로 뺐다) — 모든 획은 고정 굵기 둥근 캡 폴리라인.
+   - 필압은 쓰지 않는다(2026-09-23 사용자 요청으로 뺐다) — 모든 획은 고정 굵기 둥근 캡.
      굿노트가 내보내는 /Ink 도 필압 없는 고정 굵기라 가져온 획과 모양이 같다.
      예전에 저장된 획에 pr·세 번째 좌표가 남아 있어도 무시하고 그린다.
    - w 는 pt(배율 1 단위) 굵기, a 는 불투명도(형광펜 기본 HL_ALPHA). */
 
 export const HL_ALPHA = 0.35;
 
+/* ── 필기 보정(부드럽게 잇기) ──
+   펜 샘플을 직선으로만 이으면 "짧은 직선 여러 개를 엮어 놓은" 것처럼 모가 난다(2026-09-23 실기기).
+   그래서 저장은 원래 점 그대로 두고, **그릴 때만** 두 단계로 다듬는다 — 화면(캔버스·SVG)과
+   내보내기(PDF 외관)가 전부 이 함수 하나를 거치므로 모양이 어디서나 같다.
+   1) 이웃 점과 1:2:1 가중 평균 — 손떨림·샘플 지글거림을 걷어낸다(양 끝점은 그대로).
+   2) 점과 점의 중점을 잇는 2차 베지에 — 꺾이는 곳 없이 매끈한 곡선이 되고, 원래 점 근처를 지난다.
+   반환: {m:[x,y], q:[[cx,cy,ex,ey],…], l:[x,y]|null} — moveTo, quadraticCurveTo 들, 마지막 lineTo. */
+export function curve(pts) {
+  let p = pts;
+  const n = p.length;
+  if (n >= 3) {
+    const o = [p[0]];
+    for (let i = 1; i < n - 1; i++)
+      o.push([(p[i - 1][0] + 2 * p[i][0] + p[i + 1][0]) / 4, (p[i - 1][1] + 2 * p[i][1] + p[i + 1][1]) / 4]);
+    o.push(p[n - 1]);
+    p = o;
+  }
+  const q = [];
+  if (n < 3) return { m: p[0], q, l: n === 2 ? p[1] : null };
+  for (let i = 1; i < n - 1; i++)
+    q.push([p[i][0], p[i][1], (p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2]);
+  return { m: p[0], q, l: p[n - 1] };
+}
+
 /* 캔버스에 획 하나를 그린다. k = 배율 1 → 캔버스 픽셀. (ox, oy) 는 캔버스 픽셀 원점 이동. */
 export function drawStroke(ctx, s, k, ox = 0, oy = 0) {
-  const pts = s.pts;
-  if (!pts.length) return;
+  if (!s.pts.length) return;
+  const c = curve(s.pts);
+  const X = (v) => v * k + ox, Y = (v) => v * k + oy;
   ctx.save();
   ctx.globalAlpha = s.t === "hl" ? (s.a ?? HL_ALPHA) : (s.a ?? 1);
   ctx.strokeStyle = s.c;
@@ -23,9 +49,10 @@ export function drawStroke(ctx, s, k, ox = 0, oy = 0) {
   ctx.lineCap = s.t === "hl" ? "butt" : "round";
   ctx.lineJoin = "round";
   ctx.beginPath();
-  ctx.moveTo(pts[0][0] * k + ox, pts[0][1] * k + oy);
-  if (pts.length === 1) ctx.lineTo(pts[0][0] * k + ox + 0.01, pts[0][1] * k + oy);
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * k + ox, pts[i][1] * k + oy);
+  ctx.moveTo(X(c.m[0]), Y(c.m[1]));
+  if (!c.l) ctx.lineTo(X(c.m[0]) + 0.01, Y(c.m[1]));
+  for (const [cx, cy, ex, ey] of c.q) ctx.quadraticCurveTo(X(cx), Y(cy), X(ex), Y(ey));
+  if (c.l) ctx.lineTo(X(c.l[0]), Y(c.l[1]));
   ctx.stroke();
   ctx.restore();
 }
@@ -165,11 +192,12 @@ export const rgbToHex = (rgb) =>
 /* 획 → SVG path d (배율 1 단위). 쪽 위의 필기는 SVG 로 그린다 — 벡터라 어느 배율에서도 선명하고,
    캔버스처럼 쪽마다 수백만 픽셀을 잡아먹지 않는다(캔버스였을 땐 확대하면 pdf 캔버스와 함께 흐려졌다). */
 export function strokePath(s) {
-  const p = s.pts;
-  if (!p.length) return "";
+  if (!s.pts.length) return "";
   const f = (v) => Math.round(v * 100) / 100;
-  let d = `M${f(p[0][0])} ${f(p[0][1])}`;
-  if (p.length === 1) d += "l0.01 0";
-  for (let i = 1; i < p.length; i++) d += `L${f(p[i][0])} ${f(p[i][1])}`;
+  const c = curve(s.pts);
+  let d = `M${f(c.m[0])} ${f(c.m[1])}`;
+  if (!c.l) d += "l0.01 0";
+  for (const [cx, cy, ex, ey] of c.q) d += `Q${f(cx)} ${f(cy)} ${f(ex)} ${f(ey)}`;
+  if (c.l) d += `L${f(c.l[0])} ${f(c.l[1])}`;
   return d;
 }
