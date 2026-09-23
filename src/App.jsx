@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import "katex/dist/katex.min.css";
 import "./App.css";
 import Rich from "./rich.jsx";
+import { u } from "./paths.js";
 
 /* ───────────────────────── 설정 ───────────────────────── */
 const CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
@@ -175,7 +176,7 @@ class AuthError extends Error {
 
 /* opts.ask = true 면 서버가 질문 탭 전용 모델(opts.model 또는 서버 기본값)로 부른다. */
 async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
-  const res = await fetch("/api/chat", {
+  const res = await fetch(u("/api/chat"), {
     method: "POST", signal,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -569,6 +570,7 @@ export default function VerbatimReader() {
   const lastPageTimer = useRef(null);          // "마지막으로 읽은 쪽" 저장 디바운스 타이머
   const greetInitRef = useRef(false);          // 서재 인사말을 이미 골랐는가 (앱 로드당 한 번)
   const layoutKeyRef = useRef({ cw: 0, zoom: 0 }); // 마지막 배치에 쓴 폭·배율 — 같으면 relayout 을 건너뛴다
+  const baseRef = useRef(null);               // 1쪽의 배율 1 뷰포트 {w,h} — relayout 이 워커를 안 기다리게 재 둔다
   // 지금 하이라이트된 구간 {page, start, end, cls}. DOM 이 아니라 오프셋으로 들고 있어야
   // relayout 이 텍스트 레이어를 걷어내고 다시 그려도 하이라이트가 살아남는다.
   const markRef = useRef(null);
@@ -877,7 +879,7 @@ export default function VerbatimReader() {
   useEffect(() => {
     (async () => {
       try {
-        const r = await fetch("/api/me");
+        const r = await fetch(u("/api/me"));
         const j = await r.json();
         setAuthed(!!j.authed);
       } catch { setAuthed(false); }
@@ -889,7 +891,7 @@ export default function VerbatimReader() {
     if (authed !== true) return;
     (async () => {
       try {
-        const r = await fetch("/api/models");
+        const r = await fetch(u("/api/models"));
         if (!r.ok) return;
         const j = await r.json();
         setModels(Array.isArray(j.models) ? j.models : []);
@@ -911,7 +913,7 @@ export default function VerbatimReader() {
     if (healthReq.current) return; // 이미 받아오는 중
     healthReq.current = true;
     setHealthBusy(true);
-    fetch("/api/models")
+    fetch(u("/api/models"))
       .then((r) => (r.ok ? r.json() : null))
       .then((j) => { if (j?.health) setHealth(j.health); })
       .catch(() => {})
@@ -945,7 +947,7 @@ export default function VerbatimReader() {
 
   /* ── 서재 ── */
   const libApi = useCallback(async (url, opt) => {
-    const r = await fetch(url, opt);
+    const r = await fetch(u(url), opt);   // 서브패스 보정은 여기 한 곳에서 — paths.js 참고
     if (r.status === 401) { setAuthed(false); throw new AuthError(); }
     if (!r.ok) {
       let d = "";
@@ -982,7 +984,7 @@ export default function VerbatimReader() {
     if (!remoteOn || !curPage) return;
     clearTimeout(remotePageTimer.current);
     remotePageTimer.current = setTimeout(() => {
-      fetch("/api/remote/page", {
+      fetch(u("/api/remote/page"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ docId: curFileRef.current?.id || "", docName: docNameRef.current, page: curRef.current }),
       }).catch(() => {});
@@ -999,7 +1001,7 @@ export default function VerbatimReader() {
       const id = curFileRef.current?.id;
       if (!id || !curRef.current) return;
       try {
-        fetch("/api/library/file/" + id, {
+        fetch(u("/api/library/file/") + id, {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ lastPage: curRef.current }),
@@ -1080,7 +1082,7 @@ export default function VerbatimReader() {
   const uploadPDF = (buf, name, folder) =>
     new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", `/api/library/upload?name=${encodeURIComponent(name)}&folder=${encodeURIComponent(folder)}`);
+      xhr.open("POST", u(`/api/library/upload?name=${encodeURIComponent(name)}&folder=${encodeURIComponent(folder)}`));
       xhr.setRequestHeader("Content-Type", "application/pdf");
       xhr.upload.onprogress = (e) => {
         if (e.lengthComputable) setUpProg({ name, pct: Math.round((e.loaded / e.total) * 100) });
@@ -1099,6 +1101,40 @@ export default function VerbatimReader() {
       xhr.onerror = () => { setUpProg(null); reject(new Error("네트워크 오류")); };
       setUpProg({ name, pct: 0 });
       xhr.send(buf);
+    });
+
+  /* 서재에서 책을 열 때 26MB 짜리를 통째로 받는 동안 화면이 아무 말 없이 멎어 있었다 —
+     툴바의 "여는 중…"(busy)은 서재가 떠 있는 동안엔 툴바 자체가 안 그려져서 안 보인다.
+     fetch 는 진행률을 못 주므로 업로드와 같은 이유로 XMLHttpRequest 를 쓰고,
+     막대는 업로드가 쓰던 .vb-uppill 을 그대로 재사용한다(z-index 34 > 서재 32).
+     xhr.open 은 libApi 를 안 타므로 서브패스 보정 u() 를 직접 걸어야 한다(paths.js). */
+  const fetchPDF = (id, name) =>
+    new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("GET", u("/api/library/file/" + id));
+      xhr.responseType = "arraybuffer";
+      xhr.onprogress = (e) => {
+        // Content-Length 가 없으면(프록시가 청크로 흘리는 경우) 퍼센트 대신 받은 양을 보여준다
+        setUpProg(e.lengthComputable
+          ? { name, what: "받는 중", pct: Math.round((e.loaded / e.total) * 100) }
+          : { name, what: "받는 중", pct: null, loaded: e.loaded });
+      };
+      xhr.onload = () => {
+        if (xhr.status === 401) { setUpProg(null); setAuthed(false); reject(new AuthError()); return; }
+        if (xhr.status < 200 || xhr.status >= 300) {
+          setUpProg(null);
+          reject(new Error("요청 실패 " + xhr.status));
+          return;
+        }
+        /* 다 받았다고 끝이 아니다 — pdf.js 가 813쪽을 파싱하고 buildPages 가 페이지 상자를
+           전부 만드는 동안도 한참 멎어 있다. 막대를 채운 채 "여는 중" 으로 바꿔 두고,
+           openLibFile 의 finally 가 치운다. */
+        setUpProg({ name, what: "여는 중", pct: 100 });
+        resolve(xhr.response);
+      };
+      xhr.onerror = () => { setUpProg(null); reject(new Error("네트워크 오류")); };
+      setUpProg({ name, what: "받는 중", pct: 0 });
+      xhr.send();
     });
 
   const saveToLib = async (buf, name) => {
@@ -1146,8 +1182,7 @@ export default function VerbatimReader() {
   const openLibFile = async (f, gotoPage) => {
     try {
       setLibErr("");
-      const r = await libApi("/api/library/file/" + f.id);
-      const buf = await r.arrayBuffer();
+      const buf = await fetchPDF(f.id, f.name);
       curFileRef.current = { id: f.id, name: f.name };
       setLibOpen(false);
       await loadPDF(new Uint8Array(buf), f.name);
@@ -1164,6 +1199,8 @@ export default function VerbatimReader() {
       }).catch(() => {});
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("파일을 여는 데 실패했습니다.");
+    } finally {
+      setUpProg(null);
     }
   };
 
@@ -1694,6 +1731,7 @@ export default function VerbatimReader() {
     pagesRef.current = [];
     const cw = contentWidth();
     layoutKeyRef.current = { cw, zoom: zoomRef.current };
+    baseRef.current = { w: w1, h: h1 };
     scaleRef.current = cw / w1;
     const w = w1 * scaleRef.current * zoomRef.current;
     const h = h1 * scaleRef.current * zoomRef.current;
@@ -1940,29 +1978,51 @@ export default function VerbatimReader() {
       : { page, fx: 0.5, fy: 0, sx: x, sy: y };
   }, []);
 
-  /* anchor 가 있으면(핀치 줌) 그 지점(페이지 내 fx/fy)이 화면의 같은 자리(sx/sy)로 돌아오게 복원한다 */
-  const relayout = useCallback(async (keepPage, anchor) => {
-    const pdf = pdfRef.current;
-    if (!pdf) return;
+  /* anchor 가 있으면(핀치 줌) 그 지점(페이지 내 fx/fy)이 화면의 같은 자리(sx/sy)로 돌아오게 복원한다.
+
+     이 함수가 처음부터 끝까지 **동기**라는 게 핵심이다. 예전에는 여기서
+     `await pdf.getPage(1)` 로 1쪽 뷰포트를 다시 받아 오고, 스크롤 복원은
+     requestAnimationFrame 안에서 `scrollTop += …` 로 했다. 그 두 번의 틈 사이에
+     813쪽짜리 교과서에서 이런 일이 연달아 벌어졌다:
+       - 핀치가 끝나며 stage 의 CSS scale 은 이미 걷혔는데 페이지 상자는 아직 옛 크기라,
+         보고 있던 자리가 화면 밖으로 밀린다 → 페이지가 없는 구간이 드러나 --t-desk 가
+         그대로 보인다(흰 화면이 아니라 **검은 화면**)
+       - onStart 가 끊어 둔 IntersectionObserver 가 아직 안 붙어 아무것도 다시 안 그려진다.
+         extractAll 이 813쪽을 훑는 중이면 워커가 늦게 답해서 그 검은 화면이 길게 간다
+       - 그 사이 페이지 크기가 바뀌면 scrollHeight 가 줄고 브라우저가 scrollTop 을 끝으로
+         clamp 한다. 거기에 대고 `+=` 로 **상대** 보정을 하면 clamp 된 만큼이 그대로 오차가
+         된다 — 쪽수가 많을수록 커져서, 축소할 때 수십 쪽을 앞질러 갔다
+     그래서 (1) 1쪽 크기는 buildPages 때 baseRef 에 재 두고, (2) 목표 위치를 **절대값**으로
+     계산해 scrollTop 에 직접 대입한다. await 가 없으니 브라우저는 중간 상태를 한 프레임도
+     그리지 않는다 — 크기 변경과 스크롤 보정이 같은 페인트에 들어간다. */
+  const relayout = useCallback((keepPage, anchor) => {
+    const base = baseRef.current;
+    const view = viewRef.current;
+    if (!pdfRef.current || !base || !view) return;
     const cw = contentWidth();
     // 폭도 배율도 그대로면 아무것도 하지 않는다 — 좁은 화면에서 풀이창을 여닫을 때마다
     // 전부 다시 그리면서 페이지가 튀던 문제의 원인이 이 불필요한 재배치였다.
     if (cw === layoutKeyRef.current.cw && zoomRef.current === layoutKeyRef.current.zoom) return;
     layoutKeyRef.current = { cw, zoom: zoomRef.current };
     const keep = keepPage || curRef.current;
-    const view = viewRef.current;
-    // 페이지 맨 위로 스냅하지 않도록, 보고 있던 페이지 안의 위치(비율)를 기억해 둔다
+
+    /* 페이지의 '내용 좌표'(스크롤 콘텐츠 맨 위 기준). scrollTop 을 더해 상쇄하므로
+       브라우저가 중간에 scrollTop 을 clamp 했어도 값이 흔들리지 않는다 —
+       절대 대입을 할 수 있는 근거가 이것이다. */
+    const contentTop = (el) =>
+      el.getBoundingClientRect().top - view.getBoundingClientRect().top + view.scrollTop;
+
+    // 앵커가 없으면(풀이창 여닫기·회전 등) 페이지 맨 위로 스냅하지 않도록
+    // 보고 있던 페이지 안의 위치(비율)를 기억해 둔다
     let frac = 0;
     const prevEl = pagesRef.current[keep - 1];
-    if (view && prevEl && prevEl.offsetHeight) {
-      const top = prevEl.getBoundingClientRect().top - view.getBoundingClientRect().top + view.scrollTop;
-      frac = Math.max(0, Math.min(1, (view.scrollTop - top) / prevEl.offsetHeight));
+    if (prevEl && prevEl.offsetHeight) {
+      frac = Math.max(0, Math.min(1, (view.scrollTop - contentTop(prevEl)) / prevEl.offsetHeight));
     }
-    const p1 = await pdf.getPage(1);
-    const v1 = p1.getViewport({ scale: 1 });
-    scaleRef.current = cw / v1.width;
-    const w = v1.width * scaleRef.current * zoomRef.current;
-    const h = v1.height * scaleRef.current * zoomRef.current;
+
+    scaleRef.current = cw / base.w;
+    const w = base.w * scaleRef.current * zoomRef.current;
+    const h = base.h * scaleRef.current * zoomRef.current;
     ioRef.current?.disconnect();
     for (const el of pagesRef.current) {
       if (!el) continue;
@@ -1976,21 +2036,28 @@ export default function VerbatimReader() {
     renderedRef.current.clear();
     queueRef.current.clear();
     dataRef.current = [];
-    observe();
-    requestAnimationFrame(() => {
-      const el = pagesRef.current[keep - 1];
-      if (!el || !view) return;
+
+    /* 새 크기가 반영된 뒤(첫 getBoundingClientRect 가 레이아웃을 확정시킨다) 목표를
+       절대값으로 잡아 그대로 대입한다. `+=` 가 아니라 `=` 인 것이 요점 — 지금 scrollTop 이
+       clamp 돼 있든 말든 결과가 같다. */
+    const el = pagesRef.current[keep - 1];
+    if (el) {
+      const vr = view.getBoundingClientRect();
+      const top = contentTop(el);
+      view.scrollTop = anchor
+        ? top + anchor.fy * el.offsetHeight - (anchor.sy - vr.top)
+        : top + frac * el.offsetHeight;
       if (anchor) {
-        const r = el.getBoundingClientRect();
-        view.scrollTop += r.top + anchor.fy * r.height - anchor.sy;
-        view.scrollLeft += r.left + anchor.fx * r.width - anchor.sx;
-      } else {
-        const top = el.getBoundingClientRect().top - view.getBoundingClientRect().top + view.scrollTop;
-        view.scrollTo({ top: top + frac * el.offsetHeight, behavior: "auto" });
+        const lr = el.getBoundingClientRect();
+        view.scrollLeft = lr.left - vr.left + view.scrollLeft + anchor.fx * lr.width - (anchor.sx - vr.left);
       }
       curRef.current = keep;
       setCurPage(keep);
-    });
+    }
+    /* 관찰은 스크롤을 고친 **다음에** 붙인다. 사파리는 observe() 의 첫 보고를 0ms 타이머로
+       흘려서 rAF 보다 먼저 올 수 있는데, 먼저 붙이면 아직 안 고친 위치를 기준으로
+       pickCur 이 curRef 를 엉뚱하게 잡고 prune 이 보고 있는 페이지를 지워 버린다. */
+    observe();
   }, []);
 
   useEffect(() => {
@@ -2206,7 +2273,7 @@ export default function VerbatimReader() {
   const relay = (slot, payload) => {
     if (!remoteOnRef.current) return;
     remoteSeqRef.current[slot] += 1;
-    fetch("/api/remote/relay", {
+    fetch(u("/api/remote/relay"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ slot, seq: remoteSeqRef.current[slot], payload }),
     }).catch(() => {});
@@ -2633,7 +2700,7 @@ export default function VerbatimReader() {
         figBlock = `\n\n${FIG_NOTE}\n${s.imgDesc}`;
       } else {
         try {
-          const blob = await fetch(`/api/remote/sessions/${sid}/image/${qMsg.img}`).then((r) => r.blob());
+          const blob = await fetch(u(`/api/remote/sessions/${sid}/image/${qMsg.img}`)).then((r) => r.blob());
           image = await new Promise((res, rej) => {
             const fr = new FileReader();
             fr.onload = () => res(String(fr.result).split(",")[1] || "");
@@ -2649,7 +2716,7 @@ export default function VerbatimReader() {
             if (desc.trim()) {
               figBlock = `\n\n${FIG_NOTE}\n${desc.trim()}`;
               image = ""; // 설명이 있으면 원본은 안 보낸다 — 고른 모델이 답해야 한다
-              await fetch(`/api/remote/sessions/${sid}`, {
+              await fetch(u(`/api/remote/sessions/${sid}`), {
                 method: "PATCH", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ patch: { imgDesc: desc.trim(), imgDescFor: qMsg.img } }),
               }).catch(() => {});
@@ -2675,7 +2742,7 @@ export default function VerbatimReader() {
         ask: true, history, image,
         onPhase: (p) => { if (p === "cut") cut = true; },
       });
-      await fetch(`/api/remote/sessions/${sid}/msgs/${idx}`, {
+      await fetch(u(`/api/remote/sessions/${sid}/msgs/${idx}`), {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ patch: {
           text: buf + (cut ? "\n\n*(길이 제한에 걸려 여기서 끊겼습니다 — 이어서 물어보세요)*" : ""),
@@ -2683,7 +2750,7 @@ export default function VerbatimReader() {
         } }),
       });
     } catch (e) {
-      await fetch(`/api/remote/sessions/${sid}/msgs/${idx}`, {
+      await fetch(u(`/api/remote/sessions/${sid}/msgs/${idx}`), {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ patch: { text: buf, pending: false, err: buf ? "연결이 끊겨 여기서 멈췄습니다 — " + e.message : e.message } }),
       }).catch(() => {});
@@ -2701,7 +2768,7 @@ export default function VerbatimReader() {
      꺼져 있는 동안 폰이 물어본 것)까지 훑는다. */
   useEffect(() => {
     if (!remoteOn) return;
-    const es = new EventSource("/api/remote/stream");
+    const es = new EventSource(u("/api/remote/stream"));
     es.addEventListener("hello", (e) => {
       const d = JSON.parse(e.data);
       remoteSessRef.current = Array.isArray(d.sessions) ? d.sessions : [];
@@ -2744,7 +2811,7 @@ export default function VerbatimReader() {
   const toggleRemote = () => {
     const v = !remoteOn;
     setRemoteOn(v);
-    fetch("/api/remote/mode", {
+    fetch(u("/api/remote/mode"), {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ on: v }),
     }).catch(() => {});
@@ -2769,17 +2836,17 @@ export default function VerbatimReader() {
       const blob = await fetch(dataURL).then((r) => r.blob());
       let remoteSid = remoteMirrorRef.current.get(localSid);
       if (!remoteSid || !remoteSessRef.current.some((s) => s.id === remoteSid)) {
-        const s = await fetch("/api/remote/sessions", {
+        const s = await fetch(u("/api/remote/sessions"), {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ title }),
         }).then((r) => r.json());
         remoteSid = s.id;
         remoteMirrorRef.current.set(localSid, remoteSid);
       }
-      const up = await fetch(`/api/remote/sessions/${remoteSid}/image`, {
+      const up = await fetch(u(`/api/remote/sessions/${remoteSid}/image`), {
         method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: blob,
       }).then((r) => r.json());
-      await fetch(`/api/remote/sessions/${remoteSid}`, {
+      await fetch(u(`/api/remote/sessions/${remoteSid}`), {
         method: "PATCH", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ patch: { img: up.id } }),
       });
@@ -2825,7 +2892,7 @@ export default function VerbatimReader() {
     c.fillStyle = "#fff";
     c.fillRect(0, 0, 1, 1);
     const poke = (body) =>
-      fetch("/api/chat", {
+      fetch(u("/api/chat"), {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ system: "ok", user: ".", maxTokens: 1, ...body }),
       }).then((r) => r.body?.cancel()).catch(() => {});
@@ -3239,7 +3306,7 @@ export default function VerbatimReader() {
     setPwBusy(true);
     setPwErr("");
     try {
-      const r = await fetch("/api/login", {
+      const r = await fetch(u("/api/login"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: v }),
@@ -3315,7 +3382,7 @@ export default function VerbatimReader() {
       <div className={"vb-slot" + (s < 1 ? " sm" : "")}>
         <div className={"vb-paper" + (r ? "" : " auto")} style={style}>
           {f.thumb ? (
-            <img src={"/api/library/thumb/" + f.id} alt="" loading="lazy"
+            <img src={u("/api/library/thumb/") + f.id} alt="" loading="lazy"
               onLoad={(e) => measureThumb(f.id, e.currentTarget)} />
           ) : (
             <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6" /></svg>
@@ -3365,7 +3432,7 @@ export default function VerbatimReader() {
                 ))}
               </div>
             )}
-            <a className="vb-docmenu-dl" href={"/api/library/file/" + f.id + "?dl=1"} download
+            <a className="vb-docmenu-dl" href={u("/api/library/file/") + f.id + "?dl=1"} download
               onClick={() => setDocMenuId("")}>다운로드</a>
             <button className="vb-docmenu-del"
               onClick={() => tapDel(f.id, () => { delFile(f.id); setDocMenuId(""); })}>
@@ -3599,11 +3666,10 @@ export default function VerbatimReader() {
         )}
         <button className="vb-tool" onClick={() => zoomBy(1 / 1.2)} aria-label="축소">−</button>
         <button className="vb-tool" onClick={() => zoomBy(1.2)} aria-label="확대">+</button>
-        <button className={"vb-tool" + (remoteOn ? " on" : "")} onClick={toggleRemote}
-          aria-label="리모트 모드" title="리모트 모드 — 폰에서 이 책을 따라 보고 질문할 수 있게 켭니다">
-          <svg viewBox="0 0 24 24"><rect x="7" y="2" width="10" height="20" rx="2" /><path d="M11 18h2" strokeLinecap="round" /></svg>
-        </button>
-        <button className="vb-tool" onClick={() => setSetOpen(true)} aria-label="설정">
+        {/* 리모트는 한 번 켜 두고 마는 것이라 툴바가 아니라 ⚙ 설정 안에 있다.
+            켜져 있는 동안만 ⚙ 에 점 하나로 알린다 */}
+        <button className={"vb-tool" + (remoteOn ? " dot" : "")} onClick={() => setSetOpen(true)}
+          aria-label={remoteOn ? "설정 — 리모트 켜짐" : "설정"}>
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 00.3 1.8 2 2 0 11-2.8 2.8 1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5 2 2 0 11-4 0 1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3 2 2 0 11-2.8-2.8 1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1 2 2 0 110-4 1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8 2 2 0 112.8-2.8 1.6 1.6 0 001.8.3 1.6 1.6 0 001-1.5 2 2 0 114 0 1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3 2 2 0 112.8 2.8 1.6 1.6 0 00-.3 1.8 1.6 1.6 0 001.5 1 2 2 0 110 4 1.6 1.6 0 00-1.5 1z" /></svg>
         </button>
         <button className="vb-tool" style={{ background: "var(--t-fill)" }}
@@ -3708,8 +3774,11 @@ export default function VerbatimReader() {
 
         {upProg && (
           <div className="vb-uppill" role="status">
-            <i style={{ width: upProg.pct + "%" }} />
-            <span>{upProg.name} — 올리는 중 {upProg.pct}%</span>
+            <i style={{ width: (upProg.pct ?? 0) + "%" }} />
+            <span>
+              {upProg.name} — {upProg.what || "올리는 중"}
+              {upProg.pct != null ? ` ${upProg.pct}%` : upProg.loaded ? ` ${fmtSize(upProg.loaded)}` : "…"}
+            </span>
           </div>
         )}
 
@@ -3747,7 +3816,7 @@ export default function VerbatimReader() {
             }}>
             <div className="vb-libhead">
               <div className="vb-brandmk">
-                <img className="vb-brandicon" src="/brand/yeobaek-icon.svg" alt="" />
+                <img className="vb-brandicon" src={u("/brand/yeobaek-icon.svg")} alt="" />
                 <span className="vb-brandword">여백</span>
                 <span className="vb-branddiv" />
                 <span className="vb-brandlbl">YEOBAEK</span>
@@ -3918,7 +3987,7 @@ export default function VerbatimReader() {
                     {shownFiles.length === 0 ? (
                       libFolder === "" && folders.length === 0 ? (
                         <div className="vb-hero">
-                          <img className="vb-herobrand" src="/brand/yeobaek-icon.svg" alt="" />
+                          <img className="vb-herobrand" src={u("/brand/yeobaek-icon.svg")} alt="" />
                           <p>PDF를 추가하면 표지와 함께 이 서재에 꽂힙니다.<br />
                             읽을 때는 단어 한 번 탭 = 뜻 · 두 번 탭 = 문장 해석 · 드래그 = 구간 해석.</p>
                           <button className="vb-libbtn pri" style={{ padding: "13px 26px", fontSize: 15 }}
@@ -3949,7 +4018,7 @@ export default function VerbatimReader() {
                             <div className="vb-fname" title={f.name}>{f.name}</div>
                             <div className="vb-fmeta">{lastMeta(f)}{fmtSize(f.size)} · {fmtDate(f.at)}</div>
                             <div className="vb-dact">
-                              <a className="vb-ib" href={"/api/library/file/" + f.id + "?dl=1"} download
+                              <a className="vb-ib" href={u("/api/library/file/") + f.id + "?dl=1"} download
                                 onClick={(e) => e.stopPropagation()} aria-label="다운로드">⤓</a>
                               <button className={"vb-ib del" + (delAsk === f.id ? " ask" : "")}
                                 onClick={(e) => { e.stopPropagation(); tapDel(f.id, () => delFile(f.id)); }}
@@ -4092,7 +4161,7 @@ export default function VerbatimReader() {
                       {(libView === "recent" ? recentFiles : shownFiles).length === 0 ? (
                         libView !== "recent" && libFolder === "" && folders.length === 0 ? (
                           <div className="vb-hero">
-                            <img className="vb-herobrand" src="/brand/yeobaek-icon.svg" alt="" />
+                            <img className="vb-herobrand" src={u("/brand/yeobaek-icon.svg")} alt="" />
                             <p>PDF를 추가하면 표지와 함께 이 서재에 꽂힙니다.<br />
                               읽을 때는 단어 한 번 탭 = 뜻 · 두 번 탭 = 문장 해석 · 드래그 = 구간 해석.</p>
                             <button className="vb-libbtn pri" style={{ padding: "13px 26px", fontSize: 15 }}
@@ -4457,6 +4526,18 @@ export default function VerbatimReader() {
                   </p>
                 </div>
               )}
+              <div className="vb-field">
+                <label>리모트 모드</label>
+                <label className="vb-row" style={{ margin: "8px 0 0" }}>
+                  <input type="checkbox" checked={remoteOn} onChange={toggleRemote} />
+                  폰에서 이 책을 따라 보고 질문하기
+                </label>
+                <p className="vb-hint">
+                  켜면 폰에서 같은 주소를 열었을 때 지금 보고 있는 쪽을 따라 보고,
+                  단어·문장·질문을 폰에서 물을 수 있습니다. 답은 이 기기가 만들어 보냅니다.
+                  {remoteOn && <> 지금 <b>켜져 있음</b>.</>}
+                </p>
+              </div>
               <button className="vb-done" onClick={() => { persist(); setSetOpen(false); }}>닫기</button>
             </div>
           </div>
@@ -4494,7 +4575,7 @@ export default function VerbatimReader() {
                         <div className={"vb-renrow" + (r.same ? " same" : "")} key={r.id}>
                           <div className="vb-renthumb">
                             {f?.thumb ? (
-                              <img src={"/api/library/thumb/" + r.id} alt="" loading="lazy" />
+                              <img src={u("/api/library/thumb/") + r.id} alt="" loading="lazy" />
                             ) : (
                               <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6" /></svg>
                             )}

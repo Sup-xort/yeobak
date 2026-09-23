@@ -1,15 +1,17 @@
 {
+  "_note": "public/ 은 Vite 가 그대로 복사만 한다 — base 가 여기엔 안 붙는다. 그래서 아래 경로는 손으로 /yeobaek/ 를 박아 둔 것이고, vite.config.js 의 base 를 바꾸면 여기도 같이 바꿔야 한다. 2026-08-21 서브패스 이전 때 이 파일을 안 고쳐서 홈화면 PWA 가 erion 랜딩으로 열리고 아이콘이 전부 404 였다.",
   "name": "여백",
   "short_name": "여백",
   "description": "탭 한 번으로 단어 풀이, 두 번 탭으로 문장 해석 — 아이패드에 맞춘 한글 PDF 리더",
   "lang": "ko",
-  "start_url": "/",
+  "start_url": "/yeobaek/",
+  "scope": "/yeobaek/",
   "display": "standalone",
   "background_color": "#141312",
   "theme_color": "#141312",
   "icons": [
-    { "src": "/brand/png/icon-128.png", "sizes": "128x128", "type": "image/png", "purpose": "any" },
-    { "src": "/brand/png/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "/brand/png/icon-1024.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" }
+    { "src": "/yeobaek/brand/png/icon-128.png", "sizes": "128x128", "type": "image/png", "purpose": "any" },
+    { "src": "/yeobaek/brand/png/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/yeobaek/brand/png/icon-1024.png", "sizes": "1024x1024", "type": "image/png", "purpose": "any" }
   ]
 }

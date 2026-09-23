@@ -59,6 +59,10 @@
   touch-action:manipulation}
 .vb-tool:active{background:var(--t-fill)}
 .vb-tool.on{background:var(--t-accBg);color:var(--t-accInk);font-weight:600}
+/* 리모트가 켜져 있음을 ⚙ 위 점 하나로만 알린다 — 툴바에 버튼을 더 두지 않으려고 */
+.vb-tool.dot{position:relative}
+.vb-tool.dot::after{content:"";position:absolute;top:4px;right:4px;width:7px;height:7px;
+  border-radius:50%;background:var(--mark);box-shadow:0 0 0 2px var(--t-bar)}
 .vb-tool svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.7;
   stroke-linecap:round;stroke-linejoin:round}
 @media (pointer:coarse){.vb-tool{height:42px;min-width:42px}}

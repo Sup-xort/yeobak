@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo } from "react";
 import "./App.css";
 import Rich from "./rich.jsx";
 import { fmtDate, fmtRel, pickGreeting } from "./App.jsx";
+import { u } from "./paths.js";
 
 /* ───────────────────────── 여백 리모트 (폰) ─────────────────────────
    설계 원칙(server/remote.js 의 주석과 같다): 아이패드가 유일하게 모델을 부르고
@@ -28,7 +29,7 @@ const CONN = {
 };
 
 function jfetch(url, opts) {
-  return fetch(url, {
+  return fetch(u(url), {   // 서브패스 보정은 여기 한 곳에서 — paths.js 참고
     ...opts,
     headers: { "Content-Type": "application/json", ...(opts?.headers || {}) },
   }).then(async (r) => {
@@ -55,7 +56,7 @@ function FileRow({ f, sub, small, onOpen, menuOpen, onToggleMenu, dot }) {
     <div className="vb-rm-mat">
       <button className="vb-rm-mattap" onClick={onOpen}>
         <div className={"vb-rm-thumb" + (small ? " sm" : "")}>
-          {f.thumb ? <img src={`/api/library/thumb/${f.id}`} alt="" /> : <FileIcon />}
+          {f.thumb ? <img src={u(`/api/library/thumb/${f.id}`)} alt="" /> : <FileIcon />}
           {dot && <i style={{ background: dot }} />}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -67,8 +68,8 @@ function FileRow({ f, sub, small, onOpen, menuOpen, onToggleMenu, dot }) {
         <button className="vb-rm-menubtn" onClick={(e) => { e.stopPropagation(); onToggleMenu(); }} aria-label="파일 메뉴">⋮</button>
         {menuOpen && (
           <div className="vb-dropmenu vb-rm-filemenu" style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, minWidth: 150, zIndex: 6 }}>
-            <a className="vb-rm-filemenuitem" href={`/api/library/file/${f.id}`} target="_blank" rel="noopener noreferrer">새 탭에서 보기</a>
-            <a className="vb-rm-filemenuitem" href={`/api/library/file/${f.id}?dl=1`}>다운로드</a>
+            <a className="vb-rm-filemenuitem" href={u(`/api/library/file/${f.id}`)} target="_blank" rel="noopener noreferrer">새 탭에서 보기</a>
+            <a className="vb-rm-filemenuitem" href={u(`/api/library/file/${f.id}?dl=1`)}>다운로드</a>
           </div>
         )}
       </div>
@@ -85,7 +86,7 @@ export default function Remote() {
   const pwRef = useRef(null);
 
   useEffect(() => {
-    fetch("/api/me").then((r) => r.json()).then((j) => setAuthed(!!j.authed)).catch(() => setAuthed(false));
+    fetch(u("/api/me")).then((r) => r.json()).then((j) => setAuthed(!!j.authed)).catch(() => setAuthed(false));
   }, []);
 
   const submitPw = async (v) => {
@@ -93,7 +94,7 @@ export default function Remote() {
     setPwBusy(true);
     setPwErr("");
     try {
-      const r = await fetch("/api/login", {
+      const r = await fetch(u("/api/login"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ password: v }),
@@ -131,7 +132,7 @@ export default function Remote() {
   useEffect(() => {
     if (authed !== true) return;
     let everOpen = false;
-    const es = new EventSource("/api/remote/stream");
+    const es = new EventSource(u("/api/remote/stream"));
     es.onopen = () => { everOpen = true; setEsState("connected"); };
     es.onerror = () => setEsState(everOpen ? "reconnecting" : "idle");
     es.addEventListener("hello", (e) => {
@@ -186,7 +187,7 @@ export default function Remote() {
   const [openFolders, setOpenFolders] = useState({});
   useEffect(() => {
     if (authed !== true) return;
-    fetch("/api/library").then((r) => r.json()).then((j) => {
+    fetch(u("/api/library")).then((r) => r.json()).then((j) => {
       setLib(j);
       setOpenFolders(Object.fromEntries((j.folders || []).map((f) => [f.id, true])));
     }).catch(() => {});
@@ -276,8 +277,8 @@ export default function Remote() {
   const [vocab, setVocab] = useState([]);
   const [lookups, setLookups] = useState([]);
   const refreshHistory = () => {
-    fetch("/api/vocab").then((r) => r.json()).then((j) => setVocab(j.words || [])).catch(() => {});
-    fetch("/api/lookups").then((r) => r.json()).then((j) => setLookups((j.items || []).slice(0, 40))).catch(() => {});
+    fetch(u("/api/vocab")).then((r) => r.json()).then((j) => setVocab(j.words || [])).catch(() => {});
+    fetch(u("/api/lookups")).then((r) => r.json()).then((j) => setLookups((j.items || []).slice(0, 40))).catch(() => {});
   };
   useEffect(() => { if (authed === true) refreshHistory(); }, [authed]);
 
@@ -295,7 +296,7 @@ export default function Remote() {
   const [mdlMenuOpen, setMdlMenuOpen] = useState(false);
   useEffect(() => {
     if (authed !== true) return;
-    fetch("/api/models").then((r) => r.json()).then((j) => {
+    fetch(u("/api/models")).then((r) => r.json()).then((j) => {
       setModels(Array.isArray(j.models) ? j.models : []);
       setDefModel(j.default || "");
       if (j.health) setHealth(j.health);
@@ -306,7 +307,7 @@ export default function Remote() {
     if (healthReq.current) return;
     healthReq.current = true;
     setHealthBusy(true);
-    fetch("/api/models").then((r) => (r.ok ? r.json() : null)).then((j) => { if (j?.health) setHealth(j.health); })
+    fetch(u("/api/models")).then((r) => (r.ok ? r.json() : null)).then((j) => { if (j?.health) setHealth(j.health); })
       .catch(() => {}).finally(() => { healthReq.current = false; setHealthBusy(false); });
   };
   useEffect(() => {
@@ -379,7 +380,7 @@ export default function Remote() {
       }
       let imgId = "";
       if (image) {
-        const up = await fetch(`/api/remote/sessions/${sid}/image`, {
+        const up = await fetch(u(`/api/remote/sessions/${sid}/image`), {
           method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: image.blob,
         }).then((r) => { if (!r.ok) throw new Error("업로드 실패"); return r.json(); });
         imgId = up.id;
@@ -684,7 +685,7 @@ export default function Remote() {
                     </span>
                   ) : sess?.img && (
                     <span className="vb-rm-attach">
-                      <img src={`/api/remote/sessions/${sess.id}/image/${sess.img}`} alt="" />
+                      <img src={u(`/api/remote/sessions/${sess.id}/image/${sess.img}`)} alt="" />
                       오려낸 그림
                       <button onClick={() => jfetch(`/api/remote/sessions/${sess.id}`, {
                         method: "PATCH", body: JSON.stringify({ patch: { img: "" } }),
@@ -749,7 +750,7 @@ export default function Remote() {
                       const pending = p.a?.pending && !p.a?.text;
                       return (
                         <div key={p.i} className={"vb-qa" + (latest ? " vb-pe" : " past" + (expanded ? " open" : ""))}>
-                          {p.q?.img && <img className="vb-msgimg" src={`/api/remote/sessions/${sess.id}/image/${p.q.img}`} alt="첨부 이미지" />}
+                          {p.q?.img && <img className="vb-msgimg" src={u(`/api/remote/sessions/${sess.id}/image/${p.q.img}`)} alt="첨부 이미지" />}
                           <div className="vb-qbubble">{p.q?.text}</div>
                           {pending ? (
                             <div className="vb-abody">
