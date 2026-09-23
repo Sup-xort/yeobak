@@ -3,7 +3,7 @@ import "katex/dist/katex.min.css";
 import "./App.css";
 import Rich from "./rich.jsx";
 import { u } from "./paths.js";
-import { drawStroke, hitStroke, strokeInLasso, polyBox, bbox as inkBox, snapLine, tidyPts } from "./ink.js";
+import { drawStroke, hitStroke, strokeInLasso, polyBox, bbox as inkBox, snapLine, tidyPts, strokePath, HL_ALPHA } from "./ink.js";
 
 /* ───────────────────────── 설정 ───────────────────────── */
 const CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
@@ -1672,6 +1672,8 @@ export default function VerbatimReader() {
         MAX_SIDE / Math.max(1, vp.height * dpr),
       );
       if (fit < 1) dpr *= fit;
+      // 상한에 걸려 흐려진 쪽 — 화면에 보이는 부분만 선명하게 다시 그린다(renderDetails)
+      el.dataset.lowres = fit < 0.98 ? "1" : "";
       const cv = document.createElement("canvas");
       cv.width = Math.floor(vp.width * dpr);
       cv.height = Math.floor(vp.height * dpr);
@@ -1689,18 +1691,20 @@ export default function VerbatimReader() {
         annotationMode: annotsRef.current?.imported
           ? window.pdfjsLib.AnnotationMode.DISABLE : window.pdfjsLib.AnnotationMode.ENABLE,
       }).promise;
-      // 완성 — 이전 캔버스와 남아 있던 텍스트 레이어를 걷어낸다.
-      // 필기 캔버스(.vb-ink)는 paintInk 가 새 것으로 바꿔 끼울 때까지 남겨 둔다(번쩍임 방지)
-      el.querySelectorAll("canvas:not(.vb-ink)").forEach((c) => { if (c !== cv) c.remove(); });
+      // 완성 — 이전 캔버스(선명화 조각 포함)와 남아 있던 텍스트 레이어를 걷어낸다.
+      // 필기(svg.vb-ink)는 벡터라 배율이 바뀌어도 그대로 두면 된다
+      el.querySelectorAll("canvas").forEach((c) => { if (c !== cv) c.remove(); });
       el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
-      el.dataset.w1 = String(vp.width / vp.scale); // 이 쪽의 배율 1 폭 — 필기 좌표 환산 기준
-      paintInk(n);
+      el.dataset.w1 = String(vp.width / vp.scale); // 이 쪽의 배율 1 크기 — 필기 좌표 환산 기준
+      el.dataset.h1 = String(vp.height / vp.scale);
+      if (!el.querySelector("svg.vb-ink")) paintInk(n);
       const layer = document.createElement("div");
       layer.className = "vb-tl";
       el.appendChild(layer);
       await buildTextLayer(page, vp, layer, n);
       if (markRef.current?.page === n) applyMarks(); // 재배치로 지워진 하이라이트 복원
       renderedRef.current.add(n);
+      if (el.dataset.lowres) scheduleDetail();
     } catch (e) {
       console.error("page " + n, e);
     } finally {
@@ -1708,14 +1712,111 @@ export default function VerbatimReader() {
     }
   };
 
+  /* ── 선명화 조각(detail) ──
+     확대하면 쪽 캔버스가 MAX_PX 상한에 걸려 해상도가 떨어진다(아이패드에서 1.5배쯤부터 눈에 띈다).
+     상한을 올리면 사파리가 캔버스를 조용히 비우거나 탭을 리로드하므로, 대신 **화면에 보이는 부분만**
+     기기 해상도로 한 번 더 그려 그 자리에 얹는다(pdf.js 5 의 detail view 와 같은 발상).
+     스크롤이 멈추고 160ms 뒤에 그리며, 위아래로 반 화면씩 넉넉히 잡아 조금 스크롤해도 다시 안 그린다.
+     흐린 쪽 캔버스가 바탕에 늘 있으니 조각이 늦거나 빠져도 흰 화면은 안 뜬다. */
+  const detailRef = useRef(new Map()); // n → 진행 중인 RenderTask
+  const detailTimerRef = useRef(0);
+  const scheduleDetail = () => {
+    clearTimeout(detailTimerRef.current);
+    detailTimerRef.current = setTimeout(() => renderDetails(), 160);
+  };
+  const dropDetails = () => {
+    for (const t of detailRef.current.values()) t.cancel();
+    detailRef.current.clear();
+    stageRef.current?.querySelectorAll("canvas.vb-detail").forEach((c) => c.remove());
+  };
+  const renderDetails = () => {
+    const view = viewRef.current;
+    if (!view || !pdfRef.current || gestureRef.current) return;
+    const vr = view.getBoundingClientRect();
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    for (const n of renderedRef.current) {
+      const el = pagesRef.current[n - 1];
+      if (!el) continue;
+      const old = el.querySelector("canvas.vb-detail");
+      const r = el.getBoundingClientRect();
+      const vis = {
+        x0: Math.max(r.left, vr.left) - r.left, x1: Math.min(r.right, vr.right) - r.left,
+        y0: Math.max(r.top, vr.top) - r.top, y1: Math.min(r.bottom, vr.bottom) - r.top,
+      };
+      if (!el.dataset.lowres || vis.x1 <= vis.x0 || vis.y1 <= vis.y0) {
+        old?.remove();
+        detailRef.current.get(n)?.cancel();
+        continue;
+      }
+      // 이미 그려 둔 조각이 보이는 부분을 다 덮으면 그대로 둔다
+      const o = old && JSON.parse(old.dataset.reg);
+      if (o && o.x <= vis.x0 && o.y <= vis.y0 && o.x + o.w >= vis.x1 && o.y + o.h >= vis.y1) continue;
+      // 여유를 붙이되 픽셀 예산(10M) 안으로
+      const W = el.offsetWidth, H = el.offsetHeight;
+      const vh = vis.y1 - vis.y0, vw = vis.x1 - vis.x0;
+      let reg = {
+        x: Math.max(0, vis.x0 - vw * 0.25), y: Math.max(0, vis.y0 - vh * 0.5),
+      };
+      reg.w = Math.min(W, vis.x1 + vw * 0.25) - reg.x;
+      reg.h = Math.min(H, vis.y1 + vh * 0.5) - reg.y;
+      if (reg.w * reg.h * dpr * dpr > 10_000_000) reg = { x: vis.x0, y: vis.y0, w: vw, h: vh };
+      reg = { x: Math.floor(reg.x), y: Math.floor(reg.y), w: Math.ceil(reg.w), h: Math.ceil(reg.h) };
+      renderDetail(n, el, reg, dpr);
+    }
+  };
+  const renderDetail = async (n, el, reg, dpr) => {
+    detailRef.current.get(n)?.cancel();
+    const key = layoutKeyRef.current;
+    let task;
+    try {
+      const page = await pdfRef.current.getPage(n);
+      const vp = page.getViewport({ scale: scaleRef.current * zoomRef.current });
+      const cv = document.createElement("canvas");
+      cv.className = "vb-detail";
+      cv.width = Math.floor(reg.w * dpr);
+      cv.height = Math.floor(reg.h * dpr);
+      Object.assign(cv.style, { left: reg.x + "px", top: reg.y + "px", width: reg.w + "px", height: reg.h + "px" });
+      cv.dataset.reg = JSON.stringify(reg);
+      const ctx = cv.getContext("2d", { alpha: false });
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      task = page.render({
+        canvasContext: ctx, viewport: vp,
+        transform: [dpr, 0, 0, dpr, -reg.x * dpr, -reg.y * dpr],
+        annotationMode: annotsRef.current?.imported
+          ? window.pdfjsLib.AnnotationMode.DISABLE : window.pdfjsLib.AnnotationMode.ENABLE,
+      });
+      detailRef.current.set(n, task);
+      await task.promise;
+      // 그리는 사이 배율이 바뀌었거나 쪽이 치워졌으면 버린다
+      if (detailRef.current.get(n) !== task || layoutKeyRef.current !== key || !renderedRef.current.has(n)) return;
+      const base = el.querySelector("canvas:not(.vb-detail)");
+      if (!base) return;
+      el.querySelectorAll("canvas.vb-detail").forEach((c) => c.remove());
+      base.after(cv);
+    } catch (e) {
+      if (e?.name !== "RenderingCancelledException") console.warn("선명화 실패 " + n, e);
+    } finally {
+      if (detailRef.current.get(n) === task) detailRef.current.delete(n);
+    }
+  };
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    const on = () => scheduleDetail();
+    view.addEventListener("scroll", on, { passive: true });
+    return () => { view.removeEventListener("scroll", on); clearTimeout(detailTimerRef.current); };
+  }, []);
+
   const prune = () => {
     for (const n of [...renderedRef.current]) {
       if (Math.abs(n - curRef.current) > 4) {
         const el = pagesRef.current[n - 1];
         if (el) {
-          el.querySelectorAll("canvas").forEach((c) => c.remove());
+          el.querySelectorAll("canvas, svg.vb-ink").forEach((c) => c.remove());
           el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
         }
+        detailRef.current.get(n)?.cancel();
         renderedRef.current.delete(n);
         dataRef.current[n - 1] = null;
       }
@@ -2049,6 +2150,7 @@ export default function VerbatimReader() {
     const w = base.w * scaleRef.current * zoomRef.current;
     const h = base.h * scaleRef.current * zoomRef.current;
     ioRef.current?.disconnect();
+    dropDetails(); // 옛 배율의 선명화 조각 — 새 배율로 renderPage 가 끝나면 다시 그린다
     for (const el of pagesRef.current) {
       if (!el) continue;
       el.style.width = w + "px";
@@ -3052,9 +3154,9 @@ export default function VerbatimReader() {
 
   /* ───────── 필기(잉크) ─────────
      획 데이터는 annotsRef(ref)에만 있다 — 긋는 동안 React 리렌더 0회. 좌표계·획 모양은 src/ink.js 머리말.
-     화면: 쪽마다 .vb-ink.hl(형광펜, multiply) + .vb-ink.pen 캔버스 두 장이 pdf 캔버스 위·텍스트 레이어
+     화면: 쪽마다 svg.vb-ink.hl(형광펜, multiply) + svg.vb-ink.pen 두 장(벡터)이 pdf 캔버스 위·텍스트 레이어
      아래에 깔린다(renderPage → paintInk). 긋는 중인 획만 화면에 고정된 '젖은' 캔버스(.vb-wet)에
-     touchmove 안에서 곧바로 그리고(rAF 도 안 기다린다), 펜을 떼면 쪽 캔버스에 한 번 옮겨 그린다.
+     입력 이벤트 안에서 곧바로 그리고(rAF 도 안 기다린다), 펜을 떼면 쪽 SVG 에 path 하나로 옮긴다.
      저장은 쪽 단위 PUT 을 800ms 디바운스 — 굿노트에서 온 쪽은 1300획·1MB 가까이 된다. */
   const [inkTool, setInkTool] = useState("pen");               // pen | hl | eraser | lasso
   const [inkPen, setInkPen] = useState({ c: INK_PEN_COLORS[0], w: INK_PEN_W[1] });
@@ -3093,40 +3195,49 @@ export default function VerbatimReader() {
     setInkErr("");
   };
 
-  /* 쪽 n 의 필기 캔버스를 통째로 새로 그려 바꿔 끼운다. hide = 그리지 않을 획 id(올가미로 끄는 중) */
+  /* 쪽 n 의 필기를 SVG 두 장(형광펜 multiply / 펜)으로 통째로 새로 만들어 바꿔 끼운다.
+     viewBox 가 배율 1 좌표라 확대·relayout 때 다시 그릴 필요가 없다(벡터).
+     hide = 그리지 않을 획 id(올가미로 끄는 중) */
+  const SVGNS = "http://www.w3.org/2000/svg";
+  const inkPathEl = (s) => {
+    const p = document.createElementNS(SVGNS, "path");
+    const hl = s.t === "hl";
+    p.setAttribute("d", strokePath(s));
+    p.setAttribute("stroke", s.c);
+    p.setAttribute("stroke-width", String(s.w));
+    p.setAttribute("stroke-linecap", hl ? "butt" : "round");
+    const a = hl ? (s.a ?? HL_ALPHA) : (s.a ?? 1);
+    if (a < 1) p.setAttribute("stroke-opacity", String(a));
+    return p;
+  };
   const paintInk = (n, hide) => {
     const el = pagesRef.current[n - 1];
     if (!el) return;
-    const old = el.querySelectorAll("canvas.vb-ink");
+    const old = el.querySelectorAll("svg.vb-ink");
     const strokes = inkStrokes(n);
-    if (!strokes.length) { old.forEach((c) => c.remove()); return; }
-    const base = el.querySelector("canvas:not(.vb-ink)");
-    const w1 = +el.dataset.w1;
-    if (!base || !w1) return; // 아직 안 그려진 쪽 — renderPage 가 부른다
-    const k = base.width / w1;
+    const w1 = +el.dataset.w1, h1 = +el.dataset.h1;
+    if (!strokes.length || !w1 || !h1) { old.forEach((c) => c.remove()); return; }
     const mk = (cls) => {
-      const c = document.createElement("canvas");
-      c.className = "vb-ink " + cls;
-      c.width = base.width;
-      c.height = base.height;
-      return c;
+      const svg = document.createElementNS(SVGNS, "svg");
+      svg.setAttribute("class", "vb-ink " + cls);
+      svg.setAttribute("viewBox", `0 0 ${w1} ${h1}`);
+      svg.setAttribute("preserveAspectRatio", "none");
+      return svg;
     };
     const hl = mk("hl"), pen = mk("pen");
-    const hctx = hl.getContext("2d"), pctx = pen.getContext("2d");
-    for (const s of strokes) if (!hide?.has(s.id)) drawStroke(s.t === "hl" ? hctx : pctx, s, k);
+    for (const s of strokes) if (!hide?.has(s.id)) (s.t === "hl" ? hl : pen).appendChild(inkPathEl(s));
     const tl = el.querySelector(".vb-tl");
     el.insertBefore(hl, tl);
     el.insertBefore(pen, tl);
     old.forEach((c) => c.remove());
   };
 
-  /* 획 하나만 덧그린다 — 새 획을 그을 때마다 1300획을 다 다시 그리지 않게 */
+  /* 획 하나만 덧붙인다 — 새 획마다 1300획을 다 다시 만들지 않게 */
   const drawInkOne = (n, s) => {
     const el = pagesRef.current[n - 1];
-    const c = el?.querySelector("canvas.vb-ink." + (s.t === "hl" ? "hl" : "pen"));
-    const w1 = +el?.dataset.w1;
-    if (!c || !w1) { paintInk(n); return; }
-    drawStroke(c.getContext("2d"), s, c.width / w1);
+    const svg = el?.querySelector("svg.vb-ink." + (s.t === "hl" ? "hl" : "pen"));
+    if (!svg) { paintInk(n); return; }
+    svg.appendChild(inkPathEl(s));
   };
 
   const flushInk = async () => {

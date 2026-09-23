@@ -161,3 +161,15 @@ export const hexToRgb = (h) => {
 };
 export const rgbToHex = (rgb) =>
   "#" + rgb.map((v) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, "0")).join("");
+
+/* 획 → SVG path d (배율 1 단위). 쪽 위의 필기는 SVG 로 그린다 — 벡터라 어느 배율에서도 선명하고,
+   캔버스처럼 쪽마다 수백만 픽셀을 잡아먹지 않는다(캔버스였을 땐 확대하면 pdf 캔버스와 함께 흐려졌다). */
+export function strokePath(s) {
+  const p = s.pts;
+  if (!p.length) return "";
+  const f = (v) => Math.round(v * 100) / 100;
+  let d = `M${f(p[0][0])} ${f(p[0][1])}`;
+  if (p.length === 1) d += "l0.01 0";
+  for (let i = 1; i < p.length; i++) d += `L${f(p[i][0])} ${f(p[i][1])}`;
+  return d;
+}

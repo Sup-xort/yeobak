@@ -921,10 +921,14 @@
 @media (prefers-reduced-motion:reduce){.vb-root *{transition:none!important;animation:none!important}}
 
 /* ───────── 필기 ─────────
-   .vb-ink 두 장은 pdf 캔버스 위·텍스트 레이어 아래(App.jsx paintInk). 형광펜 장은 multiply 로 섞어
+   svg.vb-ink 두 장은 pdf 캔버스 위·텍스트 레이어 아래(App.jsx paintInk). 형광펜 장은 multiply 로 섞어
    글자가 비쳐 보이게 한다. .vb-wet 은 긋는 중인 획만 그리는 화면 고정 캔버스 — body 에 붙는다. */
-.vb-page canvas.vb-ink{pointer-events:none}
-.vb-page canvas.vb-ink.hl{mix-blend-mode:multiply}
+.vb-page svg.vb-ink{position:absolute;inset:0;width:100%;height:100%;pointer-events:none;
+  overflow:hidden;fill:none;stroke-linejoin:round}
+.vb-page svg.vb-ink.hl{mix-blend-mode:multiply}
+/* 확대 시 화면에 보이는 부분만 기기 해상도로 다시 그린 조각(App.jsx renderDetails) —
+   .vb-page canvas 의 inset:0/100% 를 인라인 left·top·width·height 가 덮어쓴다 */
+.vb-page canvas.vb-detail{right:auto;bottom:auto}
 .vb-wet{position:fixed;pointer-events:none;z-index:41}
 .vb-inkbar{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:30;
   display:flex;align-items:center;gap:2px;padding:5px 6px;border-radius:16px;max-width:calc(100% - 24px);
