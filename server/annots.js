@@ -8,13 +8,13 @@
      굿노트 → 여백은 편집 가능한 획으로 들어온다. (반대로 여백 → 굿노트는 굿노트가 가져올 때
      주석을 평탄화해서 보기 전용이 된다. 이건 여백 쪽에서 못 바꾼다.)
    - 내보내기(exportWithAnnots): "필기 포함" 다운로드. 획마다 /Ink 주석 + /AP 외관 스트림을 단다.
-     외관을 안 달면 뷰어마다 제멋대로 그리거나(굵기·필압 무시) 아예 안 그린다 — 미리보기·굿노트에서
-     여백 화면과 같은 모양이 나오게 perfect-freehand 외곽선을 그대로 채워 넣는다.
+     외관을 안 달면 뷰어마다 제멋대로 그리거나 아예 안 그린다 — 미리보기·굿노트에서 여백 화면과
+     같은 모양(둥근 캡·고정 굵기, 형광펜은 multiply)이 나오게 직접 그려 넣는다.
 
    pdf-lib 에 주석 고수준 API 가 없어서 buildOutlinePdf(index.js) 처럼 PDFContext 로 직접 조립한다. */
 import { PDFDocument, PDFName, PDFArray, PDFDict, PDFNumber, PDFHexString, PDFString, PDFRef } from "pdf-lib";
 import {
-  outline, viewportMatrix, applyM, invertM, hexToRgb, rgbToHex, tidyPts, HL_ALPHA,
+  viewportMatrix, applyM, invertM, hexToRgb, rgbToHex, tidyPts, HL_ALPHA,
 } from "../src/ink.js";
 
 const num = (o) => (o instanceof PDFNumber ? o.asNumber() : Number.NaN);
@@ -173,11 +173,9 @@ export async function exportWithAnnots(bytes, data) {
       const hl = s.t === "hl";
       const alpha = hl ? (s.a ?? HL_ALPHA) : (s.a ?? 1);
       const center = s.pts.map((p) => U(p[0], p[1]));
-      const shape = !hl && s.pr ? outline(s).map((p) => U(p[0], p[1])) : null;
-      const all = shape && shape.length > 2 ? shape : center;
-      const pad = shape ? 1 : s.w / 2 + 1;
+      const pad = s.w / 2 + 1;
       let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-      for (const [x, y] of all) {
+      for (const [x, y] of center) {
         if (x < x0) x0 = x; if (x > x1) x1 = x;
         if (y < y0) y0 = y; if (y > y1) y1 = y;
       }
@@ -191,17 +189,12 @@ export async function exportWithAnnots(bytes, data) {
         res.ExtGState = { GS0: hlGs(alpha) };
         body += "/GS0 gs\n";
       }
-      if (shape && shape.length > 2) {
-        body += `${c4} rg\n${f2(shape[0][0])} ${f2(shape[0][1])} m\n`;
-        for (let k = 1; k < shape.length; k++) body += `${f2(shape[k][0])} ${f2(shape[k][1])} l\n`;
-        body += "h f\n";
-      } else {
-        body += `${c4} RG ${f2(s.w)} w ${hl ? 0 : 1} J 1 j\n`;
-        body += `${f2(center[0][0])} ${f2(center[0][1])} m\n`;
-        if (center.length === 1) body += `${f2(center[0][0] + 0.01)} ${f2(center[0][1])} l\n`;
-        for (let k = 1; k < center.length; k++) body += `${f2(center[k][0])} ${f2(center[k][1])} l\n`;
-        body += "S\n";
-      }
+      // 화면(drawStroke)과 같은 모양: 고정 굵기, 펜은 둥근 캡, 형광펜은 평평한 캡
+      body += `${c4} RG ${f2(s.w)} w ${hl ? 0 : 1} J 1 j\n`;
+      body += `${f2(center[0][0])} ${f2(center[0][1])} m\n`;
+      if (center.length === 1) body += `${f2(center[0][0] + 0.01)} ${f2(center[0][1])} l\n`;
+      for (let k = 1; k < center.length; k++) body += `${f2(center[k][0])} ${f2(center[k][1])} l\n`;
+      body += "S\n";
       // BBox 를 Rect 와 똑같이 두면 외관 → Rect 사상이 항등이라 본문을 사용자 공간 좌표 그대로 쓸 수 있다
       const ap = ctx.register(ctx.flateStream(body, {
         Type: "XObject", Subtype: "Form", FormType: 1,

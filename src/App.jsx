@@ -3275,10 +3275,17 @@ export default function VerbatimReader() {
   };
 
   /* ── 입력 ──
-     펜 캡처(위)와 같은 원칙: 터치 이벤트만, stylus 만, touchstart 에서 preventDefault 로 스크롤을
-     원천 차단, 필기 모드가 꺼지면 리스너 자체를 뗀다(핀치의 e.cancelable 전제를 지키려고).
-     손가락은 전혀 안 건드린다 — 스크롤·핀치·단어 탭이 그대로다(= 굿노트의 "펜슬로만 그리기").
-     마우스·데스크톱 펜은 터치 화면이 아닐 때만 포인터 이벤트로 받는다. */
+     역할을 둘로 나눈다.
+     - 시작·끝·스크롤 차단은 **터치 이벤트**: stylus 만, touchstart 에서 preventDefault(펜 캡처와 같은 원칙 —
+       포인터 이벤트의 preventDefault 로는 iOS 스크롤이 안 멈춘다).
+     - 좌표는 **포인터 이벤트(passive)** 에서 받는다. 터치 이벤트는 화면 주사율(60~120Hz)로만 오는데,
+       Safari 18.2+ 의 pointermove 는 getCoalescedEvents() 로 펜슬의 240Hz 샘플을 다 주고
+       getPredictedEvents() 로 OS 가 예측한 앞쪽 점도 준다. 처음 터치 이벤트만 썼을 땐 곡선이 꺾여 보이고
+       획이 펜 끝에서 5mm 쯤 뒤처졌다(2026-09-23 실기기). passive 라 핀치 판정(e.cancelable)도 안 건드린다
+       — 핀치를 깨뜨렸던 건 non-passive pointermove 였다(펜 캡처 주석 3).
+       포인터 이벤트가 안 오는 브라우저면 touchmove 좌표로 그대로 그린다(cur.ptr 가 false 인 동안).
+     필기 모드가 꺼지면 리스너 자체를 뗀다. 손가락은 전혀 안 건드린다 — 스크롤·핀치·단어 탭이 그대로다.
+     마우스·데스크톱 펜은 터치 화면이 아닐 때만 포인터 이벤트로 시작·끝까지 받는다. */
   useEffect(() => {
     const view = viewRef.current;
     if (!view || !inkOn) return;
@@ -3332,7 +3339,7 @@ export default function VerbatimReader() {
     };
     wetIdleRef.current = () => idle();
 
-    const render = () => {
+    const render = (pred) => {
       if (!cur) { idle(); return; }
       idle(cur.kind === "drag");
       const g = geo(cur.n);
@@ -3341,13 +3348,14 @@ export default function VerbatimReader() {
       if (cur.kind === "draw") {
         const s = cur.s, P = s.pts;
         let ds = s;
-        if (!cur.snapped && P.length >= 2) {
-          // 예측 꼬리 — 마지막 속도로 한 이벤트만큼 앞을 임시로 그린다(다음 이벤트에 진짜 점으로 바뀐다).
-          // 브라우저 합성 지연(1~2프레임)을 체감상 줄여 준다.
+        // 예측 꼬리 — 펜이 곧 갈 자리를 임시로 이어 그린다(다음 이벤트에 진짜 점으로 바뀐다).
+        // OS 예측(getPredictedEvents)이 있으면 그걸, 없으면 마지막 속도로 한 이벤트만큼.
+        if (!cur.snapped && pred?.length) ds = { ...s, pts: [...P, ...pred] };
+        else if (!cur.snapped && P.length >= 2) {
           const a = P[P.length - 2], b = P[P.length - 1];
-          ds = { ...s, pts: [...P, [b[0] + (b[0] - a[0]) * 0.8, b[1] + (b[1] - a[1]) * 0.8, b[2]]] };
+          ds = { ...s, pts: [...P, [b[0] + (b[0] - a[0]) * 0.8, b[1] + (b[1] - a[1]) * 0.8]] };
         }
-        drawStroke(ctx, ds, k, ox, oy, false);
+        drawStroke(ctx, ds, k, ox, oy);
       } else if (cur.kind === "erase" && cur.at) {
         ctx.save();
         ctx.strokeStyle = "rgba(120,120,120,.9)";
@@ -3398,7 +3406,7 @@ export default function VerbatimReader() {
       }, 450);
     };
 
-    const begin = (x, y, p) => {
+    const begin = (x, y) => {
       fit();
       const a = annotsRef.current;
       const n = pageAt(pagesRef.current, y);
@@ -3410,8 +3418,7 @@ export default function VerbatimReader() {
       const sel = inkSelRef.current;
       if (cfg.tool === "pen" || cfg.tool === "hl") {
         const c = cfg.tool === "pen" ? cfg.pen : cfg.hl;
-        const s = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), t: cfg.tool, c: c.c, w: c.w, pts: [[pt[0], pt[1], p ?? 0.5]] };
-        if (cfg.tool === "pen" && p != null) s.pr = 1;
+        const s = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), t: cfg.tool, c: c.c, w: c.w, pts: [pt] };
         cur = { kind: "draw", n, s };
         wet.style.mixBlendMode = cfg.tool === "hl" ? "multiply" : "";
         if (sel) setSel(null);
@@ -3434,17 +3441,17 @@ export default function VerbatimReader() {
       return true;
     };
 
-    const add = (x, y, p) => {
-      // 쪽 위치는 매번 다시 잰다 — 긋는 중에 손바닥이 스크롤을 일으켜도 획이 쪽에 붙어 있게
-      const g = geo(cur.n);
-      if (!g) return;
-      const pt = [(x - g.r.left) / g.k, (y - g.r.top) / g.k];
+    /* 화면 좌표 → 쪽 좌표. 쪽 위치는 이벤트마다 다시 잰다(g 를 넘겨 한 이벤트 안에선 한 번만) —
+       긋는 중에 손바닥이 스크롤을 일으켜도 획이 쪽에 붙어 있게 */
+    const toPage = (g, x, y) => [(x - g.r.left) / g.k, (y - g.r.top) / g.k];
+    const add = (g, x, y) => {
+      const pt = toPage(g, x, y);
       if (cur.kind === "draw") {
         const s = cur.s;
-        if (cur.snapped) { s.pts = snapLine([s.pts[0], [pt[0], pt[1], p ?? 0.5]]); return; }
+        if (cur.snapped) { s.pts = snapLine([s.pts[0], pt]); return; }
         const l = s.pts[s.pts.length - 1];
         if (Math.abs(pt[0] - l[0]) + Math.abs(pt[1] - l[1]) < 0.04) return;
-        s.pts.push([pt[0], pt[1], p ?? 0.5]);
+        s.pts.push(pt);
         if (s.t === "hl") armSnap();
       } else if (cur.kind === "erase") eraseAt(pt);
       else if (cur.kind === "lasso") cur.poly.push(pt);
@@ -3459,7 +3466,7 @@ export default function VerbatimReader() {
       const a = annotsRef.current;
       if (c.kind === "draw" && a) {
         const s = c.s;
-        s.pts = tidyPts(s.pr ? s.pts : s.pts.map((q) => [q[0], q[1]]), 0.04);
+        s.pts = tidyPts(s.pts, 0.04);
         (a.pages[c.n] ||= []).push(s);
         drawInkOne(c.n, s); // 쪽 캔버스에 먼저 그리고, 같은 틱에 젖은 캔버스를 비운다 → 번쩍임 없음
         inkPush({ k: "add", n: c.n, s });
@@ -3487,28 +3494,30 @@ export default function VerbatimReader() {
       render();
     };
 
-    // ── 애플펜슬(터치 이벤트) ──
+    // ── 애플펜슬: 시작·끝·스크롤 차단(터치 이벤트) ──
     let tid = null;
     const stylus = (list) => { for (const t of list) if (t.touchType === "stylus") return t; return null; };
-    const force = (t) => (t.force > 0 ? Math.min(1, t.force) : null);
     const onTS = (e) => {
       if (cur) { if (e.cancelable) e.preventDefault(); return; } // 긋는 중 닿은 손바닥이 스크롤로 새지 않게
       const t = stylus(e.changedTouches);
       if (!t) return;
-      if (begin(t.clientX, t.clientY, force(t))) {
+      if (begin(t.clientX, t.clientY)) {
         tid = t.identifier;
         if (e.cancelable) e.preventDefault();
       }
     };
     const onTM = (e) => {
-      if (!cur) return;
+      if (!cur || tid == null) return;
       if (e.cancelable) e.preventDefault();
+      if (cur.ptr) return; // 좌표는 pointermove 가 더 촘촘히 받고 있다
+      const g = geo(cur.n);
+      if (!g) return;
       let moved = false;
-      for (const t of e.changedTouches) if (t.identifier === tid) { add(t.clientX, t.clientY, force(t)); moved = true; }
+      for (const t of e.changedTouches) if (t.identifier === tid) { add(g, t.clientX, t.clientY); moved = true; }
       if (moved) render();
     };
     const onTE = (e) => {
-      if (!cur) return;
+      if (!cur || tid == null) return;
       for (const t of e.changedTouches) if (t.identifier === tid) { tid = null; end(); }
     };
     view.addEventListener("touchstart", onTS, { passive: false });
@@ -3516,27 +3525,31 @@ export default function VerbatimReader() {
     view.addEventListener("touchend", onTE, { passive: true });
     view.addEventListener("touchcancel", onTE, { passive: true });
 
-    // ── 마우스·데스크톱 펜(터치 화면이 아닐 때만) ──
+    // ── 좌표(포인터 이벤트) — 애플펜슬은 passive 로 좌표만, 데스크톱은 시작·끝까지 ──
     let pid = null;
-    const pres = (e) => (e.pointerType === "pen" && e.pressure > 0 ? e.pressure : null);
+    const onPM = (e) => {
+      if (!cur) return;
+      if (tid != null) { if (e.pointerType !== "pen") return; cur.ptr = true; }
+      else if (e.pointerId !== pid) return;
+      const g = geo(cur.n);
+      if (!g) return;
+      const evs = e.getCoalescedEvents?.();
+      for (const c of evs?.length ? evs : [e]) add(g, c.clientX, c.clientY);
+      const pr = cur.kind === "draw" ? e.getPredictedEvents?.() : null;
+      render(pr?.length ? pr.map((c) => toPage(g, c.clientX, c.clientY)) : null);
+    };
     const onPD = (e) => {
       if (e.pointerType === "touch" || e.button !== 0) return;
-      if (begin(e.clientX, e.clientY, pres(e))) {
+      if (begin(e.clientX, e.clientY)) {
         pid = e.pointerId;
         e.preventDefault();
         view.setPointerCapture?.(e.pointerId);
       }
     };
-    const onPM = (e) => {
-      if (e.pointerId !== pid || !cur) return;
-      const evs = e.getCoalescedEvents?.();
-      for (const c of evs?.length ? evs : [e]) add(c.clientX, c.clientY, pres(c));
-      render();
-    };
     const onPU = (e) => { if (e.pointerId === pid) { pid = null; end(); } };
+    view.addEventListener("pointermove", onPM, { passive: true });
     if (!COARSE) {
       view.addEventListener("pointerdown", onPD);
-      view.addEventListener("pointermove", onPM);
       view.addEventListener("pointerup", onPU);
       view.addEventListener("pointercancel", onPU);
     }

@@ -2,56 +2,31 @@
    서버(server/index.js)도 이 파일을 그대로 import 한다(내보내기 외관 스트림을 화면과 똑같이
    만들려고). 그래서 여기엔 DOM·window 를 쓰는 코드를 넣지 않는다.
 
-   획(stroke) 모양: {id, t:"pen"|"hl", c:"#rrggbb", w, a?, pr?, pts:[[x,y,p?],…]}
+   획(stroke) 모양: {id, t:"pen"|"hl", c:"#rrggbb", w, a?, pts:[[x,y],…]}
    - 좌표는 **그 쪽의 배율 1 뷰포트 단위**(pdf.js page.getViewport({scale:1}), 좌상단 원점,
      /Rotate 반영). 그래서 줌·relayout 과 무관하게 저장된다.
-   - pr:1 이면 필압이 있는 펜 획 → perfect-freehand 외곽선을 채워 그린다.
-     없으면(형광펜·가져온 획·필압 없는 입력) 둥근 캡 폴리라인으로 그린다 — 굿노트가 내보내는
-     /Ink 는 필압 없이 고정 굵기라 이쪽이 원본과 같은 모양이다.
+   - 필압은 쓰지 않는다(2026-09-23 사용자 요청으로 뺐다) — 모든 획은 고정 굵기 둥근 캡 폴리라인.
+     굿노트가 내보내는 /Ink 도 필압 없는 고정 굵기라 가져온 획과 모양이 같다.
+     예전에 저장된 획에 pr·세 번째 좌표가 남아 있어도 무시하고 그린다.
    - w 는 pt(배율 1 단위) 굵기, a 는 불투명도(형광펜 기본 HL_ALPHA). */
-import { getStroke } from "perfect-freehand";
 
 export const HL_ALPHA = 0.35;
 
-export const penOpts = (w, last = true) => ({
-  size: w * 1.5,        // perfect-freehand 의 size 는 최대 지름 — 필압 중간값에서 w 쯤 나오게
-  thinning: 0.55,
-  smoothing: 0.5,
-  streamline: 0.35,
-  simulatePressure: false,
-  last,
-});
-
-/* 펜 획의 외곽선 다각형([[x,y],…], 배율 1 단위) */
-export const outline = (s, last = true) =>
-  getStroke(s.pts.map((p) => [p[0], p[1], p[2] ?? 0.5]), penOpts(s.w, last));
-
 /* 캔버스에 획 하나를 그린다. k = 배율 1 → 캔버스 픽셀. (ox, oy) 는 캔버스 픽셀 원점 이동. */
-export function drawStroke(ctx, s, k, ox = 0, oy = 0, last = true) {
+export function drawStroke(ctx, s, k, ox = 0, oy = 0) {
   const pts = s.pts;
   if (!pts.length) return;
   ctx.save();
   ctx.globalAlpha = s.t === "hl" ? (s.a ?? HL_ALPHA) : (s.a ?? 1);
-  if (s.t !== "hl" && s.pr) {
-    const o = outline(s, last);
-    if (o.length < 3) { ctx.restore(); return; }
-    ctx.fillStyle = s.c;
-    ctx.beginPath();
-    ctx.moveTo(o[0][0] * k + ox, o[0][1] * k + oy);
-    for (let i = 1; i < o.length; i++) ctx.lineTo(o[i][0] * k + ox, o[i][1] * k + oy);
-    ctx.closePath();
-    ctx.fill();
-  } else {
-    ctx.strokeStyle = s.c;
-    ctx.lineWidth = Math.max(0.5, s.w * k);
-    ctx.lineCap = s.t === "hl" ? "butt" : "round";
-    ctx.lineJoin = "round";
-    ctx.beginPath();
-    ctx.moveTo(pts[0][0] * k + ox, pts[0][1] * k + oy);
-    if (pts.length === 1) ctx.lineTo(pts[0][0] * k + ox + 0.01, pts[0][1] * k + oy);
-    for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * k + ox, pts[i][1] * k + oy);
-    ctx.stroke();
-  }
+  ctx.strokeStyle = s.c;
+  ctx.lineWidth = Math.max(0.5, s.w * k);
+  ctx.lineCap = s.t === "hl" ? "butt" : "round";
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(pts[0][0] * k + ox, pts[0][1] * k + oy);
+  if (pts.length === 1) ctx.lineTo(pts[0][0] * k + ox + 0.01, pts[0][1] * k + oy);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * k + ox, pts[i][1] * k + oy);
+  ctx.stroke();
   ctx.restore();
 }
 
@@ -133,7 +108,7 @@ export function snapLine(pts) {
   const a = pts[0], b = pts[pts.length - 1];
   let by = b[1];
   if (Math.abs(b[1] - a[1]) < Math.abs(b[0] - a[0]) * 0.12) by = a[1];
-  return [[a[0], a[1], a[2]], [b[0], by, b[2]]];
+  return [[a[0], a[1]], [b[0], by]];
 }
 
 /* 점을 소수 둘째 자리로 줄이고, 앞 점과 거의 겹치는 점은 버린다(굿노트 /InkList 는
@@ -142,7 +117,7 @@ export function tidyPts(pts, minGap = 0.12) {
   const out = [];
   const r = (v) => Math.round(v * 100) / 100;
   for (const p of pts) {
-    const q = p.length > 2 && p[2] != null ? [r(p[0]), r(p[1]), Math.round(p[2] * 100) / 100] : [r(p[0]), r(p[1])];
+    const q = [r(p[0]), r(p[1])];
     const l = out[out.length - 1];
     if (l && Math.abs(l[0] - q[0]) < minGap && Math.abs(l[1] - q[1]) < minGap) continue;
     out.push(q);
