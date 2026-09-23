@@ -6,6 +6,7 @@ import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { PDFDocument, PDFName, PDFHexString, PDFNumber } from "pdf-lib";
 import { mountRemote } from "./remote.js";
+import { importAnnots, exportWithAnnots } from "./annots.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -275,8 +276,10 @@ const DATA_DIR = process.env.DATA_DIR || path.join(ROOT, "data");
 const PDF_DIR = path.join(DATA_DIR, "pdfs");
 const THUMB_DIR = path.join(DATA_DIR, "thumbs");
 const TEXT_DIR = path.join(DATA_DIR, "text"); // 서재 검색용 페이지별 본문 캐시, data/text/<id>.json
+const ANNOT_DIR = path.join(DATA_DIR, "annots"); // 필기, data/annots/<id>.json — 형식은 src/ink.js 머리말
 const LIB_FILE = path.join(DATA_DIR, "library.json");
 fs.mkdirSync(PDF_DIR, { recursive: true });
+fs.mkdirSync(ANNOT_DIR, { recursive: true });
 fs.mkdirSync(THUMB_DIR, { recursive: true });
 fs.mkdirSync(TEXT_DIR, { recursive: true });
 
@@ -372,9 +375,25 @@ app.post(
 );
 
 /* 읽기(기본)와 다운로드(?dl) — 경로는 목록에 있는 id 로만 만들어져 밖으로 나갈 수 없다 */
-app.get("/api/library/file/:id", requireAuth, (req, res) => {
+app.get("/api/library/file/:id", requireAuth, async (req, res) => {
   const f = lib.files.find((x) => x.id === req.params.id);
   if (!f) return res.status(404).json({ error: "없는 파일입니다." });
+  // ?dl&annots — "필기 포함" 내려받기. 필기가 없으면 원본 그대로 나간다.
+  if ("dl" in req.query && "annots" in req.query) {
+    try {
+      const data = await readAnnots(f.id);
+      if (Object.keys(data.pages || {}).length) {
+        const out = await exportWithAnnots(await fs.promises.readFile(path.join(PDF_DIR, f.id + ".pdf")), data);
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader("Content-Disposition",
+          `attachment; filename*=UTF-8''${encodeURIComponent(f.name + " (필기).pdf")}`);
+        return res.end(Buffer.from(out));
+      }
+    } catch (e) {
+      console.error("[여백] 필기 내보내기 실패", e);
+      return res.status(500).json({ error: "필기를 PDF에 넣지 못했습니다: " + e.message });
+    }
+  }
   const fn = encodeURIComponent(f.name + ".pdf");
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader(
@@ -520,6 +539,92 @@ app.post("/api/library/file/:id/outline", requireAuth, async (req, res) => {
   }
 });
 
+/* ── 필기 ──
+   처음 GET 할 때 PDF 에 들어 있던 /Ink·/Highlight 를 한 번 가져와(annots.js) 파일로 굳힌다 —
+   그 뒤로는 파일만 읽는다. 쓰기는 쪽 단위(PUT …/annots/:page): 굿노트 파일 한 쪽이 1300획·1MB 가까이
+   되는데 획 하나 그을 때마다 책 전체를 올릴 수는 없다. 같은 문서에 대한 쓰기는 한 줄로 세운다. */
+const annotPath = (id) => path.join(ANNOT_DIR, id + ".json");
+const annotLoading = new Map(); // id → 가져오기 중인 Promise (동시에 두 번 파싱하지 않게)
+async function readAnnots(id) {
+  try {
+    return JSON.parse(await fs.promises.readFile(annotPath(id), "utf8"));
+  } catch (e) {
+    if (e.code !== "ENOENT") throw e;
+  }
+  if (!annotLoading.has(id)) {
+    annotLoading.set(id, (async () => {
+      let data;
+      try {
+        data = await importAnnots(await fs.promises.readFile(path.join(PDF_DIR, id + ".pdf")));
+        if (data.imported) console.log(`[여백] PDF 주석 ${data.count}개를 필기로 가져옴 (${id})`);
+      } catch (e) {
+        // 암호·손상 등으로 못 읽어도 필기는 새로 시작할 수 있게 빈 채로 둔다
+        console.warn("[여백] PDF 주석 읽기 실패", id, e.message);
+        data = { v: 1, imported: false, count: 0, pages: {} };
+      }
+      await writeJsonAtomic(annotPath(id), data);
+      return data;
+    })().finally(() => annotLoading.delete(id)));
+  }
+  return annotLoading.get(id);
+}
+async function writeJsonAtomic(file, data) {
+  const tmp = file + ".tmp";
+  await fs.promises.writeFile(tmp, JSON.stringify(data));
+  await fs.promises.rename(tmp, file);
+}
+const annotQueue = new Map(); // id → 마지막 쓰기 Promise
+const HEX = /^#[0-9a-f]{6}$/i;
+function cleanStroke(s) {
+  if (!s || typeof s !== "object" || !Array.isArray(s.pts) || !s.pts.length || s.pts.length > 20000) return null;
+  const w = Number(s.w);
+  if (!(w > 0 && w <= 80) || !HEX.test(s.c || "")) return null;
+  const pts = [];
+  for (const p of s.pts) {
+    if (!Array.isArray(p) || !Number.isFinite(p[0]) || !Number.isFinite(p[1])) return null;
+    pts.push(Number.isFinite(p[2]) ? [p[0], p[1], p[2]] : [p[0], p[1]]);
+  }
+  const out = { id: String(s.id || crypto.randomUUID()).slice(0, 40), t: s.t === "hl" ? "hl" : "pen", c: s.c, w, pts };
+  if (Number.isFinite(s.a)) out.a = Math.max(0.05, Math.min(1, s.a));
+  if (s.pr) out.pr = 1;
+  return out;
+}
+
+app.get("/api/library/file/:id/annots", requireAuth, async (req, res) => {
+  const f = lib.files.find((x) => x.id === req.params.id);
+  if (!f) return res.status(404).json({ error: "없는 파일입니다." });
+  try {
+    res.json(await readAnnots(f.id));
+  } catch (e) {
+    res.status(500).json({ error: "필기를 읽지 못했습니다: " + e.message });
+  }
+});
+
+app.put("/api/library/file/:id/annots/:page", requireAuth, async (req, res) => {
+  const f = lib.files.find((x) => x.id === req.params.id);
+  if (!f) return res.status(404).json({ error: "없는 파일입니다." });
+  const page = Math.floor(Number(req.params.page));
+  const raw = req.body?.strokes;
+  if (!(page >= 1) || !Array.isArray(raw) || raw.length > 20000)
+    return res.status(400).json({ error: "잘못된 필기 데이터입니다." });
+  const strokes = raw.map(cleanStroke).filter(Boolean);
+  const run = (annotQueue.get(f.id) || Promise.resolve()).then(async () => {
+    const data = await readAnnots(f.id);
+    data.pages ||= {};
+    if (strokes.length) data.pages[page] = strokes;
+    else delete data.pages[page];
+    await writeJsonAtomic(annotPath(f.id), data);
+  });
+  annotQueue.set(f.id, run.catch(() => {}));
+  try {
+    await run;
+    res.json({ ok: true, count: strokes.length });
+  } catch (e) {
+    console.error("[여백] 필기 저장 실패", e);
+    res.status(500).json({ error: "필기를 저장하지 못했습니다: " + e.message });
+  }
+});
+
 app.delete("/api/library/file/:id", requireAuth, (req, res) => {
   const i = lib.files.findIndex((x) => x.id === req.params.id);
   if (i < 0) return res.status(404).json({ error: "없는 파일입니다." });
@@ -527,6 +632,7 @@ app.delete("/api/library/file/:id", requireAuth, (req, res) => {
   fs.rm(path.join(PDF_DIR, f.id + ".pdf"), { force: true }, () => {});
   fs.rm(path.join(THUMB_DIR, f.id + ".jpg"), { force: true }, () => {});
   fs.rm(path.join(TEXT_DIR, f.id + ".json"), { force: true }, () => {});
+  fs.rm(annotPath(f.id), { force: true }, () => {});
   saveLib();
   res.json({ ok: true });
 });

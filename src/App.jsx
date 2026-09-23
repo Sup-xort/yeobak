@@ -3,6 +3,7 @@ import "katex/dist/katex.min.css";
 import "./App.css";
 import Rich from "./rich.jsx";
 import { u } from "./paths.js";
+import { drawStroke, hitStroke, strokeInLasso, polyBox, bbox as inkBox, snapLine, tidyPts } from "./ink.js";
 
 /* ───────────────────────── 설정 ───────────────────────── */
 const CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
@@ -35,6 +36,12 @@ const COARSE = typeof window !== "undefined" && !!window.matchMedia?.("(pointer:
 const IS_SAFARI =
   typeof navigator !== "undefined" &&
   /^((?!chrome|android|crios|fxios|edgios).)*safari/i.test(navigator.userAgent);
+
+/* 필기 도구 프리셋 — 굵기는 pt(배율 1 단위). 펜 1.4pt ≈ 0.5mm 볼펜 */
+const INK_PEN_COLORS = ["#1e1b1b", "#1d4ed8", "#dc2626", "#15803d", "#7c3aed"];
+const INK_HL_COLORS = ["#fde047", "#86efac", "#f9a8d4", "#93c5fd", "#fdba74"];
+const INK_PEN_W = [0.8, 1.4, 2.4];
+const INK_HL_W = [6, 10, 16];
 
 /* ── 서재 인사말 ──
    시간대(새벽·아침·낮·저녁·밤) × 맥락(처음·이어읽기·오랜만) 두 축에서 문장을 고른다.
@@ -607,6 +614,11 @@ export default function VerbatimReader() {
       if (typeof s.invert === "boolean") setInvert(s.invert);
       if (s.panelMode === "panel" || s.panelMode === "card") setPanelMode(s.panelMode);
       if (typeof s.penCapture === "boolean") setPenCapture(s.penCapture);
+      if (s.ink && typeof s.ink === "object") {
+        const k = { ...inkCfgRef.current, ...s.ink };
+        inkCfgRef.current = k;
+        setInkTool(k.tool); setInkPen(k.pen); setInkHl(k.hl);
+      }
     } catch {}
   }, []);
   const persist = useCallback(() => {
@@ -616,7 +628,7 @@ export default function VerbatimReader() {
         JSON.stringify({
           cfg: cfgRef.current, zoom: zoomRef.current,
           theme: themeRef.current, invert: invertRef.current, panelMode: panelModeRef.current,
-          penCapture: penCaptureRef.current,
+          penCapture: penCaptureRef.current, ink: inkCfgRef.current,
         })
       );
     } catch {}
@@ -1143,6 +1155,7 @@ export default function VerbatimReader() {
       curFileRef.current = { id: j.id, name: j.name };
       refreshLib();
       if (!j.thumb) sendThumb(j.id);
+      attachAnnots(j.id);
     } catch (e) {
       if (e.name !== "AuthError")
         setLibErr(`서버에 저장하지 못했습니다 (${e.message}) — 문서는 열려 있지만 서재에는 없습니다.`);
@@ -1182,8 +1195,13 @@ export default function VerbatimReader() {
   const openLibFile = async (f, gotoPage) => {
     try {
       setLibErr("");
-      const buf = await fetchPDF(f.id, f.name);
+      await flushInk();
+      annotsRef.current = null;
+      resetInk();
+      // 필기는 PDF 와 동시에 받는다 — 첫 렌더 전에 있어야 가져온 주석을 두 겹으로 안 그린다
+      const [buf, ann] = await Promise.all([fetchPDF(f.id, f.name), loadAnnots(f.id)]);
       curFileRef.current = { id: f.id, name: f.name };
+      annotsRef.current = ann;
       setLibOpen(false);
       await loadPDF(new Uint8Array(buf), f.name);
       const target = gotoPage || f.lastPage;
@@ -1430,7 +1448,7 @@ export default function VerbatimReader() {
   const delFile = async (id) => {
     try {
       await libApi("/api/library/file/" + id, { method: "DELETE" });
-      if (curFileRef.current?.id === id) curFileRef.current = null;
+      if (curFileRef.current?.id === id) { curFileRef.current = null; annotsRef.current = null; }
       refreshLib();
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("지우지 못했습니다.");
@@ -1666,10 +1684,17 @@ export default function VerbatimReader() {
       await page.render({
         canvasContext: ctx, viewport: vp,
         transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
+        // PDF 주석을 필기로 가져온 문서는 원본 주석 외관을 끈다 — 안 그러면 같은 획이 두 겹으로 보이고,
+        // 여백에서 지우거나 옮겨도 원본이 그 자리에 남는다
+        annotationMode: annotsRef.current?.imported
+          ? window.pdfjsLib.AnnotationMode.DISABLE : window.pdfjsLib.AnnotationMode.ENABLE,
       }).promise;
-      // 완성 — 이전 캔버스와 남아 있던 텍스트 레이어를 걷어낸다
-      el.querySelectorAll("canvas").forEach((c) => { if (c !== cv) c.remove(); });
+      // 완성 — 이전 캔버스와 남아 있던 텍스트 레이어를 걷어낸다.
+      // 필기 캔버스(.vb-ink)는 paintInk 가 새 것으로 바꿔 끼울 때까지 남겨 둔다(번쩍임 방지)
+      el.querySelectorAll("canvas:not(.vb-ink)").forEach((c) => { if (c !== cv) c.remove(); });
       el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
+      el.dataset.w1 = String(vp.width / vp.scale); // 이 쪽의 배율 1 폭 — 필기 좌표 환산 기준
+      paintInk(n);
       const layer = document.createElement("div");
       layer.className = "vb-tl";
       el.appendChild(layer);
@@ -2314,6 +2339,8 @@ export default function VerbatimReader() {
     const cancel = () => { pend = null; };
     const onDown = (ev) => {
       if (ev.pointerType === "touch" && ev.isPrimary === false) { pend = null; return; }
+      // 필기 모드에선 펜·마우스는 쓰는 도구다 — 단어 풀이는 손가락 탭으로만
+      if (inkOnRef.current && ev.pointerType !== "touch") { pend = null; return; }
       const el = ev.target.closest?.(".w");
       if (!el) { pend = null; return; }
       pend = { el, x: ev.clientX, y: ev.clientY, id: ev.pointerId, t: Date.now() };
@@ -2380,6 +2407,8 @@ export default function VerbatimReader() {
 
     const onStart = (e) => {
       if (e.touches.length !== 2 || !pdfRef.current) return;
+      // 필기 중 손바닥이 닿아 생긴 '두 손가락'은 핀치가 아니다
+      if (inkOnRef.current && [...e.touches].some((t) => t.touchType === "stylus")) return;
       /* 여기서 preventDefault 로 네이티브 팬을 원천 차단해 보려 했지만 되돌렸다 —
          렉이 걸리고, 페이지 크기는 그대로인데 내용만 작아지고 상하반전되는 렌더 깨짐이 생겼다.
          핀치 중 튀는 문제는 아래 onMove 의 e.cancelable 사후 방어로만 다룬다. */
@@ -2871,6 +2900,10 @@ export default function VerbatimReader() {
   useEffect(() => { capModeRef.current = capMode; }, [capMode]);
   const [penCapture, setPenCapture] = useState(true); // 애플펜슬로 그으면 자동 캡처(사파리 전용)
   const penCaptureRef = useRef(penCapture);
+  // 필기 모드 — 켜면 애플펜슬은 필기, 끄면 위의 펜 캡처. 나머지 필기 상태는 아래 "필기(잉크)" 절
+  const [inkOn, setInkOn] = useState(false);
+  const inkOnRef = useRef(false);
+  useEffect(() => { inkOnRef.current = inkOn; }, [inkOn]);
   useEffect(() => { penCaptureRef.current = penCapture; }, [penCapture]);
   const [penSel, setPenSel] = useState(null); // 펜 드래그 중 미리보기(.vb-view 기준, pointer-events:none)
 
@@ -2958,7 +2991,7 @@ export default function VerbatimReader() {
     const view = viewRef.current;
     // 꺼져 있으면 리스너를 아예 안 붙인다 — non-passive 터치 리스너의 존재 자체가
     // 핀치줌의 e.cancelable 판정에 영향을 줄 수 있어서, 껐을 때는 예전과 100% 같은 상태여야 한다
-    if (!view || !IS_SAFARI || !penCapture) return;
+    if (!view || !IS_SAFARI || !penCapture || inkOn) return; // 필기 모드면 펜은 필기 몫
     let pend = null; // {x0, y0}
 
     const isPen = (e) =>
@@ -3015,7 +3048,527 @@ export default function VerbatimReader() {
       view.removeEventListener("touchcancel", onCancel);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [penCapture]);
+  }, [penCapture, inkOn]);
+
+  /* ───────── 필기(잉크) ─────────
+     획 데이터는 annotsRef(ref)에만 있다 — 긋는 동안 React 리렌더 0회. 좌표계·획 모양은 src/ink.js 머리말.
+     화면: 쪽마다 .vb-ink.hl(형광펜, multiply) + .vb-ink.pen 캔버스 두 장이 pdf 캔버스 위·텍스트 레이어
+     아래에 깔린다(renderPage → paintInk). 긋는 중인 획만 화면에 고정된 '젖은' 캔버스(.vb-wet)에
+     touchmove 안에서 곧바로 그리고(rAF 도 안 기다린다), 펜을 떼면 쪽 캔버스에 한 번 옮겨 그린다.
+     저장은 쪽 단위 PUT 을 800ms 디바운스 — 굿노트에서 온 쪽은 1300획·1MB 가까이 된다. */
+  const [inkTool, setInkTool] = useState("pen");               // pen | hl | eraser | lasso
+  const [inkPen, setInkPen] = useState({ c: INK_PEN_COLORS[0], w: INK_PEN_W[1] });
+  const [inkHl, setInkHl] = useState({ c: INK_HL_COLORS[0], w: INK_HL_W[1] });
+  const inkCfgRef = useRef({ tool: "pen", pen: { c: INK_PEN_COLORS[0], w: INK_PEN_W[1] }, hl: { c: INK_HL_COLORS[0], w: INK_HL_W[1] } });
+  const annotsRef = useRef(null);            // {id, imported, pages:{n:[stroke]}} — null 이면 필기 불가
+  const inkHistRef = useRef({ undo: [], redo: [] });
+  const [inkHist, setInkHist] = useState({ u: 0, r: 0 });
+  const [inkSel, setInkSel] = useState(null); // 올가미로 고른 획 {n, ids:Set, box:[x0,y0,x1,y1]}
+  const inkSelRef = useRef(null);
+  const inkDirtyRef = useRef(new Set());
+  const inkTimerRef = useRef(0);
+  const wetIdleRef = useRef(null);           // 젖은 캔버스를 비우고 선택 상자만 다시 그린다(이펙트가 채움)
+  const [inkErr, setInkErr] = useState("");
+
+  const setInkCfg = (patch) => {
+    const k = { ...inkCfgRef.current, ...patch };
+    inkCfgRef.current = k;
+    setInkTool(k.tool); setInkPen(k.pen); setInkHl(k.hl);
+    persist();
+  };
+
+  const inkStrokes = (n) => annotsRef.current?.pages?.[n] || [];
+
+  const setSel = (sel) => {
+    inkSelRef.current = sel;
+    setInkSel(sel);
+    wetIdleRef.current?.();
+  };
+
+  const resetInk = () => {
+    inkHistRef.current = { undo: [], redo: [] };
+    setInkHist({ u: 0, r: 0 });
+    inkSelRef.current = null;
+    setInkSel(null);
+    setInkErr("");
+  };
+
+  /* 쪽 n 의 필기 캔버스를 통째로 새로 그려 바꿔 끼운다. hide = 그리지 않을 획 id(올가미로 끄는 중) */
+  const paintInk = (n, hide) => {
+    const el = pagesRef.current[n - 1];
+    if (!el) return;
+    const old = el.querySelectorAll("canvas.vb-ink");
+    const strokes = inkStrokes(n);
+    if (!strokes.length) { old.forEach((c) => c.remove()); return; }
+    const base = el.querySelector("canvas:not(.vb-ink)");
+    const w1 = +el.dataset.w1;
+    if (!base || !w1) return; // 아직 안 그려진 쪽 — renderPage 가 부른다
+    const k = base.width / w1;
+    const mk = (cls) => {
+      const c = document.createElement("canvas");
+      c.className = "vb-ink " + cls;
+      c.width = base.width;
+      c.height = base.height;
+      return c;
+    };
+    const hl = mk("hl"), pen = mk("pen");
+    const hctx = hl.getContext("2d"), pctx = pen.getContext("2d");
+    for (const s of strokes) if (!hide?.has(s.id)) drawStroke(s.t === "hl" ? hctx : pctx, s, k);
+    const tl = el.querySelector(".vb-tl");
+    el.insertBefore(hl, tl);
+    el.insertBefore(pen, tl);
+    old.forEach((c) => c.remove());
+  };
+
+  /* 획 하나만 덧그린다 — 새 획을 그을 때마다 1300획을 다 다시 그리지 않게 */
+  const drawInkOne = (n, s) => {
+    const el = pagesRef.current[n - 1];
+    const c = el?.querySelector("canvas.vb-ink." + (s.t === "hl" ? "hl" : "pen"));
+    const w1 = +el?.dataset.w1;
+    if (!c || !w1) { paintInk(n); return; }
+    drawStroke(c.getContext("2d"), s, c.width / w1);
+  };
+
+  const flushInk = async () => {
+    clearTimeout(inkTimerRef.current);
+    const a = annotsRef.current;
+    const dirty = [...inkDirtyRef.current];
+    inkDirtyRef.current.clear();
+    if (!a?.id || !dirty.length) return;
+    await Promise.all(dirty.map((n) =>
+      libApi(`/api/library/file/${a.id}/annots/${n}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ strokes: a.pages[n] || [] }),
+      }).then(() => setInkErr("")).catch((e) => {
+        if (e.name === "AuthError") return;
+        if (annotsRef.current === a) inkDirtyRef.current.add(n); // 다음 저장 때 다시 보낸다
+        setInkErr("필기를 저장하지 못했습니다 — " + e.message);
+      })
+    ));
+  };
+  const markInk = (n) => {
+    inkDirtyRef.current.add(n);
+    clearTimeout(inkTimerRef.current);
+    inkTimerRef.current = setTimeout(flushInk, 800);
+  };
+  // 앱 전환·홈 화면으로 나갈 때 기다리던 저장을 바로 보낸다
+  useEffect(() => {
+    const on = () => { if (document.visibilityState !== "visible") flushInk(); };
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+
+  const loadAnnots = async (id) => {
+    try {
+      const j = await (await libApi(`/api/library/file/${id}/annots`)).json();
+      return { id, imported: !!j.imported, pages: j.pages || {} };
+    } catch (e) {
+      // 못 읽었는데 쓰게 두면 그 쪽의 서버 필기를 빈 쪽으로 덮어쓴다 — 아예 막는다
+      if (e.name !== "AuthError") setInkErr("필기를 불러오지 못했습니다 — " + e.message);
+      return null;
+    }
+  };
+  /* 로컬 파일을 열면 업로드가 끝나야 id 가 생긴다 — 그때 필기를 붙인다(같은 PDF 를 다시 올린 경우
+     서재에 있던 필기가 돌아온다). 주석을 가져온 문서면 원본 주석을 끈 채 다시 그려야 한다. */
+  const attachAnnots = async (id) => {
+    const ann = await loadAnnots(id);
+    if (!ann || curFileRef.current?.id !== id) return;
+    annotsRef.current = ann;
+    const ns = [...renderedRef.current];
+    if (ann.imported) {
+      renderedRef.current.clear();
+      ns.forEach((n) => renderPage(n));
+    } else ns.forEach((n) => paintInk(n));
+  };
+
+  /* ── 실행취소 ── op: add{n,s} · del{n,items:[{s,i}]} · move{n,ids,dx,dy} · color{n,ids,from,to}
+     del 의 items 는 지운 순서대로 쌓이고, 되돌릴 땐 거꾸로 제자리(i)에 꽂는다 — 그러면 지우개로
+     여러 번에 걸쳐 지운 것도 정확히 원래 순서로 돌아온다. */
+  const inkApply = (op, dir) => {
+    const a = annotsRef.current;
+    if (!a) return;
+    const list = (a.pages[op.n] ||= []);
+    const idx = (id) => list.findIndex((s) => s.id === id);
+    if (op.k === "add") {
+      if (dir > 0) list.push(op.s);
+      else { const i = idx(op.s.id); if (i >= 0) list.splice(i, 1); }
+    } else if (op.k === "del") {
+      if (dir > 0) for (const { s } of op.items) { const i = idx(s.id); if (i >= 0) list.splice(i, 1); }
+      else for (const { s, i } of [...op.items].reverse()) list.splice(Math.min(i, list.length), 0, s);
+    } else if (op.k === "move") {
+      const dx = op.dx * dir, dy = op.dy * dir;
+      for (const s of list) if (op.ids.has(s.id))
+        s.pts = s.pts.map((p) => (p.length > 2 ? [p[0] + dx, p[1] + dy, p[2]] : [p[0] + dx, p[1] + dy]));
+    } else if (op.k === "color") {
+      for (const s of list) if (op.ids.has(s.id)) s.c = dir > 0 ? op.to : op.from[s.id];
+    }
+    if (!list.length) delete a.pages[op.n];
+    paintInk(op.n);
+    markInk(op.n);
+  };
+  const inkPush = (op) => {
+    const h = inkHistRef.current;
+    h.undo.push(op);
+    if (h.undo.length > 300) h.undo.shift();
+    h.redo = [];
+    setInkHist({ u: h.undo.length, r: 0 });
+  };
+  const inkUndo = () => {
+    const h = inkHistRef.current;
+    const op = h.undo.pop();
+    if (!op) return;
+    setSel(null);
+    inkApply(op, -1);
+    h.redo.push(op);
+    setInkHist({ u: h.undo.length, r: h.redo.length });
+  };
+  const inkRedo = () => {
+    const h = inkHistRef.current;
+    const op = h.redo.pop();
+    if (!op) return;
+    setSel(null);
+    inkApply(op, 1);
+    h.undo.push(op);
+    setInkHist({ u: h.undo.length, r: h.redo.length });
+  };
+
+  const selBox = (strokes) => {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const s of strokes) {
+      const b = inkBox(s);
+      x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]); x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]);
+    }
+    return [x0, y0, x1, y1];
+  };
+  const inkSelDelete = () => {
+    const sel = inkSelRef.current;
+    const list = annotsRef.current?.pages?.[sel?.n];
+    if (!sel || !list) return;
+    const items = [];
+    for (let i = list.length - 1; i >= 0; i--) if (sel.ids.has(list[i].id)) items.push({ s: list.splice(i, 1)[0], i });
+    if (!list.length) delete annotsRef.current.pages[sel.n];
+    if (items.length) inkPush({ k: "del", n: sel.n, items });
+    setSel(null);
+    paintInk(sel.n);
+    markInk(sel.n);
+  };
+  const inkSelColor = (c) => {
+    const sel = inkSelRef.current;
+    if (!sel) return;
+    const from = {};
+    for (const s of inkStrokes(sel.n)) if (sel.ids.has(s.id)) from[s.id] = s.c;
+    const op = { k: "color", n: sel.n, ids: sel.ids, from, to: c };
+    inkApply(op, 1);
+    inkPush(op);
+  };
+
+  const inkExport = async () => {
+    const id = annotsRef.current?.id;
+    if (!id) return;
+    await flushInk();
+    const a = document.createElement("a");
+    a.href = u(`/api/library/file/${id}?dl=1&annots=1`);
+    a.download = "";
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  /* ── 입력 ──
+     펜 캡처(위)와 같은 원칙: 터치 이벤트만, stylus 만, touchstart 에서 preventDefault 로 스크롤을
+     원천 차단, 필기 모드가 꺼지면 리스너 자체를 뗀다(핀치의 e.cancelable 전제를 지키려고).
+     손가락은 전혀 안 건드린다 — 스크롤·핀치·단어 탭이 그대로다(= 굿노트의 "펜슬로만 그리기").
+     마우스·데스크톱 펜은 터치 화면이 아닐 때만 포인터 이벤트로 받는다. */
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view || !inkOn) return;
+    const wet = document.createElement("canvas");
+    wet.className = "vb-wet";
+    // body 에 붙인다 — .vb-pages 는 will-change:transform 이라 그 안의 fixed 는 화면 고정이 안 된다
+    document.body.appendChild(wet);
+    let ctx = null, vr = null, dpr = 1, cur = null;
+
+    const fit = () => {
+      const r = view.getBoundingClientRect();
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+      if (!vr || r.left !== vr.left || r.top !== vr.top || r.width !== vr.width || r.height !== vr.height) {
+        Object.assign(wet.style, { left: r.left + "px", top: r.top + "px", width: r.width + "px", height: r.height + "px" });
+        wet.width = Math.round(r.width * dpr);
+        wet.height = Math.round(r.height * dpr);
+        ctx = wet.getContext("2d", { desynchronized: true });
+      }
+      vr = r;
+      // 야간 반전이면 쪽 캔버스와 같은 색으로 보이게 — 안 그러면 펜을 떼는 순간 색이 뒤집힌다
+      wet.style.filter = invertRef.current ? "invert(1) hue-rotate(180deg)" : "";
+    };
+    const geo = (n) => {
+      const el = pagesRef.current[n - 1];
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      const w1 = +el.dataset.w1 || baseRef.current?.w;
+      return w1 ? { r, k: r.width / w1 } : null;
+    };
+    const wk = (g) => [g.k * dpr, (g.r.left - vr.left) * dpr, (g.r.top - vr.top) * dpr];
+
+    const drawBox = (b, g, dx = 0, dy = 0) => {
+      const [k, ox, oy] = wk(g);
+      const pad = 5 * dpr;
+      const x = (b[0] + dx) * k + ox - pad, y = (b[1] + dy) * k + oy - pad;
+      const w = (b[2] - b[0]) * k + pad * 2, h = (b[3] - b[1]) * k + pad * 2;
+      ctx.save();
+      ctx.fillStyle = "rgba(37,99,235,.07)";
+      ctx.fillRect(x, y, w, h);
+      ctx.setLineDash([6 * dpr, 4 * dpr]);
+      ctx.strokeStyle = "#2563eb";
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.strokeRect(x, y, w, h);
+      ctx.restore();
+    };
+    const idle = (skipSel) => {
+      if (!ctx) fit();
+      ctx.clearRect(0, 0, wet.width, wet.height);
+      const sel = inkSelRef.current;
+      if (sel && !skipSel) { const g = geo(sel.n); if (g) drawBox(sel.box, g); }
+    };
+    wetIdleRef.current = () => idle();
+
+    const render = () => {
+      if (!cur) { idle(); return; }
+      idle(cur.kind === "drag");
+      const g = geo(cur.n);
+      if (!g) return;
+      const [k, ox, oy] = wk(g);
+      if (cur.kind === "draw") {
+        const s = cur.s, P = s.pts;
+        let ds = s;
+        if (!cur.snapped && P.length >= 2) {
+          // 예측 꼬리 — 마지막 속도로 한 이벤트만큼 앞을 임시로 그린다(다음 이벤트에 진짜 점으로 바뀐다).
+          // 브라우저 합성 지연(1~2프레임)을 체감상 줄여 준다.
+          const a = P[P.length - 2], b = P[P.length - 1];
+          ds = { ...s, pts: [...P, [b[0] + (b[0] - a[0]) * 0.8, b[1] + (b[1] - a[1]) * 0.8, b[2]]] };
+        }
+        drawStroke(ctx, ds, k, ox, oy, false);
+      } else if (cur.kind === "erase" && cur.at) {
+        ctx.save();
+        ctx.strokeStyle = "rgba(120,120,120,.9)";
+        ctx.lineWidth = 1.2 * dpr;
+        ctx.beginPath();
+        ctx.arc(cur.at[0] * k + ox, cur.at[1] * k + oy, cur.r * k, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      } else if (cur.kind === "lasso") {
+        ctx.save();
+        ctx.setLineDash([5 * dpr, 4 * dpr]);
+        ctx.strokeStyle = "#2563eb";
+        ctx.lineWidth = 1.5 * dpr;
+        ctx.beginPath();
+        cur.poly.forEach((p, i) => (i ? ctx.lineTo(p[0] * k + ox, p[1] * k + oy) : ctx.moveTo(p[0] * k + ox, p[1] * k + oy)));
+        ctx.stroke();
+        ctx.restore();
+      } else if (cur.kind === "drag") {
+        for (const s of cur.strokes) drawStroke(ctx, s, k, ox + cur.dx * k, oy + cur.dy * k);
+        drawBox(inkSelRef.current.box, g, cur.dx, cur.dy);
+      }
+    };
+
+    const eraseAt = (pt) => {
+      const list = annotsRef.current?.pages?.[cur.n];
+      cur.at = pt;
+      if (!list) return;
+      let hit = false;
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (hitStroke(list[i], pt[0], pt[1], cur.r)) { cur.gone.push({ s: list.splice(i, 1)[0], i }); hit = true; }
+      }
+      if (hit) {
+        if (!list.length) delete annotsRef.current.pages[cur.n];
+        paintInk(cur.n);
+      }
+    };
+
+    const armSnap = () => {
+      clearTimeout(cur.still);
+      const c = cur;
+      c.still = setTimeout(() => {
+        if (cur !== c || c.snapped) return;
+        const P = c.s.pts, a = P[0], b = P[P.length - 1];
+        if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 8) return; // 짧은 점·획은 펴지 않는다
+        c.snapped = true;
+        c.s.pts = snapLine(P);
+        render();
+      }, 450);
+    };
+
+    const begin = (x, y, p) => {
+      fit();
+      const a = annotsRef.current;
+      const n = pageAt(pagesRef.current, y);
+      const g = geo(n);
+      if (!g || x < g.r.left || x > g.r.right || y < g.r.top || y > g.r.bottom) return false;
+      if (!a?.id) { setInkErr("서재에 저장된 문서에만 필기할 수 있습니다."); return false; }
+      const pt = [(x - g.r.left) / g.k, (y - g.r.top) / g.k];
+      const cfg = inkCfgRef.current;
+      const sel = inkSelRef.current;
+      if (cfg.tool === "pen" || cfg.tool === "hl") {
+        const c = cfg.tool === "pen" ? cfg.pen : cfg.hl;
+        const s = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), t: cfg.tool, c: c.c, w: c.w, pts: [[pt[0], pt[1], p ?? 0.5]] };
+        if (cfg.tool === "pen" && p != null) s.pr = 1;
+        cur = { kind: "draw", n, s };
+        wet.style.mixBlendMode = cfg.tool === "hl" ? "multiply" : "";
+        if (sel) setSel(null);
+      } else if (cfg.tool === "eraser") {
+        cur = { kind: "erase", n, gone: [], r: 9 / g.k }; // 화면에서 반지름 9px
+        eraseAt(pt);
+      } else {
+        const pad = 8 / g.k;
+        if (sel && sel.n === n && pt[0] >= sel.box[0] - pad && pt[0] <= sel.box[2] + pad &&
+          pt[1] >= sel.box[1] - pad && pt[1] <= sel.box[3] + pad) {
+          cur = { kind: "drag", n, p0: pt, dx: 0, dy: 0, strokes: inkStrokes(n).filter((s) => sel.ids.has(s.id)) };
+          wet.style.mixBlendMode = "";
+          paintInk(n, sel.ids); // 끄는 동안은 쪽에서 빼고 젖은 캔버스에만 그린다
+        } else {
+          if (sel) setSel(null);
+          cur = { kind: "lasso", n, poly: [pt] };
+        }
+      }
+      render();
+      return true;
+    };
+
+    const add = (x, y, p) => {
+      // 쪽 위치는 매번 다시 잰다 — 긋는 중에 손바닥이 스크롤을 일으켜도 획이 쪽에 붙어 있게
+      const g = geo(cur.n);
+      if (!g) return;
+      const pt = [(x - g.r.left) / g.k, (y - g.r.top) / g.k];
+      if (cur.kind === "draw") {
+        const s = cur.s;
+        if (cur.snapped) { s.pts = snapLine([s.pts[0], [pt[0], pt[1], p ?? 0.5]]); return; }
+        const l = s.pts[s.pts.length - 1];
+        if (Math.abs(pt[0] - l[0]) + Math.abs(pt[1] - l[1]) < 0.04) return;
+        s.pts.push([pt[0], pt[1], p ?? 0.5]);
+        if (s.t === "hl") armSnap();
+      } else if (cur.kind === "erase") eraseAt(pt);
+      else if (cur.kind === "lasso") cur.poly.push(pt);
+      else { cur.dx = pt[0] - cur.p0[0]; cur.dy = pt[1] - cur.p0[1]; }
+    };
+
+    const end = () => {
+      const c = cur;
+      cur = null;
+      if (!c) return;
+      clearTimeout(c.still);
+      const a = annotsRef.current;
+      if (c.kind === "draw" && a) {
+        const s = c.s;
+        s.pts = tidyPts(s.pr ? s.pts : s.pts.map((q) => [q[0], q[1]]), 0.04);
+        (a.pages[c.n] ||= []).push(s);
+        drawInkOne(c.n, s); // 쪽 캔버스에 먼저 그리고, 같은 틱에 젖은 캔버스를 비운다 → 번쩍임 없음
+        inkPush({ k: "add", n: c.n, s });
+        markInk(c.n);
+      } else if (c.kind === "erase") {
+        if (c.gone.length) { inkPush({ k: "del", n: c.n, items: c.gone }); markInk(c.n); }
+      } else if (c.kind === "lasso") {
+        const poly = c.poly;
+        if (poly.length > 2) {
+          const pb = polyBox(poly);
+          const hits = inkStrokes(c.n).filter((s) => strokeInLasso(s, poly, pb));
+          if (hits.length) setSel({ n: c.n, ids: new Set(hits.map((s) => s.id)), box: selBox(hits) });
+        }
+      } else if (c.kind === "drag") {
+        const sel = inkSelRef.current;
+        if (sel && Math.abs(c.dx) + Math.abs(c.dy) > 0.01) {
+          const op = { k: "move", n: c.n, ids: sel.ids, dx: c.dx, dy: c.dy };
+          inkApply(op, 1);
+          inkPush(op);
+          const b = sel.box;
+          setSel({ ...sel, box: [b[0] + c.dx, b[1] + c.dy, b[2] + c.dx, b[3] + c.dy] });
+        } else paintInk(c.n);
+      }
+      wet.style.mixBlendMode = "";
+      render();
+    };
+
+    // ── 애플펜슬(터치 이벤트) ──
+    let tid = null;
+    const stylus = (list) => { for (const t of list) if (t.touchType === "stylus") return t; return null; };
+    const force = (t) => (t.force > 0 ? Math.min(1, t.force) : null);
+    const onTS = (e) => {
+      if (cur) { if (e.cancelable) e.preventDefault(); return; } // 긋는 중 닿은 손바닥이 스크롤로 새지 않게
+      const t = stylus(e.changedTouches);
+      if (!t) return;
+      if (begin(t.clientX, t.clientY, force(t))) {
+        tid = t.identifier;
+        if (e.cancelable) e.preventDefault();
+      }
+    };
+    const onTM = (e) => {
+      if (!cur) return;
+      if (e.cancelable) e.preventDefault();
+      let moved = false;
+      for (const t of e.changedTouches) if (t.identifier === tid) { add(t.clientX, t.clientY, force(t)); moved = true; }
+      if (moved) render();
+    };
+    const onTE = (e) => {
+      if (!cur) return;
+      for (const t of e.changedTouches) if (t.identifier === tid) { tid = null; end(); }
+    };
+    view.addEventListener("touchstart", onTS, { passive: false });
+    view.addEventListener("touchmove", onTM, { passive: false });
+    view.addEventListener("touchend", onTE, { passive: true });
+    view.addEventListener("touchcancel", onTE, { passive: true });
+
+    // ── 마우스·데스크톱 펜(터치 화면이 아닐 때만) ──
+    let pid = null;
+    const pres = (e) => (e.pointerType === "pen" && e.pressure > 0 ? e.pressure : null);
+    const onPD = (e) => {
+      if (e.pointerType === "touch" || e.button !== 0) return;
+      if (begin(e.clientX, e.clientY, pres(e))) {
+        pid = e.pointerId;
+        e.preventDefault();
+        view.setPointerCapture?.(e.pointerId);
+      }
+    };
+    const onPM = (e) => {
+      if (e.pointerId !== pid || !cur) return;
+      const evs = e.getCoalescedEvents?.();
+      for (const c of evs?.length ? evs : [e]) add(c.clientX, c.clientY, pres(c));
+      render();
+    };
+    const onPU = (e) => { if (e.pointerId === pid) { pid = null; end(); } };
+    if (!COARSE) {
+      view.addEventListener("pointerdown", onPD);
+      view.addEventListener("pointermove", onPM);
+      view.addEventListener("pointerup", onPU);
+      view.addEventListener("pointercancel", onPU);
+    }
+
+    // 손가락으로 스크롤하면 선택 상자를 따라 옮겨 그린다
+    const onScroll = () => { if (!cur && inkSelRef.current) idle(); };
+    view.addEventListener("scroll", onScroll, { passive: true });
+    const onResize = () => { vr = null; fit(); idle(); };
+    window.addEventListener("resize", onResize);
+
+    return () => {
+      view.removeEventListener("touchstart", onTS);
+      view.removeEventListener("touchmove", onTM);
+      view.removeEventListener("touchend", onTE);
+      view.removeEventListener("touchcancel", onTE);
+      view.removeEventListener("pointerdown", onPD);
+      view.removeEventListener("pointermove", onPM);
+      view.removeEventListener("pointerup", onPU);
+      view.removeEventListener("pointercancel", onPU);
+      view.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onResize);
+      if (cur) end();
+      wet.remove();
+      wetIdleRef.current = null;
+      inkSelRef.current = null;
+      setInkSel(null);
+      flushInk();
+    };
+  }, [inkOn]);
+
+  // 도구를 바꾸면 올가미 선택은 풀린다
+  useEffect(() => { if (inkTool !== "lasso" && inkSelRef.current) setSel(null); }, [inkTool]);
 
   const capDown = (e) => {
     if (capBusy || !capBox) return;
@@ -3254,7 +3807,10 @@ export default function VerbatimReader() {
     r.onload = async () => {
       const buf = r.result;
       const name = f.name.replace(/\.pdf$/i, "");
+      await flushInk();
       curFileRef.current = null;
+      annotsRef.current = null;
+      resetInk();
       setLibOpen(false);
       // pdf.js 가 버퍼를 워커로 가져가 비워 버리므로, 업로드용 원본과 분리한 복사본을 넘긴다
       await loadPDF(new Uint8Array(buf).slice(), name);
@@ -3654,7 +4210,13 @@ export default function VerbatimReader() {
             <svg viewBox="0 0 24 24"><path d="M3 8V4h4M21 8V4h-4M3 16v4h4M21 16v4h-4" /><rect x="8" y="8" width="8" height="8" strokeDasharray="2.5 2" /></svg>
           </button>
         )}
-        {IS_SAFARI && numPages > 0 && (
+        {numPages > 0 && (
+          <button className={"vb-tool" + (inkOn ? " on" : "")} onClick={() => setInkOn((v) => !v)}
+            aria-label="필기" title="필기 — 애플펜슬로 쓰고, 손가락으로는 넘기고 단어를 누른다">
+            <svg viewBox="0 0 24 24"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z" /></svg>
+          </button>
+        )}
+        {IS_SAFARI && numPages > 0 && !inkOn && (
           <button className={"vb-tool" + (penCapture ? " on" : "")}
             onClick={() => {
               const v = !penCapture;
@@ -3771,6 +4333,69 @@ export default function VerbatimReader() {
         </div>
 
         {zoomPill && <div className="vb-zoompill">{zoomPill}</div>}
+
+        {inkOn && numPages > 0 && (() => {
+          const tools = [
+            ["pen", "펜", <path key="p" d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z" />],
+            ["hl", "형광펜", <path key="h" d="M9 11l-6 6v3h9l3-3M22 12l-4.6 4.6a2 2 0 01-2.8 0l-5.2-5.2a2 2 0 010-2.8L14 4" />],
+            ["eraser", "지우개", <path key="e" d="M20 20H7L3 16a1.5 1.5 0 010-2.1L13.9 3a1.5 1.5 0 012.1 0L21 8a1.5 1.5 0 010 2.1L11 20M6 11l7 7" />],
+            ["lasso", "올가미", <path key="l" d="M7 22a5 5 0 01-2-4M3.3 14A7 5 0 1112 17c-1.4 0-2.7-.3-3.8-.8M5 18a2 2 0 100-4 2 2 0 000 4z" />],
+          ];
+          const isHl = inkTool === "hl";
+          const cur = isHl ? inkHl : inkPen;
+          const colors = isHl ? INK_HL_COLORS : INK_PEN_COLORS;
+          const widths = isHl ? INK_HL_W : INK_PEN_W;
+          const setCur = (patch) => setInkCfg(isHl ? { hl: { ...inkHl, ...patch } } : { pen: { ...inkPen, ...patch } });
+          return (
+            <div className="vb-inkbar" role="toolbar" aria-label="필기 도구">
+              {tools.map(([k, label, icon]) => (
+                <button key={k} className={"vb-inkb" + (inkTool === k ? " on" : "")} aria-label={label} title={label}
+                  onClick={() => setInkCfg({ tool: k })}>
+                  <svg viewBox="0 0 24 24">{icon}</svg>
+                </button>
+              ))}
+              <i className="vb-inksep" />
+              {inkSel ? (
+                <>
+                  <span className="vb-inkmsg">{inkSel.ids.size}획</span>
+                  {INK_PEN_COLORS.map((c) => (
+                    <button key={c} className="vb-inkc" style={{ "--c": c }} aria-label="이 색으로" onClick={() => inkSelColor(c)} />
+                  ))}
+                  <button className="vb-inkb" aria-label="선택 지우기" title="지우기" onClick={inkSelDelete}>
+                    <svg viewBox="0 0 24 24"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /></svg>
+                  </button>
+                </>
+              ) : inkTool === "pen" || inkTool === "hl" ? (
+                <>
+                  {colors.map((c) => (
+                    <button key={c} className={"vb-inkc" + (cur.c === c ? " on" : "")} style={{ "--c": c }}
+                      aria-label={"색 " + c} onClick={() => setCur({ c })} />
+                  ))}
+                  <i className="vb-inksep" />
+                  {widths.map((w, i) => (
+                    <button key={w} className={"vb-inkw" + (cur.w === w ? " on" : "")} aria-label={["가늘게", "보통", "굵게"][i]}
+                      onClick={() => setCur({ w })}>
+                      <b style={{ width: 4 + i * 4, height: 4 + i * 4, background: cur.c }} />
+                    </button>
+                  ))}
+                </>
+              ) : (
+                <span className="vb-inkmsg">{inkTool === "eraser" ? "닿은 획을 지운다" : "둘러서 고르고, 상자 안을 끌어 옮긴다"}</span>
+              )}
+              <i className="vb-inksep" />
+              <button className="vb-inkb" disabled={!inkHist.u} aria-label="실행취소" onClick={inkUndo}>
+                <svg viewBox="0 0 24 24"><path d="M9 14L4 9l5-5" /><path d="M4 9h10.5a5.5 5.5 0 010 11H11" /></svg>
+              </button>
+              <button className="vb-inkb" disabled={!inkHist.r} aria-label="다시 실행" onClick={inkRedo}>
+                <svg viewBox="0 0 24 24"><path d="M15 14l5-5-5-5" /><path d="M20 9H9.5a5.5 5.5 0 000 11H13" /></svg>
+              </button>
+              <button className="vb-inkb" aria-label="필기 포함 PDF 내려받기" title="필기 포함 PDF 내려받기" onClick={inkExport}>
+                <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></svg>
+              </button>
+              {inkErr && <span className="vb-inkerr">{inkErr}</span>}
+            </div>
+          );
+        })()}
 
         {upProg && (
           <div className="vb-uppill" role="status">

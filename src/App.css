@@ -919,3 +919,35 @@
 .vb-rm-hist{padding:16px 22px calc(24px + env(safe-area-inset-bottom));flex:1;min-height:0;overflow-y:auto}
 
 @media (prefers-reduced-motion:reduce){.vb-root *{transition:none!important;animation:none!important}}
+
+/* ───────── 필기 ─────────
+   .vb-ink 두 장은 pdf 캔버스 위·텍스트 레이어 아래(App.jsx paintInk). 형광펜 장은 multiply 로 섞어
+   글자가 비쳐 보이게 한다. .vb-wet 은 긋는 중인 획만 그리는 화면 고정 캔버스 — body 에 붙는다. */
+.vb-page canvas.vb-ink{pointer-events:none}
+.vb-page canvas.vb-ink.hl{mix-blend-mode:multiply}
+.vb-wet{position:fixed;pointer-events:none;z-index:41}
+.vb-inkbar{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:30;
+  display:flex;align-items:center;gap:2px;padding:5px 6px;border-radius:16px;max-width:calc(100% - 24px);
+  overflow-x:auto;scrollbar-width:none;background:var(--t-bar);backdrop-filter:blur(14px);
+  -webkit-backdrop-filter:blur(14px);border:1px solid var(--t-line);box-shadow:0 6px 24px rgba(0,0,0,.14)}
+.vb-inkbar::-webkit-scrollbar{display:none}
+.vb-inkb{width:38px;height:38px;border-radius:11px;display:inline-flex;align-items:center;
+  justify-content:center;color:var(--t-sub);flex:0 0 auto;touch-action:manipulation}
+.vb-inkb.on{background:var(--t-accBg);color:var(--t-accInk)}
+.vb-inkb:disabled{opacity:.35}
+.vb-inkb svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.7;
+  stroke-linecap:round;stroke-linejoin:round}
+.vb-inkc{width:30px;height:30px;border-radius:50%;flex:0 0 auto;display:inline-flex;
+  align-items:center;justify-content:center;touch-action:manipulation}
+.vb-inkc::before{content:"";width:20px;height:20px;border-radius:50%;background:var(--c);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.15)}
+.vb-inkc.on::before{box-shadow:0 0 0 2px var(--t-bar),0 0 0 4px var(--c)}
+.vb-inkw{width:30px;height:38px;flex:0 0 auto;display:inline-flex;align-items:center;
+  justify-content:center;border-radius:10px;touch-action:manipulation}
+.vb-inkw b{border-radius:50%;display:block;opacity:.55}
+.vb-inkw.on{background:var(--t-fill)}
+.vb-inkw.on b{opacity:1}
+.vb-inksep{width:1px;height:22px;background:var(--t-line);margin:0 4px;flex:0 0 auto}
+.vb-inkmsg{font-size:12px;color:var(--t-muted);padding:0 6px;white-space:nowrap}
+.vb-inkerr{font-size:12px;color:#dc2626;padding:0 6px;white-space:nowrap}
+@media (max-width:560px){.vb-inkbar{top:6px}.vb-inkw{width:26px}.vb-inkc{width:26px}}
