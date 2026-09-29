@@ -29,6 +29,7 @@ const TEST_MS = 30_000;         // 찾기 테스트 한 번의 상한
 const TAP_MAX_MS = 6_000;       // 이보다 첫 글자가 늦으면 탭용으로 안 쓴다
 const RECENT_BAD = 5 * 60 * 1000; // 이 안에 실패하고 그 뒤로 성공이 없는 모델은 줄 뒤로
 const PROVIDER_WIN = 5 * 60 * 1000; // 프로바이더(Google/NVIDIA) 전체 상태를 보는 창
+const OK_HALF = 30 * 60 * 1000;     // 성공률이 1 에서 모자란 만큼이 이 시간마다 절반으로 준다
 const FRESH_MS = 5 * 60 * 1000; // 쓰는 동안 이보다 오래된 기록은 1토큰으로 다시 잰다
 
 /* 직접 써 보고 적은 성격. 상태("몇 초", "무응답")는 적지 마라 — 금세 거짓말이 된다. */
@@ -143,9 +144,19 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
      서버가 Gemini 모델을 하나씩 차례로 다 두드린 뒤에야 NIM 에 닿거나, 그 전에 시도 상한에 걸렸다. */
   /* lane: "tap"(속생각 끈 탭) / "main"(질문·캡처). 같은 모델도 둘의 첫 글자 시간이 수십 배 다르다
      (nemotron-3.5-lightning: 끄면 0.6초, 켜면 17초) — 섞어 재면 둘 다 틀린다. 성공률은 공유한다. */
+  /* 성공률은 시간이 지나면 1 쪽으로 저절로 돌아온다(반감기 OK_HALF). 예전엔 성공해야만 회복했는데,
+     "자주 실패"로 뒤로 밀린 모델은 불리지도 1분 확인(touch — 상위 후보만)에 들지도 않아 영영 못 돌아왔다.
+     점수는 model-stats.json 에 남으므로 재기동해도 그대로였다(2026-09-29). */
+  const okNow = (s) => {
+    if (!s) return 1;
+    const dt = Date.now() - (s.okAt || s.at || Date.now());
+    return 1 - (1 - (s.okEw ?? 1)) * Math.pow(0.5, Math.max(0, dt) / OK_HALF);
+  };
   function record(id, ok, status = 0, ms = 0, lane = "main") {
     const s = st.get(id) || { okEw: 1 };
-    s.okEw = ok ? 0.7 * s.okEw + 0.3 : s.okEw * 0.5;
+    const cur = okNow(s);
+    s.okEw = ok ? 0.7 * cur + 0.3 : cur * 0.5;
+    s.okAt = Date.now();
     s.lanes = s.lanes || (s.msEw ? { main: s.msEw } : {});
     if (ok && ms) s.lanes[lane] = s.lanes[lane] ? 0.7 * s.lanes[lane] + 0.3 * ms : ms;
     s.msEw = s.lanes.main || s.msEw;
@@ -181,7 +192,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     if (lane === "tap") return s?.lanes?.tap ?? reg.get(id)?.tapMs ?? 60_000;
     return s?.lanes?.main ?? s?.msEw ?? reg.get(id)?.firstMs ?? 5000;
   };
-  const reliab = (id) => st.get(id)?.okEw ?? 1;
+  const reliab = (id) => okNow(st.get(id));
   /* 벌점: 0 이면 멀쩡. 정렬의 첫 기준이다. 모델 자신이 방금 실패(2), 성공률이 반 밑(1), 그 프로바이더가 막힘(1). */
   const penalty = (id) => (recentBad(id) ? 2 : 0) + (reliab(id) < 0.5 ? 1 : 0) + (providerDown(isGem(id)) ? 1 : 0);
   const version = (id) => Number(/(\d+(?:\.\d+)?)-/.exec(id.split("/").pop().replace(/^gemini-/, ""))?.[1] || 0);
@@ -497,6 +508,19 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     return { id: m.id, label: m.label || labelOf(m.id), think: lane === "tap" ? false : !!m.think, vision: !!(isGem(m.id) || m.vision),
       note: NOTES[m.id] ? `${NOTES[m.id]} (${measured})` : measured };
   }
+  /* 자동 순위의 이유 — 화면의 "자동이 고르는 순서"용. penalty·order 가 보는 것과 같은 값에서 뽑는다. */
+  function rankNote(id) {
+    const s = st.get(id);
+    const now = Date.now();
+    if (s?.quotaUntil > now) return { cls: "jam", text: `한도 초과 · ${Math.ceil((s.quotaUntil - now) / 60000)}분 쉼` };
+    if (recentBad(id)) return { cls: "jam", text: "방금 실패" };
+    if (providerDown(isGem(id))) return { cls: "busy", text: isGem(id) ? "Google 쪽 막힘" : "NIM 쪽 막힘" };
+    if (reliab(id) < 0.5) return { cls: "busy", text: "자주 실패" };
+    const ms = speed(id);
+    if (ms > 30000) return { cls: "busy", text: "느림" };
+    return { cls: "ok", text: s?.lanes?.main || s?.msEw ? `첫 글자 ${(ms / 1000).toFixed(1)}초` : "대기" };
+  }
+
   function publicList() {
     const byQ = (a, b) => quality(b.id) - quality(a.id);
     const all = [...reg.values()];
@@ -504,6 +528,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
       models: all.filter(isAsk).sort(byQ).map(describe),
       tapModels: all.filter(isTap).sort((a, b) => isGem(a.id) - isGem(b.id) || speed(a.id, "tap") - speed(b.id, "tap")).map((m) => describe(m, "tap")),
       auto: { ask: order("ask")[0] || "", tap: order("tap")[0] || "", image: order("image")[0] || "" },
+      askRank: order("ask").slice(0, 6).map((id) => ({ id, label: reg.get(id)?.label || id, ...rankNote(id) })),
       health: Object.fromEntries([...st].map(([id, s]) => [id, { ok: s.status !== -1 && (!s.lastFail || (s.lastOk || 0) > s.lastFail), status: s.status, at: s.at, ms: Math.round(s.msEw) }])),
       updatedAt, discovering,
     };

@@ -598,6 +598,23 @@
 .vb-mdlbtn svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.4;stroke-linecap:round;
   stroke-linejoin:round;opacity:.6;transition:transform .2s}
 .vb-mdlbtn.open svg{transform:rotate(180deg)}
+/* 모델 버튼: ● 자동 | 지금 도는(또는 다음에 부를) 모델 이름. 점 색 = 1순위 상태, 도는 중엔 깜박임 */
+.vb-mdlbtn{max-width:min(100%,260px)}
+.vb-mdldot{width:6px;height:6px;border-radius:50%;flex:none;background:var(--t-faint);font-style:normal}
+.vb-mdldot.ok{background:var(--t-mark2)}
+.vb-mdldot.busy{background:var(--t-star)}
+.vb-mdldot.jam{background:var(--t-warnDot)}
+.vb-mdldot.run{background:var(--t-star);animation:vbpulse 1.1s ease-in-out infinite}
+.vb-mdlmode{color:var(--t-faint);flex:none}
+.vb-mdlname{color:var(--t-ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 드롭다운의 "자동이 고르는 순서" */
+.vb-rank{padding:4px 12px 10px;border-bottom:1px solid var(--t-lineSoft)}
+.vb-rankrow{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12.5px;color:var(--t-sub)}
+.vb-rankrow b{width:16px;flex:none;font-size:11px;font-weight:600;color:var(--t-faint);font-variant-numeric:tabular-nums}
+.vb-rankrow .n{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb-rankrow.run .n{color:var(--t-ink);font-weight:600}
+.vb-mdlhp.run{color:var(--t-star)}
+.vb-mdlhp.run i{animation:vbblink .9s steps(2) infinite}
 .vb-mdlitem{width:100%;text-align:left;padding:10px 12px;display:flex;flex-direction:column;gap:3px;
   border-bottom:1px solid var(--t-lineSoft);touch-action:manipulation}
 .vb-mdlitem.on{background:var(--t-accBg)}
@@ -637,58 +654,71 @@
   background:var(--t-fill);color:var(--t-ink);white-space:nowrap;touch-action:manipulation;
   display:inline-flex;align-items:center;justify-content:center;line-height:1}
 .vb-statcard.warn .vb-statstop{background:var(--t-stopBg);color:var(--t-stopFg);font-weight:600}
-.vb-statsteps{display:flex;gap:4px;margin-top:11px}
-.vb-statstep{flex:1;display:flex;flex-direction:column;gap:5px}
-.vb-statstep b{height:3px;border-radius:2px;background:var(--t-line2);display:block;font-style:normal}
-.vb-statstep.done b{background:var(--t-accBd)}
-.vb-statstep.now b{background:var(--t-star)}
-.vb-statcard.warn .vb-statstep.now b{background:var(--t-warnDot)}
-.vb-statstep span{font-size:10px;color:var(--t-faint)}
-.vb-statstep.now span{font-weight:600;color:var(--t-sub)}
-.vb-statcard.warn .vb-statstep.now span{color:var(--t-warnSub)}
 .vb-statmeta{display:flex;align-items:center;gap:8px;margin-top:10px;padding-top:9px;
   border-top:1px solid var(--t-line2);font-size:11px;color:var(--t-muted);font-variant-numeric:tabular-nums;
   flex-wrap:wrap}
 .vb-statcard.warn .vb-statmeta{color:var(--t-warnSub);border-top-color:var(--t-warnBd)}
 .vb-statmeta .eng{padding:2px 6px;border-radius:5px;background:var(--t-engBg);color:var(--t-engFg);letter-spacing:.05em}
+/* 떨어진 모델들과 지금 모델이 왜 뽑혔나 */
+.vb-stattrail{display:flex;flex-wrap:wrap;align-items:center;gap:5px 6px;margin-top:9px;font-size:11px;color:var(--t-muted)}
+.vb-stattrail .x{padding:2px 7px;border-radius:6px;background:var(--t-fill);text-decoration:line-through;
+  text-decoration-color:var(--t-faint)}
+.vb-stattrail .x em{font-style:normal;text-decoration:none;color:var(--t-warnSub)}
+.vb-stattrail .why{color:var(--t-faint)}
 .vb-stathint{margin-top:9px;font-size:11.5px;line-height:1.6;color:var(--t-muted)}
 .vb-statcard.warn .vb-stathint{color:var(--t-warnSub)}
 .vb-stopped{margin-top:6px;font-size:11.5px;color:var(--t-faint)}
 /* 고른 모델이 아닌 쪽이 답했을 때만 뜬다 — 조용히 바뀌면 "드롭다운이 안 먹는다"로 보인다 */
 .vb-swap{margin-top:6px;font-size:11.5px;color:var(--t-faint)}
 
-.vb-recent{display:flex;align-items:center;gap:8px;padding:12px 0 10px;font-size:11px;letter-spacing:.12em;
-  text-transform:uppercase;color:var(--t-faint)}
-.vb-recent b{height:1px;flex:1;background:var(--t-line);font-weight:400}
-
-.vb-qa{padding-bottom:18px;border-bottom:1px solid var(--t-line)}
-.vb-qa.past{opacity:.66;padding:18px 0}
-.vb-qbubble{font-size:14.5px;line-height:1.6;color:var(--t-qInk);font-weight:600;padding:10px 14px;
-  border-radius:14px;background:var(--t-qBg);white-space:pre-wrap;word-break:break-word}
-.vb-qa.past .vb-qbubble{font-size:13.5px;background:var(--t-fill);color:var(--t-sub);padding:9px 13px;border-radius:13px}
-.vb-abody{font-size:15px;line-height:1.85;color:var(--t-ink);margin-top:14px}
-.vb-qa.past .vb-abody{font-size:14px;line-height:1.75;color:var(--t-sub);margin-top:12px}
-.vb-abody.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-/* 펼친 지난 문답은 최신 문답만큼 또렷하게 — 흐린 채로 펼치면 펼쳐도 읽을 수가 없다 */
-.vb-qa.past.open{opacity:1}
+/* 문답 — 질문은 조용한 머리글, 답은 본문. 한국어는 낱말 단위로 줄을 바꾼다(keep-all). */
+.vb-qa{padding:18px 0 20px;border-bottom:1px solid var(--t-lineSoft)}
+.vb-qa.latest{padding-top:16px}
+.vb-qa:last-child{border-bottom:0}
+.vb-earlier{margin:-4px 0 14px;font-size:11px;letter-spacing:.08em;color:var(--t-faint)}
+.vb-qbubble{font-size:15px;line-height:1.55;color:var(--t-ink);font-weight:620;padding:9px 13px;
+  border-radius:12px;background:var(--t-accBg);border-left:3px solid var(--t-star);
+  white-space:pre-wrap;word-break:keep-all;overflow-wrap:anywhere}
+.vb-qa.past .vb-qbubble{font-size:14px;font-weight:560;color:var(--t-sub);background:var(--t-fill);
+  border-left-color:var(--t-line2);cursor:pointer}
+.vb-abody{margin-top:12px;color:var(--t-ink)}
+.vb-qa.past .vb-abody{color:var(--t-sub)}
+.vb-qa.past .vb-abody .vb-md{font-size:14.5px}
+/* 접힌 지난 답은 세 줄 + 아래로 옅어짐 — 누르면 펼친다 */
+.vb-abody.clamp{max-height:5.2em;overflow:hidden;cursor:pointer;
+  -webkit-mask-image:linear-gradient(#000 45%,transparent);mask-image:linear-gradient(#000 45%,transparent)}
 .vb-qa.past.open .vb-qbubble{color:var(--t-ink)}
-.vb-qa.past.open .vb-abody{color:var(--t-ink);font-size:15px;line-height:1.85}
+.vb-qa.past.open .vb-abody{color:var(--t-ink)}
+.vb-qa.past.open .vb-abody .vb-md{font-size:15.5px}
 .vb-msgimg{display:block;max-width:min(100%,320px);border-radius:9px;border:1px solid var(--t-line2);
   margin:2px 0 8px;background:#fff}
-.vb-expand{margin-top:10px;height:30px;padding:0 11px;border-radius:10px;border:1px solid var(--t-line2);
-  background:none;color:var(--t-muted);font-size:12px;touch-action:manipulation}
+/* 답 아래 한 줄: 복사 · 다시 답하기 · 펼치기 … 오른쪽에 누가 답했나 */
+.vb-afoot{display:flex;align-items:center;gap:6px;margin-top:10px;flex-wrap:wrap}
+.vb-afoot button{height:28px;padding:0 10px;border-radius:9px;font-size:12px;color:var(--t-muted);
+  border:1px solid var(--t-line);touch-action:manipulation}
+.vb-afoot button:disabled{opacity:.45}
+.vb-afoot button.hot{color:var(--t-ink);border-color:var(--t-line2);font-weight:600}
+.vb-by{margin-left:auto;font-size:11px;line-height:1.4;color:var(--t-faint);text-align:right;min-width:0}
+
+/* 스크롤 칸 + 위로 가기 알약. 사파리엔 없는 스크롤 고정을 손으로 하므로 브라우저 것은 끈다(두 번 밀리지 않게) */
+.vb-scrollwrap{position:relative;flex:1;min-height:0;display:flex;flex-direction:column}
+.vb-scroll{overflow-anchor:none}
+.vb-scrollin{position:relative}
+.vb-jump{position:absolute;top:10px;left:50%;transform:translateX(-50%);z-index:3;height:32px;padding:0 14px;
+  border-radius:99px;background:var(--t-menu);border:1px solid var(--t-line2);box-shadow:0 6px 18px rgba(0,0,0,.18);
+  font-size:12.5px;color:var(--t-ink);animation:rise .18s ease-out;touch-action:manipulation}
 
 /* ── 모델이 준 마크다운·수식 ── */
-.vb-md{font-size:15px;line-height:1.85;word-break:break-word}
+.vb-md{font-size:15.5px;line-height:1.72;letter-spacing:-.003em;word-break:keep-all;overflow-wrap:anywhere}
 .vb-md>*:first-child{margin-top:0}
 .vb-md>*:last-child{margin-bottom:0}
-.vb-md p{margin:0 0 10px}
-.vb-md h1,.vb-md h2,.vb-md h3,.vb-md h4{margin:16px 0 8px;font-size:15.5px;font-weight:680;
+.vb-md p{margin:0 0 .8em}
+.vb-md h1,.vb-md h2,.vb-md h3,.vb-md h4{margin:1.3em 0 .5em;font-size:16px;font-weight:680;
   color:var(--t-ink);line-height:1.4}
-.vb-md h1{font-size:17px}
-.vb-md h2{font-size:16px}
+.vb-md h1{font-size:18px}
+.vb-md h2{font-size:17px}
 .vb-md ul,.vb-md ol{margin:0 0 10px;padding-left:20px}
-.vb-md li{margin:3px 0}
+.vb-md li{margin:.3em 0}
 .vb-md li::marker{color:var(--t-mark2)}
 .vb-md strong{color:var(--t-ink);font-weight:660}
 .vb-md em{color:var(--t-sub)}

@@ -128,7 +128,8 @@ export function pickGreeting(libData, storageKey = "yeobaek.greet") {
 
 
 /* ───────────────── AI 호출 (Claude → Gemini) ───────────────── */
-async function readSSE(res, pick, onDelta, onThink, onStop) {
+/* onEvent: 서버의 이름 있는 이벤트(try·fail·nap·pick·error — server/index.js 의 sseNote). */
+async function readSSE(res, pick, onDelta, onThink, onStop, onEvent) {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("event-stream")) {
     const j = await res.json();
@@ -140,7 +141,7 @@ async function readSSE(res, pick, onDelta, onThink, onStop) {
   }
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  let buf = "", out = "";
+  let buf = "", out = "", ev = "";
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -148,11 +149,14 @@ async function readSSE(res, pick, onDelta, onThink, onStop) {
     const lines = buf.split("\n");
     buf = lines.pop();
     for (const line of lines) {
+      if (line.startsWith("event:")) { ev = line.slice(6).trim(); continue; }
+      if (!line.trim()) { ev = ""; continue; }
       if (!line.startsWith("data:")) continue;
       const raw = line.slice(5).trim();
       if (!raw || raw === "[DONE]") continue;
       let j;
       try { j = JSON.parse(raw); } catch { continue; }
+      if (ev) { onEvent?.(ev, j); continue; }
       const t = pick.delta(j);
       if (t) { out += t; onDelta?.(t); }
       // 추론 모델의 속생각. 화면에는 안 쓰지만 "살아 있다"는 유일한 증거다.
@@ -201,6 +205,8 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
       tapModel: cfg.tapModel || "",
       // 그림째 Gemini 에게만 — 막혀 있으면 서버가 502 를 주고, 호출한 쪽이 두 단계로 넘어간다
       visionDirect: !!opts.visionDirect,
+      // 상태를 보는 쪽(onPhase)이 있으면 모델 고르는 과정까지 받는다 — 이때 모델 정보는 헤더가 아니라 pick 이벤트
+      progress: !!opts.onPhase,
     }),
   });
   if (res.status === 401) throw new AuthError();
@@ -209,18 +215,19 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
     try { d = (await res.json()).error || ""; } catch {}
     throw new Error("요청 실패 " + res.status + (d ? ": " + d : ""));
   }
-  const engine = res.headers.get("X-Engine") || "";
-  const model = res.headers.get("X-Model") || "";
+  let engine = res.headers.get("X-Engine") || "";
+  let model = res.headers.get("X-Model") || "";
   // 고른 모델이 붐벼서 다른 모델이 대신 답했으면 서버가 원래 고른 쪽을 여기 담아 준다.
   const wanted = res.headers.get("X-Wanted") || "";
   if (wanted) opts.onPhase?.("swap", { wanted, model });
-  /* 여기까지 왔다는 건 서버가 업스트림에 붙는 데 성공했다는 뜻이다.
+  /* 헤더에 모델이 있으면 서버가 이미 모델에 붙었다는 뜻이다(progress 가 아닐 때).
      이 시점부터 첫 글자까지의 침묵은 "모델이 생각 중"과 "죽었다"를 구분할 수 없다 —
-     그래서 상태만 알리고 끊는 판단은 사람에게 맡긴다. */
-  opts.onPhase?.("wait", { engine, model });
+     그래서 상태만 알리고 끊는 판단은 사람에게 맡긴다. progress 면 pick 이벤트가 같은 일을 한다. */
+  if (model) opts.onPhase?.("wait", { engine, model });
   let first = true;
   let think = 0;
   let stop = "";
+  let failed = "";
   const text = await readSSE(res, PICK_OPENAI, (c) => {
     if (first) { first = false; opts.onPhase?.("stream", { engine, model }); }
     opts.onPhase?.("tick");
@@ -230,7 +237,19 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
     // 속생각이 흐르는 동안은 답이 한 글자도 안 나온다. 그래도 모델은 일하고 있다.
     think += k.length;
     opts.onPhase?.("think", { engine, model, think });
-  }, (fr) => { stop = fr; });
+  }, (fr) => { stop = fr; }, (name, d) => {
+    if (name === "error") { failed = d.error || "모든 모델이 답하지 못했습니다."; return; }
+    if (name === "pick") {
+      engine = d.engine || ""; model = d.model || "";
+      if (d.wanted) opts.onPhase?.("swap", { wanted: d.wanted, model });
+      opts.onPhase?.("pick", d);
+      // 이어 쓰기(cont)는 답이 이미 흐르던 중이다 — 단계를 "계산 중"으로 되돌리지 않는다
+      if (d.why !== "cont") opts.onPhase?.("wait", { engine, model });
+      return;
+    }
+    opts.onPhase?.(name, d); // try · fail · nap
+  });
+  if (failed && !text) throw new Error(failed);
   // 상한에 걸려 끊긴 걸 조용히 넘기면 화면에는 "다 답했다"로 보인다 — 호출자에게 알린다
   if (stop === "length") opts.onPhase?.("cut", { engine, model });
   return { text, engine, model, truncated: stop === "length" };
@@ -375,6 +394,15 @@ const SYS_ASK = `너는 한국 대학생이 읽고 있는 문서를 함께 보�
 "더 궁금한 점 있으신가요", "계속 볼까요" 같은 권유로 맺지 않는다.
 ${FMT_RICH}`;
 
+/* ── 대화 접기(요약) 프롬프트 ──
+   긴 대화에서 오래된 문답을 한 덩어리 요약으로 접는다(maybeFold). 서버는 최근 16턴만 넘기므로
+   그 전에는 앞부분이 말없이 잘려 나가 "아까 정한 기호"를 잊었다. 접힌 요약은 system 에 실린다. */
+const SYS_FOLD = `너는 튜터와 학생의 대화를 정리하는 서기다. 튜터는 앞으로 이 요약만 보고 대화를 이어 간다.
+- 학생이 무엇을 물었고 튜터가 무엇이라 답했는지를 결론 위주로, 시간 순서대로 짧은 항목(- )으로 적는다.
+- 대화에서 정한 기호·용어·가정, 학생이 헷갈려한 점, 틀렸다고 고친 내용, 언급된 쪽수는 빠짐없이 남긴다.
+- [지금까지의 요약]이 있으면 그 내용을 버리지 말고 새 문답과 합쳐 하나의 요약으로 다시 쓴다.
+- 1200자 이내. 수식은 LaTeX 그대로. 머리말·인사 없이 요약만 출력한다.`;
+
 /* ── 이름 정리 프롬프트 ──
    서재의 여러 문서 이름을 사용자가 말한 형식으로 한 번에 맞춘다. 모델은 파일을 건드리지 않고
    "제안"만 JSON 으로 내놓는다 — 실제 변경은 사용자가 미리보기에서 확인하고 누를 때 일어난다.
@@ -507,6 +535,7 @@ export default function VerbatimReader() {
   const [pwErr, setPwErr] = useState("");
   const [pwBusy, setPwBusy] = useState(false);
   const [models, setModels] = useState([]);      // 질문 탭에서 고를 수 있는 모델
+  const [askRank, setAskRank] = useState([]);    // 자동이 지금 고르는 순서 [{id,label,cls,text}] — 서버 models.rankNote
   const [defModel, setDefModel] = useState("");  // 서버 기본값
   const [tapModels, setTapModels] = useState([]); // 단어·문장 탭에서 고를 수 있는 모델
   const [tapDef, setTapDef] = useState("");
@@ -732,13 +761,17 @@ export default function VerbatimReader() {
      48,000자짜리 본문이 대화 길이만큼 곱해져서 값도 지연도 폭발한다.
      hist 가 있으면 그걸 쓴다: 화면에는 "3쪽 영역 — 해석"만 보여도 모델에게는
      무엇을 시켰는지 문장으로 알려야 하기 때문이다. */
-  const histOf = (sid) =>
-    (findSess(sid)?.msgs || [])
+  /* upto: 이 번호 앞까지만(다시 답하기는 마지막 문답을 빼고 뽑는다).
+     접힌 요약(sum)이 있으면 sumTo 앞은 요약이 대신하므로 그 뒤만 넘긴다. */
+  const histOf = (sid, upto) => {
+    const s = findSess(sid);
+    return (s?.msgs || []).slice(s?.sum ? s.sumTo : 0, upto)
       /* err 가 붙었어도 받아 둔 답이 있으면 히스토리에 넣는다 — 끊긴 답을 빼 버리면
          "이어서 말해 줘"가 앞을 못 보고, 방금 고친 흐름 문제가 그대로 재현된다.
          답이 아예 없는 실패는 아래 text 검사에서 이미 걸러진다. */
       .filter((m) => !m.live && (m.hist || m.text || "").trim())
       .map((m) => ({ role: m.role === "me" ? "user" : "assistant", text: m.hist || m.text }));
+  };
 
   /* 복원 + 2시간 지난 세션 청소 */
   useEffect(() => {
@@ -824,6 +857,17 @@ export default function VerbatimReader() {
     // "차례를 기다리는 중"이 엉뚱하게 "답변 받는 중"으로 바뀐다 — 호출자가 따로 받는다.
     if (p === "swap") return;
     if (p === "tick") { bumpStat({ at: Date.now(), chars: getChars?.() ?? 0 }); return; }
+    const now = Date.now();
+    // 서버가 모델을 고르는 과정(progress) — 누구에게 묻는 중이고, 누가 왜 떨어졌나
+    if (p === "try") { setStat({ phase: "try", tryLabel: info.label, at: now }); return; }
+    if (p === "fail") { setStat({ trail: [...(statRef.current?.trail || []), { label: info.label, why: info.why }], at: now }); return; }
+    if (p === "nap") { setStat({ phase: "nap", napSec: info.sec, at: now }); return; }
+    if (p === "pick") {
+      const st = statRef.current || {};
+      const trail = info.why === "cont" && st.pickLabel ? [...(st.trail || []), { label: st.pickLabel, why: "끊김" }] : st.trail;
+      setStat({ pickLabel: info.label, pickWhy: info.why, trail, engine: info.engine, model: info.model, at: now });
+      return;
+    }
     if (p === "think") {
       // 속생각도 토큰 단위로 쏟아진다 — 단계가 처음 바뀔 때만 그리고, 나머지는 ref 만 민다.
       const was = statRef.current?.phase;
@@ -848,55 +892,102 @@ export default function VerbatimReader() {
   };
   const stopAsk = () => { jobRef.current?.ac.abort(); jobRef.current = null; setStat(null); };
 
+  /* 상태 카드 한 줄 + 왜 이 모델인지 + 떨어진 모델들.
+     예전엔 첫 글자 전까지 서버가 뭘 하는지 몰라 "차례를 기다리는 중"과 4칸 막대(보냄·배정·생각·답변)뿐이었고,
+     서버가 몰래 모델을 갈아타도 화면엔 안 보였다. 이제 서버가 try/fail/pick 을 흘려 준다(progress). */
+  const PICK_WHY = { auto: "자동 1순위", picked: "직접 고른 모델", fallback: "앞 모델이 안 돼서 넘어옴", cont: "끊겨서 이어 쓰는 중" };
   const statView = useMemo(() => {
     const st = aiStat;
     if (!st?.running) return null;
     const sec = Math.max(0, Math.round((Date.now() - st.t0) / 1000));
     const gap = Math.max(0, Math.round((Date.now() - (st.at || st.t0)) / 1000));
-    const who = st.engine ? `${st.engine}${st.model ? " " + st.model.split("/").pop() : ""}` : "";
+    const who = st.pickLabel || (st.model ? st.model.split("/").pop() : "");
     const step = st.step ? `${st.step} · ` : "";
-    /* send 와 wait 는 성격이 다르다. send 는 업스트림 응답 헤더조차 아직 안 온 상태 —
-       아직 배정을 못 받았다는 뜻이다. wait 는 헤더는 왔는데 토큰이 없는 상태로,
-       모델이 실제로 계산 중이다. 시간을 재서 짐작하는 게 아니라 헤더가 왔는지 안 왔는지의
-       구조적 차이라, 라벨만 정확히 갈라 준다.
-       send 에서도 오래 끌면 경고한다 — 배정조차 못 받은 채 45초면 알려야 한다. */
-    if (st.phase === "send")
-      return { text: `${step}차례를 기다리는 중 · ${sec}초`, warn: sec * 1000 >= STALL_WAIT };
-    /* 속생각이 흐르는 동안은 답이 한 글자도 안 나오지만 모델은 분명히 살아 있다.
-       여기서만은 "느리다"와 "죽었다"를 구분할 수 있으므로 절대 경고하지 않는다. */
+    const base = { why: PICK_WHY[st.pickWhy] || "", trail: st.trail || [] };
+    if (st.phase === "send") return { ...base, text: `${step}보내는 중 · ${sec}초`, warn: sec * 1000 >= STALL_WAIT };
+    if (st.phase === "try") return { ...base, text: `${step}${st.tryLabel}에 묻는 중 · ${sec}초`, warn: false };
+    if (st.phase === "nap") return { ...base, text: `모두 막혀 ${st.napSec}초 쉬고 다시 시도 · ${sec}초`, warn: true };
+    /* 속생각이 흐르는 동안은 답이 한 글자도 안 나오지만 모델은 분명히 살아 있다 — 경고하지 않는다. */
     if (st.phase === "think")
-      return {
-        text: `${step}생각하는 중 · ${st.think || 0}자 · ${sec}초${who ? ` · ${who}` : ""}`,
-        warn: false,
-      };
+      return { ...base, text: `${step}${who} 생각하는 중 · ${st.think || 0}자 · ${sec}초`, warn: false };
     if (st.phase === "wait") {
-      const warn = sec * 1000 >= STALL_WAIT;
+      const warn = gap * 1000 >= STALL_WAIT;
       return {
-        text: warn
-          ? `${step}${sec}초째 첫 글자가 오지 않습니다${who ? ` · ${who}` : ""} — 모델이 식었으면 1분까지 걸립니다`
-          : `${step}모델이 계산 중 · ${sec}초${who ? ` · ${who}` : ""}`,
+        ...base,
+        text: warn ? `${step}${who} — ${gap}초째 첫 글자가 없습니다` : `${step}${who} 계산 중 · ${sec}초`,
         warn,
       };
     }
     const warn = gap * 1000 >= STALL_GAP;
     return {
+      ...base,
       text: warn
-        ? `${step}${gap}초째 멈춰 있습니다 — 생각 중일 수도, 끊겼을 수도 있습니다${who ? ` · ${who}` : ""}`
-        : `${step}답변 받는 중 · ${st.chars || 0}자 · ${sec}초${who ? ` · ${who}` : ""}`,
+        ? `${step}${who} — ${gap}초째 멈춰 있습니다`
+        : `${step}${who} 답하는 중 · ${st.chars || 0}자 · ${sec}초`,
       warn,
     };
   }, [aiStat, statTick]);
 
-  /* 새 문답은 맨 위("최신")에 꽂힌다 — 문답이 하나 늘거나 세션을 옮기면 맨 위로 올린다.
-     스트리밍 중(토큰 추가)에는 askLog.length 가 안 변하므로 따라가지 않는다 —
-     답을 읽으려고 아래로 내려 둔 화면을 토큰마다 끌어올리면 읽을 수가 없다. */
+  /* ── 질문 탭 스크롤 ──
+     새 문답은 맨 위("최신")에 꽂힌다. 그런데 예전엔
+     (1) 탭을 오가거나 시트를 여닫기만 해도 맨 위로 튀었고(스크롤 칸이 새로 그려지면서 0 이 된다),
+     (2) 아래의 지난 답을 읽는 동안 위에서 새 답이 자라면 읽던 글이 아래로 밀려 내려갔다
+         — 아이패드 사파리는 브라우저 스크롤 고정(overflow-anchor)이 없다.
+     그래서: 맨 위로 올리는 건 **내가 질문을 보냈을 때와 대화를 새로 열었을 때만**, 그 밖엔 대화마다 읽던 자리를
+     기억해 되돌리고, 내용 높이가 바뀌면 화면 맨 위에 걸친 문답을 기준점 삼아 그 자리를 붙잡는다. */
   const panesRef = useRef(null);
+  const askInRef = useRef(null);
+  const askPos = useRef({});      // 대화 id → 읽던 scrollTop
+  const askLen = useRef({});      // 대화 id → 마지막으로 본 메시지 수
+  const askAnchor = useRef(null); // { el, off } — 화면 맨 위에 걸친 칸과 그 칸의 위쪽 어긋남
+  const [jumpUp, setJumpUp] = useState(false);
+  const jumpRef = useRef(false);
+
+  const pinAnchor = () => {
+    const el = panesRef.current;
+    const box = askInRef.current;
+    if (!el || !box) return;
+    const top = el.scrollTop;
+    const hit = [...box.children].find((c) => c.offsetTop + c.offsetHeight > top);
+    askAnchor.current = top > 4 && hit ? { el: hit, off: hit.offsetTop - top } : null;
+  };
+  const onAskScroll = () => {
+    const el = panesRef.current;
+    if (!el) return;
+    askPos.current[curSessRef.current] = el.scrollTop;
+    pinAnchor();
+    const far = el.scrollTop > 240;
+    if (far !== jumpRef.current) { jumpRef.current = far; setJumpUp(far); }
+  };
+
   useEffect(() => {
     if (tab !== "ask" || !sheetOpen) return;
     const el = panesRef.current;
     if (!el) return;
-    requestAnimationFrame(() => { el.scrollTop = 0; });
+    const prev = askLen.current[curSess];
+    askLen.current[curSess] = askLog.length;
+    const grew = prev !== undefined && askLog.length > prev;
+    requestAnimationFrame(() => {
+      el.scrollTop = grew ? 0 : askPos.current[curSess] || 0;
+      onAskScroll();
+    });
   }, [askLog.length, curSess, tab, sheetOpen]);
+
+  // 내용 높이가 바뀌면(위에서 새 답이 자람·상태 카드가 뜨고 사라짐) 기준점을 제자리로
+  useEffect(() => {
+    if (tab !== "ask" || !sheetOpen) return;
+    const box = askInRef.current;
+    const el = panesRef.current;
+    if (!box || !el) return;
+    const ro = new ResizeObserver(() => {
+      const a = askAnchor.current;
+      if (!a || !a.el.isConnected) return;
+      const want = a.el.offsetTop - a.off;
+      if (Math.abs(want - el.scrollTop) > 1) el.scrollTop = want;
+    });
+    ro.observe(box);
+    return () => ro.disconnect();
+  }, [tab, sheetOpen]);
 
   const ttlLeft = useMemo(() => {
     if (!sess) return "";
@@ -927,6 +1018,7 @@ export default function VerbatimReader() {
         const j = await r.json();
         setModels(Array.isArray(j.models) ? j.models : []);
         setDefModel(j.default || "");
+        setAskRank(Array.isArray(j.askRank) ? j.askRank : []);
         setTapModels(Array.isArray(j.tapModels) ? j.tapModels : []);
         setTapDef(j.tapDefault || "");
         setMdlInfo({ updatedAt: j.updatedAt || 0, discovering: !!j.discovering });
@@ -954,10 +1046,19 @@ export default function VerbatimReader() {
     setHealthBusy(true);
     fetch(u("/api/models"))
       .then((r) => (r.ok ? r.json() : null))
-      .then((j) => { if (j?.health) setHealth(j.health); })
+      .then((j) => {
+        if (!j) return;
+        if (j.health) setHealth(j.health);
+        /* "자동 — 지금 ○○" 도 같이 — 예전엔 로그인 때 한 번만 받아서 서버가 순서를 바꿔도 옛 이름이 떠 있었다 */
+        if (j.default) setDefModel(j.default);
+        if (Array.isArray(j.askRank)) setAskRank(j.askRank);
+        if (j.tapDefault) setTapDef(j.tapDefault);
+      })
       .catch(() => {})
       .finally(() => { healthReq.current = false; setHealthBusy(false); });
   };
+
+  const refreshModels = refreshHealth; // 답이 끝날 때마다 — 자동 순서가 방금 결과로 바뀌었을 수 있다
 
   /* 드롭다운이 열려 있는 동안만 저장값을 2초마다 다시 읽는다. 읽기는 2ms 짜리라 부담이
      없고, 서버가 뒤에서 다시 재고 있는 값이 보고 있는 사이에 채워진다. 닫으면 멈춘다. */
@@ -2042,7 +2143,9 @@ export default function VerbatimReader() {
      대개 보고 있는 쪽 근처에 머문다. */
   const ASK_CAP = 48000;
   const ASK_CAP_MORE = 24000;
-  const buildAskContext = (cap = ASK_CAP) => {
+  /* anchors: 이 대화에서 앞서 질문했던 쪽들. 긴 책에서 읽는 쪽이 넘어가면 앞 질문의 근거 쪽이
+     범위 밖으로 밀려나 "아까 그거"를 문서에서 못 찾았다 — 지금 쪽 다음 순위로 먼저 넣는다. */
+  const buildAskContext = (cap = ASK_CAP, anchors = []) => {
     const pdf = pdfRef.current;
     if (!pdf) return { scope: "", text: "(본문 없음)" };
     const N = pdf.numPages;
@@ -2057,16 +2160,19 @@ export default function VerbatimReader() {
     }
     const cur = curRef.current;
     const picked = [];
+    const seen = new Set();
     let used = 0;
     const tryAdd = (n) => {
-      if (n < 1 || n > N) return true;
+      if (n < 1 || n > N || seen.has(n)) return true;
       const t = pageText(n);
       if (used + t.length > cap) return false;
       picked.push({ n, t });
+      seen.add(n);
       used += t.length + 8;
       return true;
     };
     tryAdd(cur);
+    for (const a of anchors) if (used < cap / 2) tryAdd(a);
     for (let d = 1; d < N; d++) {
       const a = tryAdd(cur + d);
       const b = tryAdd(cur - d);
@@ -2078,9 +2184,14 @@ export default function VerbatimReader() {
       const toc = outlineRef.current.slice(0, 40).map((o) => "  ".repeat(o.depth) + "- " + o.title).join("\n").slice(0, 1500);
       text = `[목차]\n${toc}\n\n${text}`;
     }
-    const from = picked[0]?.n ?? cur;
-    const to = picked[picked.length - 1]?.n ?? cur;
-    return { scope: `${from}–${to}쪽 (전체 ${N}쪽 중)`, text };
+    // 앞 질문 쪽이 끼면 범위가 띄엄띄엄이다 — "3, 40–52쪽" 처럼 이어진 구간끼리 묶는다
+    const runs = [];
+    for (const { n } of picked) {
+      const r = runs[runs.length - 1];
+      if (r && n === r[1] + 1) r[1] = n; else runs.push([n, n]);
+    }
+    const span = runs.length ? runs.map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`)).join(", ") : `${cur}`;
+    return { scope: `${span}쪽 (전체 ${N}쪽 중)`, text };
   };
 
   /* ── 목차 자동 생성 ──
@@ -2849,7 +2960,6 @@ export default function VerbatimReader() {
     const q = askVal.trim();
     if (!q || asking) return;
     setAskVal("");
-    setAsking(true);
 
     // 세션이 없으면(처음이거나 2시간이 지나 청소됐으면) 첫 질문을 제목 삼아 하나 연다.
     const sid = curSessRef.current && findSess(curSessRef.current)
@@ -2859,7 +2969,30 @@ export default function VerbatimReader() {
     const s = findSess(sid);
     const history = histOf(sid);              // 반드시 이번 문답을 넣기 전에 뽑는다
     const idx = (s?.msgs.length || 0) + 1;    // 방금 넣을 ai 자리
-    addMsgs(sid, [{ role: "me", text: q }, { role: "ai", text: "", live: true }]);
+    // pg: 이 질문을 어느 쪽에서 했나 — 뒤의 질문들이 이 쪽을 근거 범위에 계속 붙인다(buildAskContext)
+    addMsgs(sid, [{ role: "me", text: q, pg: curRef.current }, { role: "ai", text: "", live: true }]);
+    await answerInto(sid, idx, q, history);
+  };
+
+  /* 마지막 답을 지우고 같은 질문을 다시 보낸다 — 실패했거나, 모델을 바꿔 다시 듣고 싶을 때.
+     지난 답은 뒤의 문답이 딛고 있으므로 마지막 것만. 캡처로 시작한 첫 답(hist 가 있는 것)은
+     다른 경로(그림 풀이)라 여기서 다시 하지 않는다. */
+  const redoAsk = async () => {
+    if (asking) return;
+    const sid = curSessRef.current;
+    const s = findSess(sid);
+    const idx = (s?.msgs.length || 0) - 1;
+    const qm = s?.msgs[idx - 1];
+    if (idx < 1 || qm?.role !== "me" || qm.hist || s.msgs[idx]?.live) return;
+    const history = histOf(sid, idx - 1);
+    patchMsg(sid, idx, { text: "", live: true, err: "", stopped: false, swap: null });
+    await answerInto(sid, idx, qm.text, history);
+  };
+
+  /* 답 하나를 채운다(새 질문·다시 답하기 공용). idx 는 채울 ai 자리, history 는 그 앞의 문답. */
+  const answerInto = async (sid, idx, q, history) => {
+    setAsking(true);
+    const s = findSess(sid);
 
     /* 그림이 딸린 세션의 질문: 옮겨 적은 글(imgDesc)이 없으면 그림째 Gemini 에게 보낸다(visionDirect).
        Gemini 가 막혀 있으면 그 자리에서 비전 모델이 옮겨 적고, 고른 질문 탭 모델이 그 글로 답한다 —
@@ -2875,19 +3008,31 @@ export default function VerbatimReader() {
        질문 한 줄인데 이번 턴만 수만 자짜리 덩어리가 되어, 모델이 "지금 새 자료를 받았다"로
        읽고 앞의 문답을 놓친다 — "아까 그거"가 안 통하던 이유가 이거다. system 으로 옮기면
        대화 쪽에는 사람 말만 남아 history 와 모양이 같아지고, 흐름이 그대로 보인다. */
-    const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP);
+    const anchors = [...new Set((s?.msgs || []).slice(0, idx).map((m) => m.pg).filter(Boolean).reverse())].slice(0, 3);
+    const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP, anchors);
+    // 접어 둔 앞 대화(maybeFold)는 문서보다 앞에 — 튜터가 "지금까지의 흐름"부터 읽게
+    const folded = s?.sum ? `\n\n[앞선 대화 요약 — 이미 나눈 이야기다. 아래 대화는 그 뒤부터 이어진다]\n${s.sum}` : "";
     const sysBase =
-      `${SYS_ASK}\n\n[문서: ${docName || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
+      `${SYS_ASK}${folded}\n\n[문서: ${docName || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
       `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}`;
     let buf = "";
     let cut = false;   // 길이 상한에 걸려 말이 끊겼는가
     let swap = null;   // 고른 모델이 붐벼서 다른 모델이 대신 답했는가
+    // 누가 답했나 — 답 아래 작은 줄로(떨어진 모델 경로 · 첫 글자 초). 첫 글자는 보낸 때부터
+    const t0 = Date.now();
+    const by = { label: "", trail: [], first: 0 };
     const ac = startJob(sid, image ? "그림과 함께" : (figBlock ? "그림 설명과 함께" : ""));
     try {
       const hook = phaseHook(ac, () => buf.length);
       const onPhase = (p, info) => {
         if (p === "cut") cut = true;
         if (p === "swap") swap = info;
+        if (p === "fail") by.trail.push({ label: info.label, why: info.why });
+        if (p === "pick") {
+          if (info.why === "cont" && by.label) by.trail.push({ label: by.label, why: "끊김" });
+          by.label = info.label;
+        }
+        if (p === "stream" && !by.first) by.first = Math.round((Date.now() - t0) / 1000);
         hook(p, info);
       };
       const onDelta = (c) => { buf += c; patchMsg(sid, idx, { text: buf }); };
@@ -2919,7 +3064,10 @@ export default function VerbatimReader() {
         text: buf + (cut ? "\n\n*(길이 제한에 걸려 여기서 끊겼습니다 — 이어서 물어보세요)*" : ""),
         live: false,
         swap: swap && { wanted: modelName(swap.wanted), model: modelName(swap.model) },
+        by: by.label ? { ...by, trail: by.trail.slice(-4) } : null,
       });
+      maybeFold(sid);
+      refreshModels();
     } catch (e) {
       /* 여기까지 받은 답은 무슨 일이 있어도 지우지 않는다. [중단]을 눌렀을 때는 원래 남겼는데,
          스트림이 끊겨서 온 예외는 text 를 ""로 덮어쓰고 있었다 — 잘 나오던 답이 통째로
@@ -2937,6 +3085,51 @@ export default function VerbatimReader() {
       endJob(ac);
       setAsking(false);
     }
+  };
+
+  /* ── 긴 대화 접기 ──
+     최근 FOLD_KEEP 개 메시지(6문답)는 그대로 두고, 그보다 오래된 것이 2문답 이상 쌓이면 요약 하나로 접는다.
+     답이 끝난 뒤 뒤에서 조용히 돈다 — 다음 질문이 기다리지 않게. 탭 쪽(속생각 끈 빠른 모델, NIM 먼저)으로
+     불러 Gemini 한도를 안 쓴다. 실패하면 그냥 안 접힌 채로 둔다(서버가 최근 16턴만 남기는 예전 동작). */
+  const FOLD_KEEP = 12;
+  const foldBusy = useRef(new Set());
+  const maybeFold = async (sid) => {
+    const s = findSess(sid);
+    if (!s || foldBusy.current.has(sid)) return;
+    const from = s.sum ? s.sumTo : 0;
+    const end = s.msgs.length - FOLD_KEEP;
+    if (end - from < 4) return;
+    const chunk = s.msgs.slice(from, end)
+      .filter((m) => (m.hist || m.text || "").trim())
+      .map((m) => (m.role === "me" ? "학생: " : "튜터: ") + (m.hist || m.text).slice(0, 6000))
+      .join("\n\n");
+    foldBusy.current.add(sid);
+    try {
+      const { text } = await callServer(cfgRef.current, SYS_FOLD,
+        (s.sum ? `[지금까지의 요약]\n${s.sum}\n\n` : "") + `[새로 접을 문답]\n${chunk}`,
+        undefined, undefined, { maxTokens: 1500 });
+      if (text.trim() && findSess(sid)) patchSess(sid, { sum: text.trim().slice(0, 4000), sumTo: end });
+    } catch (e) {
+      console.warn("[여백] 대화 접기 실패:", e.message);
+    } finally {
+      foldBusy.current.delete(sid);
+    }
+  };
+
+  const [copied, setCopied] = useState("");
+  const copyAnswer = async (key, text) => {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // 홈 화면 웹앱에서 clipboard API 가 막힐 때 — 숨긴 textarea 로
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch {}
+      ta.remove();
+    }
+    setCopied(key);
+    setTimeout(() => setCopied((k) => (k === key ? "" : k)), 1500);
   };
 
   /* ── 리모트(폰)가 만든 질문을 아이패드가 실행 ──
@@ -4172,6 +4365,8 @@ export default function VerbatimReader() {
   };
 
   const defLabel = models.find((m) => m.id === defModel)?.label || "";
+  // 질문이 도는 동안 모델 버튼에 띄울 이름 — 서버가 보내는 try/pick(progress) 그대로
+  const liveModel = aiStat?.running ? (aiStat.pickLabel || aiStat.tryLabel || "") : "";
   const askNote = models.find((m) => m.id === (cfg.askModel || defModel))?.note || "";
   const folders = lib.folders; // 서버가 준 배열 순서 그대로 — 사이드바 드래그 정렬이 이 순서를 바꾼다
   const shownFiles = lib.files
@@ -4321,17 +4516,6 @@ export default function VerbatimReader() {
     setMdlMenuOpen(false);
   };
 
-  /* 상태줄을 "보냄·배정·생각·답변" 4단계로 뭉뚱그린다.
-     wait(헤더는 왔지만 토큰 전)와 think(속생각)는 둘 다 "아직 답이 안 나왔다"는 같은 뜻이라
-     한 칸(생각)으로 합친다 — 다르게 나누면 4칸이 애매해진다. */
-  const statSteps = aiStat?.running
-    ? (() => {
-        const idx = { send: 1, wait: 2, think: 2, stream: 3 }[aiStat.phase] ?? 0;
-        return ["보냄", "배정", "생각", "답변"].map((label, i) => ({
-          label, cls: i < idx ? "done" : i === idx ? "now" : "",
-        }));
-      })()
-    : null;
 
   // 드롭다운(대화·모델) 바깥을 누르면 닫는다
   useEffect(() => {
@@ -5245,7 +5429,15 @@ export default function VerbatimReader() {
                           setSessMenuOpen(false);
                           if (opening) refreshHealth();
                         }}>
-                        {cfg.askModel ? (models.find((m) => m.id === cfg.askModel)?.label || "모델") : `자동${defLabel ? " — " + defLabel : ""}`}
+                        {/* 지금 실제로 도는 모델을 보여 준다. 예전엔 "자동 — (로그인 때 받은 1순위)"가 고정이라
+                            다른 모델이 답하는 중에도 엉뚱한 이름이 떠 있었다. */}
+                        <i className={"vb-mdldot " + (liveModel ? "run" : (askRank[0]?.cls || ""))} />
+                        <span className="vb-mdlmode">{cfg.askModel ? "고정" : "자동"}</span>
+                        <span className="vb-mdlname">
+                          {liveModel || (cfg.askModel
+                            ? (models.find((m) => m.id === cfg.askModel)?.label || "모델")
+                            : (askRank[0]?.label || defLabel || "—"))}
+                        </span>
                         <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
                       </button>
                       {mdlMenuOpen && (
@@ -5253,16 +5445,30 @@ export default function VerbatimReader() {
                           <div className="vb-dropscroll">
                             <button className={"vb-mdlitem" + (!cfg.askModel ? " on" : "")} onClick={() => pickModel("")}>
                               <span className="vb-mdlrow">
-                                <span className="n">자동{defLabel ? ` — 지금 ${defLabel}` : ""}</span>
+                                <span className="n">자동</span>
                                 {!cfg.askModel && <span className="c">✓</span>}
                               </span>
+                              <span className="vb-mdlnote">답을 잘하는 모델부터 차례로 묻고, 막히거나 방금 실패한 모델은 뒤로 밀립니다. 순서는 실제로 써 본 결과로 계속 바뀝니다.</span>
                             </button>
+                            {askRank.length > 0 && (
+                              <div className="vb-rank">
+                                {askRank.map((r, i) => (
+                                  <div key={r.id} className={"vb-rankrow" + (aiStat?.running && aiStat.model === r.id ? " run" : "")}>
+                                    <b>{i + 1}</b>
+                                    <span className="n">{r.label}</span>
+                                    {aiStat?.running && aiStat.model === r.id
+                                      ? <span className="vb-mdlhp run"><i />지금 답하는 중</span>
+                                      : <span className={"vb-mdlhp " + r.cls}><i />{r.text}</span>}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
                             {["chat", "reason"].map((grp) => {
                               const list = models.filter((m) => (m.think ? "reason" : "chat") === grp);
                               if (!list.length) return null;
                               return (
                                 <div key={grp}>
-                                  <div className="vb-mdlgrp">{grp === "reason" ? "추론 모델 — 속생각을 먼저 흘린 뒤 답한다" : "일반 모델"}</div>
+                                  <div className="vb-mdlgrp">{grp === "reason" ? "직접 고르기 · 추론 모델 — 속생각을 먼저 흘린 뒤 답한다" : "직접 고르기 · 일반 모델"}</div>
                                   {list.map((m) => {
                                     const hp = healthOf(m.id);
                                     return (
@@ -5293,7 +5499,9 @@ export default function VerbatimReader() {
                 </div>
               </div>
 
-              <div className="vb-scroll" ref={panesRef}>
+              <div className="vb-scrollwrap">
+              <div className="vb-scroll" ref={panesRef} onScroll={onAskScroll}>
+               <div className="vb-scrollin" ref={askInRef}>
                 {statView && (
                   <div className={"vb-statcard" + (statView.warn ? " warn" : "")}>
                     <div className="vb-statrow1">
@@ -5301,21 +5509,14 @@ export default function VerbatimReader() {
                       <span className="vb-statlbl">{statView.text}</span>
                       <button className="vb-statstop" onClick={stopAsk}>중단</button>
                     </div>
-                    {statSteps && (
-                      <div className="vb-statsteps">
-                        {statSteps.map((s) => (
-                          <div key={s.label} className={"vb-statstep" + (s.cls ? " " + s.cls : "")}>
-                            <b /><span>{s.label}</span>
-                          </div>
+                    {(statView.why || statView.trail.length > 0) && (
+                      <div className="vb-stattrail">
+                        {statView.trail.map((t, i) => (
+                          <span key={i} className="x">{t.label} <em>{t.why}</em></span>
                         ))}
+                        {statView.why && <span className="why">{statView.why}</span>}
                       </div>
                     )}
-                    <div className="vb-statmeta">
-                      {aiStat?.engine && <span className="eng">{aiStat.engine}</span>}
-                      {aiStat?.model && <span>{aiStat.model.split("/").pop()}</span>}
-                      <span>질문 탭</span>
-                      {ttlLeft && <span style={{ marginLeft: "auto" }}>대화 {ttlLeft}</span>}
-                    </div>
                   </div>
                 )}
 
@@ -5324,49 +5525,67 @@ export default function VerbatimReader() {
                     <p>책 본문을 근거로 답합니다 — 짧은 책은 전체를, 긴 책은 지금 보는 {curPage}쪽 주변과 목차를 함께 보냅니다.</p>
                     <p style={{ margin: 0 }}>한 대화 안에서는 앞의 문답을 기억하므로 이어서 되물을 수 있습니다. 대화는 마지막 질문에서 2시간 뒤 사라집니다.</p>
                   </div>
-                ) : (
-                  <>
-                    <div className="vb-recent">최신<b /></div>
-                    {qaPairs.map((p, k) => {
-                      const latest = k === 0;
-                      const ek = (sess?.id || "") + ":" + p.i;
-                      const expanded = latest || expandSet.has(ek);
-                      return (
-                        <div key={p.i} className={"vb-qa" + (latest ? " vb-pe" : " past" + (expanded ? " open" : ""))}>
-                          {p.q.img && <img className="vb-msgimg" src={p.q.img} alt="오려낸 영역" />}
-                          <div className="vb-qbubble">{p.q.text}</div>
-                          {p.a && (
-                            <div className={"vb-abody" + (!expanded ? " clamp" : "")}>
-                              {/* 끊겼어도 받아 둔 답이 있으면 그걸 먼저 보여 주고, 사정은 아래에 적는다 */}
-                              {p.a.text && <Rich text={p.a.text} live={!!p.a.live} />}
-                              {p.a.err && (
-                                <span className="vb-err">
-                                  {p.a.text ? p.a.err : `답을 받지 못했습니다 — ${p.a.err}`}
-                                </span>
-                              )}
-                              {p.a.stopped && <div className="vb-stopped">여기서 중단했습니다</div>}
-                              {p.a.swap && (
-                                <div className="vb-swap">
-                                  {p.a.swap.wanted}가 붐벼서 {p.a.swap.model}가 대신 답했습니다
-                                </div>
-                              )}
-                            </div>
+                ) : qaPairs.map((p, k) => {
+                  const latest = k === 0;
+                  const ek = (sess?.id || "") + ":" + p.i;
+                  const expanded = latest || expandSet.has(ek);
+                  const toggle = () => setExpandSet((s) => {
+                    const n = new Set(s);
+                    n.has(ek) ? n.delete(ek) : n.add(ek);
+                    return n;
+                  });
+                  const by = p.a?.by;
+                  return (
+                    <div key={p.i} className={"vb-qa" + (latest ? " vb-pe latest" : " past" + (expanded ? " open" : ""))}>
+                      {k === 1 && <div className="vb-earlier">앞의 문답</div>}
+                      {p.q.img && <img className="vb-msgimg" src={p.q.img} alt="오려낸 영역" />}
+                      <div className="vb-qbubble" onClick={!latest ? toggle : undefined}>{p.q.text}</div>
+                      {p.a && (
+                        <div className={"vb-abody" + (!expanded ? " clamp" : "")} onClick={!expanded ? toggle : undefined}>
+                          {/* 끊겼어도 받아 둔 답이 있으면 그걸 먼저 보여 주고, 사정은 아래에 적는다 */}
+                          {p.a.text && <Rich text={p.a.text} live={!!p.a.live} />}
+                          {p.a.err && (
+                            <span className="vb-err">
+                              {p.a.text ? p.a.err : `답을 받지 못했습니다 — ${p.a.err}`}
+                            </span>
                           )}
-                          {!latest && p.a && !p.a.err && (
-                            <button className="vb-expand"
-                              onClick={() => setExpandSet((s) => {
-                                const n = new Set(s);
-                                n.has(ek) ? n.delete(ek) : n.add(ek);
-                                return n;
-                              })}>
-                              {expanded ? "접기" : "펼치기"}
+                          {p.a.stopped && <div className="vb-stopped">여기서 중단했습니다</div>}
+                        </div>
+                      )}
+                      {p.a && !p.a.live && (expanded || !latest) && (
+                        <div className="vb-afoot">
+                          {expanded && p.a.text && (
+                            <button onClick={() => copyAnswer(ek, p.a.text)}>
+                              {copied === ek ? "복사됨" : "복사"}
                             </button>
                           )}
+                          {latest && !p.q.hist && (
+                            <button disabled={asking} onClick={redoAsk}
+                              className={p.a.err && !p.a.text ? "hot" : undefined}>
+                              다시 답하기
+                            </button>
+                          )}
+                          {!latest && p.a.text && <button onClick={toggle}>{expanded ? "접기" : "펼치기"}</button>}
+                          {/* 누가 답했나 — 떨어진 모델이 있었으면 그 경로까지. 히스토리에는 안 들어간다(text 와 별도 칸) */}
+                          {expanded && (by || p.a.swap) && (
+                            <span className="vb-by">
+                              {by
+                                ? <>{by.trail?.length ? by.trail.map((t) => `${t.label} ${t.why}`).join(" → ") + " → " : ""}{by.label}{by.first ? ` · ${by.first}초` : ""}</>
+                                : `${p.a.swap.wanted}가 붐벼서 ${p.a.swap.model}가 대신 답함`}
+                            </span>
+                          )}
                         </div>
-                      );
-                    })}
-                  </>
-                )}
+                      )}
+                    </div>
+                  );
+                })}
+               </div>
+              </div>
+              {jumpUp && asking && (
+                <button className="vb-jump" onClick={() => panesRef.current?.scrollTo({ top: 0, behavior: "smooth" })}>
+                  ↑ 새 답 보기
+                </button>
+              )}
               </div>
             </div>
           )}

@@ -865,6 +865,12 @@ app.delete("/api/lookups/:id", requireAuth, (req, res) => {
 
 /* ───────────────── 프로바이더 ───────────────── */
 // 브라우저에는 항상 OpenAI 형식 SSE 만 내보낸다. 두 프로바이더 모두 여기서 다시 싼다.
+/* 진행 알림(progress) — 답이 아니라 "지금 누구에게 묻고 있고 누가 왜 떨어졌나". 이름 있는 SSE 이벤트라
+   OpenAI 형식만 읽는 쪽은 그냥 지나친다. */
+function sseNote(name, data) {
+  return `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
+}
+
 function sseEvent(delta, finish) {
   return `data: ${JSON.stringify({ choices: [{ delta, ...(finish ? { finish_reason: finish } : {}) }] })}\n\n`;
 }
@@ -1010,7 +1016,7 @@ function trimHistory(h) {
    쓰기 시작한 뒤에 끊기면 되돌릴 수 없으므로, 끊겼다는 한 줄을 답 끝에 붙여 알린다.
    누가 답했는지는 X-Engine/X-Model 헤더, 고른 모델과 다르면 X-Wanted 에 원래 고른 것. */
 app.post("/api/chat", requireAuth, async (req, res) => {
-  const { system = "", user = "", image = "", maxTokens = 1000, ask = false, model = "", tapModel = "", visionDirect = false } = req.body || {};
+  const { system = "", user = "", image = "", maxTokens = 1000, ask = false, model = "", tapModel = "", visionDirect = false, progress = false } = req.body || {};
   if (!user) return res.status(400).json({ error: "user 가 비었습니다." });
   const history = trimHistory(req.body?.history);
 
@@ -1049,6 +1055,20 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   const lane = kind === "tap" ? "tap" : "main"; // 같은 모델도 탭(속생각 끔)과 질문(켬)은 속도가 전혀 다르다
   const deadline = Date.now() + timeoutMs;
   const fails = [];
+  /* progress: 헤더를 곧바로 보내고, 모델을 고르는 과정(try/fail/nap)부터 흘린다. 질문 탭 상태 카드가
+     "첫 글자 전엔 아무것도 모르는" 상태였다 — 서버가 몰래 모델을 갈아타는 동안 화면은 "기다리는 중"뿐이었다.
+     헤더를 먼저 보내면 뒤에서 502 를 못 주므로, 전부 실패는 error 이벤트로 알린다. 모델 정보도 헤더 대신 pick 이벤트. */
+  const openStream = () => {
+    if (res.headersSent) return;
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no"); // nginx 앞단 버퍼링 방지
+    res.flushHeaders();
+  };
+  const note = (name, data) => { if (progress && !ac.signal.aborted) res.write(sseNote(name, data)); };
+  if (progress) openStream();
+  const label = (id) => models.get(id)?.label || id;
   const nap = (ms) => new Promise((r) => { const t = setTimeout(r, ms); signal.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
 
   /* 모델 하나에 붙어 첫 글자(또는 속생각)까지 받는다 → { id, it, first, cc, t0 }. 실패하면 기록하고 null. */
@@ -1059,6 +1079,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     const cc = new AbortController();
     const timer = setTimeout(() => cc.abort(new Error(`${firstMs / 1000}초 동안 첫 글자 없음`)), firstMs);
     const sig = AbortSignal.any([signal, cc.signal]);
+    note("try", { model: id, label: label(id) });
     // 탭·캡처는 찾기 때 알아낸 "속생각 끄기" 설정으로(Gemini 는 generationConfig, NIM 은 요청 본문에 덧붙임)
     const gen = ask ? undefined : models.get(id)?.gen;
     let it;
@@ -1082,7 +1103,9 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       console.warn(`[여백] ${id} 실패: ${String(why).slice(0, 160)}`);
       // 사용자에게 보일 짧은 이유 — 원문(영어 오류 본문)은 로그에만
       const st = e.status;
-      fails.push(`${models.get(id)?.label || id} ${st === 429 ? "한도 초과" : st >= 500 ? "붐빔" : cc.signal.aborted ? "응답 없음" : st === 410 || st === 404 ? "종료됨" : "실패"}`);
+      const short = st === 429 ? "한도 초과" : st >= 500 ? "붐빔" : cc.signal.aborted ? "응답 없음" : st === 410 || st === 404 ? "종료됨" : "실패";
+      fails.push(`${label(id)} ${short}`);
+      note("fail", { model: id, label: label(id), why: short });
       return null;
     }
   }
@@ -1098,6 +1121,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       round++;
       tried.clear();
       console.warn(`[여백] 한 바퀴 전부 실패 — ${3 * round}초 쉬고 다시 (${round}/2)`);
+      note("nap", { sec: 3 * round, round });
       await nap(3000 * round);
       continue;
     }
@@ -1108,26 +1132,33 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   if (ac.signal.aborted) return;
   if (!got) {
     console.error(`[여백] 전부 실패 — ${fails.join(" / ")}`);
-    return res.status(502).json({
-      error: fails.length
-        ? `모든 모델이 답하지 못했습니다 — ${[...new Set(fails)].join(", ")}. 잠시 뒤 다시 시도하세요.`
-        : "쓸 수 있는 모델이 없습니다 — API 키를 확인하세요.",
-    });
+    const error = fails.length
+      ? `모든 모델이 답하지 못했습니다 — ${[...new Set(fails)].join(", ")}. 잠시 뒤 다시 시도하세요.`
+      : "쓸 수 있는 모델이 없습니다 — API 키를 확인하세요.";
+    if (progress) { note("error", { error }); return res.end(); }
+    return res.status(502).json({ error });
   }
 
   // ── 여기서부터 이 모델로 확정. 헤더를 보내고 흘린다. ──
   const gem0 = models.isGem(got.id);
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Engine", gem0 ? "Gemini" : "NIM");
-  res.setHeader("X-Model", got.id);
-  if (!gemOnly && picked && got.id !== picked) res.setHeader("X-Wanted", picked); // 자동일 땐 "대신 답했다"가 아니다
-  res.setHeader("Access-Control-Expose-Headers", "X-Engine, X-Model, X-Wanted");
-  res.setHeader("X-Accel-Buffering", "no"); // nginx 앞단 버퍼링 방지
-  res.flushHeaders();
+  const wanted = !gemOnly && picked && got.id !== picked ? picked : ""; // 자동일 땐 "대신 답했다"가 아니다
+  if (progress) {
+    // why: 이 모델이 왜 답하나 — 직접 고름 / 자동 1순위 / 앞 모델이 실패해 넘어옴
+    note("pick", { model: got.id, label: label(got.id), engine: gem0 ? "Gemini" : "NIM", wanted,
+      why: fails.length ? "fallback" : got.id === picked ? "picked" : "auto" });
+  } else {
+    res.setHeader("X-Engine", gem0 ? "Gemini" : "NIM");
+    res.setHeader("X-Model", got.id);
+    if (wanted) res.setHeader("X-Wanted", wanted);
+    res.setHeader("Access-Control-Expose-Headers", "X-Engine, X-Model, X-Wanted");
+    openStream();
+  }
 
   let text = ""; // 지금까지 보낸 답(content) — 끊겼을 때 이어 쓰기의 재료
+  const t00 = deadline - timeoutMs; // 요청이 들어온 때 — 폴백으로 흘려보낸 시간까지 체감 그대로
+  let firstAt = 0;
+  // 질문·그림의 체감 속도를 남긴다 — 실패만 찍혀서 "느리다"를 로그로 확인할 길이 없었다(2026-09-29)
+  const inChars = system.length + user.length + history.reduce((n, t) => n + t.text.length, 0);
   const send = (ev) => {
     if (ev.k) res.write(sseEvent({ reasoning_content: ev.k }));
     if (ev.c) { res.write(sseEvent({ content: ev.c })); text += ev.c; }
@@ -1138,7 +1169,9 @@ app.post("/api/chat", requireAuth, async (req, res) => {
      (2026-09-28 nemotron-omni 캡처), 그걸로 재면 느린 추론 모델이 "가장 빠른 모델"로 뽑힌다. */
   async function pump(g) {
     let timed = false;
-    const timeIt = (ev) => { if (!timed && ev.c && !warm) { timed = true; models.record(g.id, true, 200, Date.now() - g.t0, lane); } };
+    const timeIt = (ev) => {
+      if (!timed && ev.c && !warm) { timed = true; firstAt = Date.now(); models.record(g.id, true, 200, Date.now() - g.t0, lane); }
+    };
     // 쓰는 도중 STALL_MS 동안 아무것도 안 오면 멈춘 것으로 본다
     let stall;
     const arm = () => { clearTimeout(stall); stall = setTimeout(() => g.cc.abort(new Error("멈춤")), STALL_MS); };
@@ -1198,9 +1231,13 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         break;
       }
       console.warn(`[여백] ${next.id} 가 이어서 씀`);
+      note("pick", { model: next.id, label: label(next.id), engine: models.isGem(next.id) ? "Gemini" : "NIM", wanted: "", why: "cont" });
       cur = next;
     }
   }
+  if (!warm && kind !== "tap")
+    console.log(`[여백] ${kind === "ask" ? "질문" : "그림"} ${cur.id} 첫 글자 ${firstAt ? ((firstAt - t00) / 1000).toFixed(1) + "초" : "-"}` +
+      ` · 끝 ${((Date.now() - t00) / 1000).toFixed(1)}초 · 입력 ${inChars}자(대화 ${history.length}턴) · 답 ${text.length}자`);
   res.write("data: [DONE]\n\n");
   res.end();
 });
