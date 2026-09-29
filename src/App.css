@@ -785,6 +785,13 @@
   background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;
   background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}
 .vb-field select option{background:var(--t-menu);color:var(--t-ink)}
+.vb-inbox{display:flex;gap:8px;align-items:center;margin-bottom:6px}
+.vb-inbox code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:12.5px;padding:9px 10px;border-radius:9px;border:1px solid var(--line);background:var(--t-input);color:var(--t-ink)}
+.vb-inboxbtn,.vb-inbox button{flex:0 0 auto;padding:9px 12px;border-radius:9px;border:1px solid var(--line);
+  background:transparent;color:var(--t-ink);font-size:13px;font-family:inherit}
+.vb-inboxbtn{margin-top:8px}
+.vb-inboxbtn:disabled{opacity:.5}
 .vb-hint{margin:8px 2px 0;font-size:12px;color:var(--muted);line-height:1.55}
 
 /* 로그인 숫자 키패드 — 키보드 입력과 병행해서 쓴다 */

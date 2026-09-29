@@ -698,7 +698,7 @@ export default function Remote() {
                     <div style={{ position: "relative", marginLeft: "auto" }}>
                       <button className={"vb-mdlbtn" + (mdlMenuOpen ? " open" : "")}
                         onClick={() => { const o = !mdlMenuOpen; setMdlMenuOpen(o); if (o) refreshHealthNow(); }}>
-                        {selModel ? (models.find((m) => m.id === selModel)?.label || "모델") : `기본${defLabel ? " — " + defLabel : ""}`}
+                        {selModel ? (models.find((m) => m.id === selModel)?.label || "모델") : `자동${defLabel ? " — " + defLabel : ""}`}
                         <svg viewBox="0 0 24 24"><path d={CHEV_DOWN} /></svg>
                       </button>
                       {mdlMenuOpen && (
@@ -706,7 +706,7 @@ export default function Remote() {
                           <div className="vb-dropscroll">
                             <button className={"vb-mdlitem" + (!selModel ? " on" : "")} onClick={() => { setSelModel(""); setMdlMenuOpen(false); }}>
                               <span className="vb-mdlrow">
-                                <span className="n">기본{defLabel ? ` — ${defLabel}` : ""}</span>
+                                <span className="n">자동{defLabel ? ` — 지금 ${defLabel}` : ""}</span>
                                 {!selModel && <span className="c">✓</span>}
                               </span>
                             </button>
@@ -717,7 +717,7 @@ export default function Remote() {
                                   onClick={() => { setSelModel(m.id); setMdlMenuOpen(false); }}>
                                   <span className="vb-mdlrow">
                                     <span className="n">{m.label}</span>
-                                    {m.id === defModel && <span className="d">기본</span>}
+                                    {m.id === defModel && <span className="d">자동 선택</span>}
                                     {hp && <span className={"vb-mdlhp " + hp.cls}><i />{hp.text}</span>}
                                     {selModel === m.id && <span className="c">✓</span>}
                                   </span>

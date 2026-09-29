@@ -9,8 +9,8 @@ import { drawStroke, hitStroke, strokeInLasso, polyBox, bbox as inkBox, snapLine
 const CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
 /* API 키는 전부 서버(.env)에 있다. 브라우저는 /api/chat 만 부른다. */
 const DEFAULT_CFG = {
-  forceGemini: false,
   useDict: true,
+  tapModel: "", // 단어·문장 탭·영역 캡처 모델. 빈 값이면 서버 기본값
   askModel: "", // 질문 탭 모델. 빈 값이면 서버 기본값
 };
 
@@ -195,9 +195,12 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
       // 질문 탭은 길게 쓰는 모델(DeepSeek V4 Pro·MiniMax M3)이 2000 에서 말을 하다 말았다.
       // 추론 모델은 이 예산으로 속생각까지 쓰므로 더 빨리 닿는다 — 서버 상한(8000)까지 연다.
       maxTokens: opts.maxTokens ?? (opts.ask ? 8000 : 1000),
-      forceGemini: !!cfg.forceGemini,
       ask: !!opts.ask,
       model: opts.ask ? cfg.askModel || "" : "",
+      // 고른 모델이 실패하면 서버가 알아서 다른 모델로 넘어간다 — 누가 답했는지는 X-Model 로 온다
+      tapModel: cfg.tapModel || "",
+      // 그림째 Gemini 에게만 — 막혀 있으면 서버가 502 를 주고, 호출한 쪽이 두 단계로 넘어간다
+      visionDirect: !!opts.visionDirect,
     }),
   });
   if (res.status === 401) throw new AuthError();
@@ -394,6 +397,11 @@ const SYS_RENAME = `너는 사용자의 문서 서재를 정리하는 사서다.
 - 사용자가 말한 형식을 모든 문서에 같은 방식으로 적용한다.`;
 
 /* ── 영역 캡처 프롬프트 ──
+   2026-09-28 부터: **Gemini 가 살아 있으면 문제풀이·그림 질문도 Gemini 가 그림째 한 번에 푼다**
+   (callServer 의 visionDirect — 서버가 Gemini 만 시도한다). Gemini 는 그림을 직접 보며 추론까지
+   충분히 하므로 옮겨적기를 거칠 이유가 없다 — 옮겨적기에서 생기는 오독(XOR→OR)이 풀이로
+   번지는 일도 없다. Gemini 가 막혔을 때만 아래의 예전 두 단계로 넘어간다.
+
    "해석"만 비전 모델이 한 번에 처리한다 — 오려내고 바로 읽는 가벼운 동작이라
    옮겨적기가 끝날 때까지 첫 글자를 못 보는 쪽이 더 나쁘고, 원문 번역은 그림을
    보면서 하는 편이 자연스럽기 때문이다.
@@ -437,7 +445,7 @@ const SYS_CAP_DESCRIBE = `이미지에 보이는 내용을 글로 옮긴다. 해
    읽는 이가 직접 쓴 말로 알고 거기 눈높이를 맞춘다 — 실제로 "두 겹 게이트는 XOR을
    의미한다"처럼, 사람은 쓴 적도 없는 표현을 붙들고 설명을 늘어놓는 일이 있었다.
    기계가 옮긴 글이라고 알려 주면 그 표현은 판정 근거로만 쓰고 답에는 안 끌고 나온다. */
-const FIG_NOTE = "[오려낸 그림을 비전 모델(gemma)이 글로 옮긴 것 — 읽는 이가 쓴 말이 아니고, " +
+const FIG_NOTE = "[오려낸 그림을 비전 모델이 글로 옮긴 것 — 읽는 이가 쓴 말이 아니고, " +
   "잘못 읽었을 수 있다. 앞뒤가 안 맞으면 짚어 주고, 이 글의 표현을 그대로 인용하지는 않는다]";
 
 const SYS_CAP_SOLVE = `너는 한국 대학생의 문제풀이 조교다. 주어진 문제를 한국어로 푼다.
@@ -486,6 +494,8 @@ export default function VerbatimReader() {
   const [sendFig, setSendFig] = useState(false);  // 후속 질문에 오려낸 그림을 같이 보낼지
   const [nowTick, setNowTick] = useState(0);      // 세션 남은 시간 표시를 1분마다 갱신
   const [setOpen, setSetOpen] = useState(false);
+  const [inbox, setInbox] = useState(null);       // 단축어 받은편지함 — {enabled, token}, 설정을 열 때 받는다
+  const [inboxCopied, setInboxCopied] = useState("");
   const [cfg, setCfg] = useState(DEFAULT_CFG);
   const [busy, setBusy] = useState(false);
   const [sheetFrac, setSheetFrac] = useState(0.46);
@@ -498,6 +508,9 @@ export default function VerbatimReader() {
   const [pwBusy, setPwBusy] = useState(false);
   const [models, setModels] = useState([]);      // 질문 탭에서 고를 수 있는 모델
   const [defModel, setDefModel] = useState("");  // 서버 기본값
+  const [tapModels, setTapModels] = useState([]); // 단어·문장 탭에서 고를 수 있는 모델
+  const [tapDef, setTapDef] = useState("");
+  const [mdlInfo, setMdlInfo] = useState({ updatedAt: 0, discovering: false }); // 서버가 모델 목록을 마지막으로 찾은 때
   const [health, setHealth] = useState({});      // 모델 id → {ok, status, at, ms}
   const [healthBusy, setHealthBusy] = useState(false);
   const [libOpen, setLibOpen] = useState(true);  // 서재 화면 (문서가 없으면 항상 열림)
@@ -575,6 +588,11 @@ export default function VerbatimReader() {
   const extractingRef = useRef(false);
   const delTimer = useRef(null);              // 두 번 눌러 삭제 타이머
   const lastPageTimer = useRef(null);          // "마지막으로 읽은 쪽" 저장 디바운스 타이머
+  /* 지금 쪽 번호를 "읽은 쪽"으로 믿어도 되는가 — 사용자가 손대야(터치·휠·키) 켜지고,
+     앱에 돌아온 순간과 문서를 새로 여는 순간 꺼진다. 돌아온 직후 사용자 입력 없이 쪽이 바뀌는 건
+     읽은 게 아니라 화면이 밀린 것이다 — 2026-09-28 복귀 1초 만에 34→19 가 저장되고 5초 뒤
+     탭이 새로 로드돼 앞쪽에서 열린 게 서버 [쪽] 로그에 그대로 찍혔다. */
+  const pageOkRef = useRef(false);
   const greetInitRef = useRef(false);          // 서재 인사말을 이미 골랐는가 (앱 로드당 한 번)
   const layoutKeyRef = useRef({ cw: 0, zoom: 0 }); // 마지막 배치에 쓴 폭·배율 — 같으면 relayout 을 건너뛴다
   const baseRef = useRef(null);               // 1쪽의 배율 1 뷰포트 {w,h} — relayout 이 워커를 안 기다리게 재 둔다
@@ -582,6 +600,7 @@ export default function VerbatimReader() {
   // relayout 이 텍스트 레이어를 걷어내고 다시 그려도 하이라이트가 살아남는다.
   const markRef = useRef(null);
   const gestureRef = useRef(false);           // 핀치·트랙패드 줌이 진행 중인가
+  const deferLayoutRef = useRef(false);       // 가려진 동안 미뤄 둔 relayout 이 있는가
 
   useEffect(() => { cfgRef.current = cfg; }, [cfg]);
   useEffect(() => { layoutRef.current = { sheetOpen, outOpen, panelMode }; }, [sheetOpen, outOpen, panelMode]);
@@ -908,6 +927,14 @@ export default function VerbatimReader() {
         const j = await r.json();
         setModels(Array.isArray(j.models) ? j.models : []);
         setDefModel(j.default || "");
+        setTapModels(Array.isArray(j.tapModels) ? j.tapModels : []);
+        setTapDef(j.tapDefault || "");
+        setMdlInfo({ updatedAt: j.updatedAt || 0, discovering: !!j.discovering });
+        // 서버 목록에서 빠진 모델(수명 종료 등)을 골라 둔 채면 드롭다운이 "모델"로만 뜬다 — 기본값으로 되돌린다
+        const ids = new Set([...(j.models || []), ...(j.tapModels || [])].map((m) => m.id));
+        setCfg((c) => (c.askModel && !ids.has(c.askModel)) || (c.tapModel && !ids.has(c.tapModel))
+          ? { ...c, askModel: ids.has(c.askModel) ? c.askModel : "", tapModel: ids.has(c.tapModel) ? c.tapModel : "" }
+          : c);
         setHealth(j.health || {});
       } catch {}
       refreshHealth(); // 접속하자마자 한 번 재 둬서, 드롭다운을 처음 열 때 이미 채워져 있게
@@ -950,12 +977,13 @@ export default function VerbatimReader() {
     if (h.ok) return h.ms > 4000 ? { cls: "busy", text: "혼잡" } : { cls: "ok", text: "정상" };
     if (h.status >= 429) return { cls: "jam", text: "붐빔" };    // 529 Overloaded 등
     if (h.status === -1) return { cls: "busy", text: "느림" };   // 8초 안에 무응답 — 콜드스타트일 수 있다
+    if (h.status === 408) return { cls: "busy", text: "느림" };  // 실사용에서 첫 글자가 상한 안에 안 왔다
     return { cls: "jam", text: "응답 없음" };                     // 연결 자체가 안 됐다
   };
 
   /* 모델 id → 드롭다운에 보이는 이름. 목록에 없으면 id 의 뒷부분을 그대로 쓴다. */
   const modelName = (id) =>
-    models.find((m) => m.id === id)?.label || String(id || "").split("/").pop();
+    [...models, ...tapModels].find((m) => m.id === id)?.label || String(id || "").split("/").pop();
 
   /* ── 서재 ── */
   const libApi = useCallback(async (url, opt) => {
@@ -977,9 +1005,9 @@ export default function VerbatimReader() {
     if (!id || !curPage) return;
     clearTimeout(lastPageTimer.current);
     lastPageTimer.current = setTimeout(() => {
-      const nowId = curFileRef.current?.id; // 디바운스 대기 중 문서가 바뀌었을 수 있다
-      if (!nowId) return;
-      libApi("/api/library/file/" + nowId, {
+      // 디바운스 대기 중 문서가 바뀌었으면 옛 문서의 쪽을 새 문서에 박지 않는다
+      if (curFileRef.current?.id !== id || !pageOkRef.current) return;
+      libApi("/api/library/file/" + id, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ lastPage: curPage }),
@@ -1011,7 +1039,7 @@ export default function VerbatimReader() {
   useEffect(() => {
     const flush = () => {
       const id = curFileRef.current?.id;
-      if (!id || !curRef.current) return;
+      if (!id || !curRef.current || !pageOkRef.current) return;
       try {
         fetch(u("/api/library/file/") + id, {
           method: "PATCH",
@@ -1021,8 +1049,27 @@ export default function VerbatimReader() {
         });
       } catch {}
     };
+    /* 홈 화면으로 나가거나 앱을 바꿀 땐 pagehide 가 안 온다 — 가려지는 순간에도 쏜다.
+       iOS 는 백그라운드의 탭을 말없이 죽이고 돌아올 때 새로 로드하므로 이게 마지막 기회다. */
+    const onHide = () => { if (document.visibilityState === "hidden") flush(); };
     window.addEventListener("pagehide", flush);
-    return () => window.removeEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onHide);
+    return () => {
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onHide);
+    };
+  }, []);
+
+  useEffect(() => {
+    const touched = () => { pageOkRef.current = true; };
+    const onVis = () => { if (document.visibilityState === "visible") pageOkRef.current = false; };
+    const opt = { capture: true, passive: true };
+    for (const t of ["pointerdown", "wheel", "keydown"]) window.addEventListener(t, touched, opt);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      for (const t of ["pointerdown", "wheel", "keydown"]) window.removeEventListener(t, touched, opt);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, []);
 
   /* 서재 검색 — 제목(즉시 반영)과 본문(서버 왕복 필요) 둘 다 하나의 검색창에서.
@@ -1089,6 +1136,26 @@ export default function VerbatimReader() {
   useEffect(() => {
     if (authed === true) { refreshLib(); refreshVocab(); refreshInterps(); refreshLookups(); }
   }, [authed, refreshLib, refreshVocab, refreshInterps, refreshLookups]);
+
+  /* 단축어·공유 시트로 넣은 PDF 는 앱 밖에서 서재에 들어온다 — 앱으로 돌아올 때 목록을 다시 읽는다 */
+  useEffect(() => {
+    if (authed !== true) return;
+    const on = () => { if (document.visibilityState === "visible") refreshLib(); };
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, [authed, refreshLib]);
+
+  useEffect(() => {
+    if (!setOpen || authed !== true) return;
+    libApi("/api/inbox/info").then((r) => r.json()).then(setInbox).catch(() => {});
+    refreshHealth(); // 모델 드롭다운 옆 "지금 붐빔" 표시용
+  }, [setOpen, authed, libApi]);
+  const copyInbox = (what, text) => {
+    navigator.clipboard?.writeText(text).then(() => {
+      setInboxCopied(what);
+      setTimeout(() => setInboxCopied(""), 1600);
+    }).catch(() => {});
+  };
 
   /* fetch 는 업로드 진행률을 못 재서 XHR 을 쓴다 */
   const uploadPDF = (buf, name, folder) =>
@@ -1200,6 +1267,7 @@ export default function VerbatimReader() {
       resetInk();
       // 필기는 PDF 와 동시에 받는다 — 첫 렌더 전에 있어야 가져온 주석을 두 겹으로 안 그린다
       const [buf, ann] = await Promise.all([fetchPDF(f.id, f.name), loadAnnots(f.id)]);
+      pageOkRef.current = false; // 로딩 중엔 curRef 가 아직 옛 문서의 쪽이다
       curFileRef.current = { id: f.id, name: f.name };
       annotsRef.current = ann;
       setLibOpen(false);
@@ -1836,6 +1904,9 @@ export default function VerbatimReader() {
     // 제스처 중에는 건드리지 않는다 — 임시 CSS scale 때문에 좌표가 계속 흔들리고,
     // 그 사이 prune 이 보고 있는 페이지를 지워 버릴 수 있다.
     if (!view || !pages.length || gestureRef.current) return;
+    // 가려진 동안엔 쪽 번호를 굳힌다 — 백그라운드의 창 크기 변화로 움직인 스크롤을
+    // "읽은 쪽"으로 저장하지 않게(아래 relayout 의 가려짐 주석)
+    if (document.visibilityState === "hidden") return;
     const vr = view.getBoundingClientRect();
     const n = pageAt(pages, vr.top + vr.height / 2);
     if (n !== curRef.current) { curRef.current = n; setCurPage(n); }
@@ -2125,6 +2196,14 @@ export default function VerbatimReader() {
     const base = baseRef.current;
     const view = viewRef.current;
     if (!pdfRef.current || !base || !view) return;
+    /* 가려진 동안엔 배치를 미루고, 돌아왔을 때(onShow) 한 번만 한다.
+       iPadOS 는 앱을 나갈 때 앱 전환기 스냅숏을 찍느라 백그라운드에서 창 크기를 바꿔
+       resize 를 쏜다(좁아지면 wide 도 뒤집힌다). 그때마다 전부 다시 배치·렌더하면
+       (1) 돌아왔을 때 쪽이 밀려 있고 그 쪽이 lastPage 로 저장됐다 — 2026-09-28 로그에서
+       돌아온 직후 몇 초 안에 lastPage PATCH 가 연달아 나가고 곧바로 페이지가 새로 로드되는
+       패턴이 세 번 나왔다(31쪽에서 필기하다 나갔는데 앞쪽으로 저장). (2) 백그라운드에서
+       캔버스를 새로 만드느라 메모리가 치솟아 탭이 죽고 새로 로드되는 원인도 된다. */
+    if (document.visibilityState === "hidden") { deferLayoutRef.current = true; return; }
     const cw = contentWidth();
     // 폭도 배율도 그대로면 아무것도 하지 않는다 — 좁은 화면에서 풀이창을 여닫을 때마다
     // 전부 다시 그리면서 페이지가 튀던 문제의 원인이 이 불필요한 재배치였다.
@@ -2138,12 +2217,16 @@ export default function VerbatimReader() {
     const contentTop = (el) =>
       el.getBoundingClientRect().top - view.getBoundingClientRect().top + view.scrollTop;
 
-    // 앵커가 없으면(풀이창 여닫기·회전 등) 페이지 맨 위로 스냅하지 않도록
-    // 보고 있던 페이지 안의 위치(비율)를 기억해 둔다
-    let frac = 0;
+    /* 앵커가 없으면(풀이창 여닫기·회전 등) 화면 **가운데** 가 가리키던 페이지 안의 지점을
+       기억해 두고 그 점을 다시 가운데로 가져온다. 예전엔 keep 쪽의 '화면 맨 위' 비율을
+       0~1 로 잘라 썼는데, keep 은 pickCur 이 가운데로 고른 쪽이라 맨 위가 그 쪽보다 위면
+       비율이 0 으로 잘려 keep 쪽 머리가 화면 맨 위로 올라갔다 — 그러면 가운데 쪽이 바뀌고,
+       relayout 이 연달아 오면(창 크기 변화) 한 번에 몇 쪽씩 밀렸다. */
     const prevEl = pagesRef.current[keep - 1];
-    if (prevEl && prevEl.offsetHeight) {
-      frac = Math.max(0, Math.min(1, (view.scrollTop - contentTop(prevEl)) / prevEl.offsetHeight));
+    if (!anchor && prevEl && prevEl.offsetHeight) {
+      const vr0 = view.getBoundingClientRect();
+      const cy = vr0.top + vr0.height / 2;
+      anchor = { fy: (cy - prevEl.getBoundingClientRect().top) / prevEl.offsetHeight, sy: cy, center: true };
     }
 
     scaleRef.current = cw / base.w;
@@ -2173,8 +2256,8 @@ export default function VerbatimReader() {
       const top = contentTop(el);
       view.scrollTop = anchor
         ? top + anchor.fy * el.offsetHeight - (anchor.sy - vr.top)
-        : top + frac * el.offsetHeight;
-      if (anchor) {
+        : top;
+      if (anchor && !anchor.center) {
         const lr = el.getBoundingClientRect();
         view.scrollLeft = lr.left - vr.left + view.scrollLeft + anchor.fx * lr.width - (anchor.sx - vr.left);
       }
@@ -2507,7 +2590,42 @@ export default function VerbatimReader() {
       setZoomPill(null);
     };
 
+    /* 끝을 못 보고 굳은 핀치를 푼다.
+       터치 이벤트의 target 은 처음 닿은 요소로 고정되는데, 그 요소(텍스트 레이어의 .w 스팬)가
+       제스처 도중 DOM 에서 빠지면 — 핀치 전에 시작된 renderPage 가 끝나며 옛 .vb-tl 을
+       지우는 경우 — touchmove/touchend/touchcancel 이 떨어져 나간 요소에서만 발화하고 view 까지
+       버블링되지 않는다. 그러면 pinching·gestureRef·stage 의 임시 transform·끊긴 IO 가
+       전부 남아(아래 abort 주석의 증상 그대로) 다음 축소 때 페이지가 튀고, 앱을 껐다 켜야 풀렸다.
+       그래서 (1) 손가락이 닿은 요소에도 이벤트를 직접 걸어 떨어져 나갔을 때만 대신 받고,
+       (2) 핀치 중인데 새 touchstart 가 2손가락 이하면(= 끝을 놓쳤다) 먼저 원상복구한다. */
+    const hooked = new Set();
+    const stray = (e) => {
+      if (e.currentTarget.isConnected) return; // 붙어 있으면 view 가 버블링으로 받는다
+      if (e.type === "touchmove") onMove(e);
+      else if (e.type === "touchend") onEnd(e);
+      else abort();
+    };
+    const unhook = () => {
+      for (const tg of hooked) {
+        tg.removeEventListener("touchmove", stray);
+        tg.removeEventListener("touchend", stray);
+        tg.removeEventListener("touchcancel", stray);
+      }
+      hooked.clear();
+    };
+    const hook = (e) => {
+      for (const t of e.touches) {
+        const tg = t.target;
+        if (!tg || tg === view || hooked.has(tg)) continue;
+        tg.addEventListener("touchmove", stray, { passive: false });
+        tg.addEventListener("touchend", stray, { passive: true });
+        tg.addEventListener("touchcancel", stray, { passive: true });
+        hooked.add(tg);
+      }
+    };
     const onStart = (e) => {
+      // 핀치 중인데 손가락이 2개 이하로 새로 닿았다 — 지난 제스처의 끝을 놓친 것
+      if (pinching && e.touches.length <= 2) abort();
       if (e.touches.length !== 2 || !pdfRef.current) return;
       // 필기 중 손바닥이 닿아 생긴 '두 손가락'은 핀치가 아니다
       if (inkOnRef.current && [...e.touches].some((t) => t.touchType === "stylus")) return;
@@ -2516,6 +2634,7 @@ export default function VerbatimReader() {
          핀치 중 튀는 문제는 아래 onMove 의 e.cancelable 사후 방어로만 다룬다. */
       pinching = true;
       gestureRef.current = true;
+      hook(e);
       startD = dist(e.touches);
       startZoom = zoomRef.current;
       factor = 1;
@@ -2531,6 +2650,7 @@ export default function VerbatimReader() {
         // 네이티브 스크롤이 이미 제스처를 가져갔다 — 핀치를 포기한다
         pinching = false;
         gestureRef.current = false;
+        unhook();
         reset();
         observe();
         return;
@@ -2564,6 +2684,7 @@ export default function VerbatimReader() {
       if (!pinching) return;
       pinching = false;
       gestureRef.current = false;
+      unhook();
       reset();
       lastMid = null;
       observe();
@@ -2572,6 +2693,7 @@ export default function VerbatimReader() {
     const onEnd = (e) => {
       if (!pinching || e.touches.length >= 2) return;
       pinching = false;
+      unhook();
       // 앵커는 끝나는 순간의 중점에서 계산한다 (변환이 걸린 채로 측정)
       // gestureRef 는 앵커를 잡은 뒤에 내린다 — 그전에 pickCur 이 끼어들면 안 된다
       const anchor = lastMid ? findAnchor(lastMid.x, lastMid.y) : null;
@@ -2597,6 +2719,7 @@ export default function VerbatimReader() {
     document.addEventListener("visibilitychange", onHide);
     window.addEventListener("pagehide", abort);
     return () => {
+      unhook();
       view.removeEventListener("touchstart", onStart);
       view.removeEventListener("touchmove", onMove);
       view.removeEventListener("touchend", onEnd);
@@ -2682,11 +2805,13 @@ export default function VerbatimReader() {
     const onShow = () => {
       if (document.visibilityState !== "visible") return;
       if (!pdfRef.current || gestureRef.current) return;
+      // 가려진 동안 미뤄 둔 배치 — curRef 는 나갈 때의 쪽에 굳어 있으니 그 쪽으로 돌아온다
+      if (deferLayoutRef.current) { deferLayoutRef.current = false; relayout(curRef.current); }
       observe();
     };
     document.addEventListener("visibilitychange", onShow);
     return () => document.removeEventListener("visibilitychange", onShow);
-  }, []);
+  }, [relayout]);
 
   /* ── 드래그 선택 ── */
   useEffect(() => {
@@ -2736,15 +2861,14 @@ export default function VerbatimReader() {
     const idx = (s?.msgs.length || 0) + 1;    // 방금 넣을 ai 자리
     addMsgs(sid, [{ role: "me", text: q }, { role: "ai", text: "", live: true }]);
 
-    /* 그림이 딸린 세션의 질문이면 그림 맥락을 붙인다. imgDesc(gemma가 미리 옮겨 적은 설명)가
-       있으면 그 글만 시스템 프롬프트에 얹고 image 는 안 보낸다 — 그래야 실제로 답하는 건
-       늘 아래에서 고른 질문 탭 모델이다. imgDesc 가 없는(=회로도라 처음부터 직접 봐야 했던,
-       runCapture 의 hasFig 경로로 표시만 된) 옛 세션은 예전처럼 image 를 그대로 보낸다. */
+    /* 그림이 딸린 세션의 질문: 옮겨 적은 글(imgDesc)이 없으면 그림째 Gemini 에게 보낸다(visionDirect).
+       Gemini 가 막혀 있으면 그 자리에서 비전 모델이 옮겨 적고, 고른 질문 탭 모델이 그 글로 답한다 —
+       옮긴 글은 세션에 남아 다음 질문부터는 곧장 텍스트로 간다. */
     let image = "";
     let figBlock = "";
     if (sendFig && s?.img) {
       if (s.imgDesc) figBlock = `\n\n${FIG_NOTE}\n${s.imgDesc}`;
-      else image = s.img;
+      else image = s.img; // 그림째 Gemini 에게(아래 visionDirect). 막히면 그 자리에서 옮겨 적는다
     }
 
     /* 본문·쪽·짚은 문장은 user 턴이 아니라 system 에 싣는다. user 턴에 얹으면 지난 턴들은
@@ -2752,26 +2876,42 @@ export default function VerbatimReader() {
        읽고 앞의 문답을 놓친다 — "아까 그거"가 안 통하던 이유가 이거다. system 으로 옮기면
        대화 쪽에는 사람 말만 남아 history 와 모양이 같아지고, 흐름이 그대로 보인다. */
     const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP);
-    const sys =
+    const sysBase =
       `${SYS_ASK}\n\n[문서: ${docName || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
-      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}` +
-      figBlock;
+      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}`;
     let buf = "";
     let cut = false;   // 길이 상한에 걸려 말이 끊겼는가
     let swap = null;   // 고른 모델이 붐벼서 다른 모델이 대신 답했는가
     const ac = startJob(sid, image ? "그림과 함께" : (figBlock ? "그림 설명과 함께" : ""));
     try {
       const hook = phaseHook(ac, () => buf.length);
-      await ask(sys, q, (c) => {
-        buf += c;
-        patchMsg(sid, idx, { text: buf });
-      }, ac.signal, {
-        ask: true, history, image,
-        onPhase: (p, info) => {
-          if (p === "cut") cut = true;
-          if (p === "swap") swap = info;
-          hook(p, info);
-        },
+      const onPhase = (p, info) => {
+        if (p === "cut") cut = true;
+        if (p === "swap") swap = info;
+        hook(p, info);
+      };
+      const onDelta = (c) => { buf += c; patchMsg(sid, idx, { text: buf }); };
+      let done = false;
+      if (image) {
+        try {
+          await ask(sysBase, q, onDelta, ac.signal, { ask: true, history, image, visionDirect: true, onPhase });
+          done = true;
+        } catch (e) {
+          if (e.name === "AbortError" || e.name === "AuthError" || buf) throw e;
+          /* Gemini 가 막혔다 — 예전 두 단계: 비전 모델이 옮겨 적고, 고른 질문 탭 모델이 그 글로 답한다.
+             옮긴 글은 세션에 남겨 다음 질문부터는 옮겨적기 없이 곧장 간다. */
+          let desc = "";
+          await ask(SYS_CAP_DESCRIBE, `[${curRef.current}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
+            (c) => { desc += c; }, ac.signal, { image });
+          if (!desc.trim()) throw new Error("그림을 읽지 못했습니다 — 잠시 뒤 다시 시도하세요.");
+          patchSess(sid, { imgDesc: desc.trim() });
+          image = "";
+          figBlock = `\n\n${FIG_NOTE}\n${desc.trim()}`;
+        }
+      }
+      if (!done) await ask(sysBase + figBlock, q, onDelta, ac.signal, {
+        ask: true, history,
+        onPhase,
       });
       // 끊긴 걸 표시해 두지 않으면 답이 원래 그렇게 끝난 줄 안다.
       // swap 은 text 가 아니라 별도 칸에 둔다 — text 에 섞으면 다음 턴 히스토리까지 따라간다.
@@ -2839,21 +2979,7 @@ export default function VerbatimReader() {
             fr.readAsDataURL(blob);
           });
         } catch {}
-        if (image) {
-          try {
-            let desc = "";
-            await ask(SYS_CAP_DESCRIBE, `[${curRef.current}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
-              (c) => { desc += c; }, undefined, { image });
-            if (desc.trim()) {
-              figBlock = `\n\n${FIG_NOTE}\n${desc.trim()}`;
-              image = ""; // 설명이 있으면 원본은 안 보낸다 — 고른 모델이 답해야 한다
-              await fetch(u(`/api/remote/sessions/${sid}`), {
-                method: "PATCH", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ patch: { imgDesc: desc.trim(), imgDescFor: qMsg.img } }),
-              }).catch(() => {});
-            }
-          } catch { /* 옮겨적기가 실패하면 예전처럼 원본 그림을 실어 보낸다 */ }
-        }
+        // 옮겨적기는 아래에서 Gemini 가 막혔을 때만 한다(그림째 먼저 — sendAsk 와 같은 규칙)
       }
     }
 
@@ -2864,14 +2990,35 @@ export default function VerbatimReader() {
     const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP);
     const sys =
       `${SYS_ASK}\n\n[문서: ${docNameRef.current || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
-      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}` +
-      figBlock;
+      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}`; // 그림 설명(figBlock)은 부를 때 붙인다
     let buf = "";
     let cut = false;
     try {
-      await remoteAsk(sys, qMsg.text, qMsg.model, (c) => { buf += c; }, undefined, {
-        ask: true, history, image,
-        onPhase: (p) => { if (p === "cut") cut = true; },
+      const onPhase = (p) => { if (p === "cut") cut = true; };
+      let done = false;
+      if (image) {
+        try {
+          await remoteAsk(sys, qMsg.text, qMsg.model, (c) => { buf += c; }, undefined,
+            { ask: true, history, image, visionDirect: true, onPhase });
+          done = true;
+        } catch (e) {
+          if (e.name === "AuthError" || buf) throw e;
+          // Gemini 가 막혔다 — 옮겨 적고, 폰에서 고른 모델이 그 글로 답한다
+          let desc = "";
+          await ask(SYS_CAP_DESCRIBE, `[${curRef.current}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
+            (c) => { desc += c; }, undefined, { image });
+          if (!desc.trim()) throw new Error("그림을 읽지 못했습니다 — 잠시 뒤 다시 시도하세요.");
+          figBlock = `\n\n${FIG_NOTE}\n${desc.trim()}`;
+          image = "";
+          await fetch(u(`/api/remote/sessions/${sid}`), {
+            method: "PATCH", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ patch: { imgDesc: desc.trim(), imgDescFor: qMsg.img } }),
+          }).catch(() => {});
+        }
+      }
+      if (!done) await remoteAsk(sys + figBlock, qMsg.text, qMsg.model, (c) => { buf += c; }, undefined, {
+        ask: true, history,
+        onPhase,
       });
       await fetch(u(`/api/remote/sessions/${sid}/msgs/${idx}`), {
         method: "PATCH", headers: { "Content-Type": "application/json" },
@@ -3819,16 +3966,8 @@ export default function VerbatimReader() {
     mirrorCaptureToRemote(sid, target ? target.title : title, shot.url);
     setCapBusy("");
 
-    /* gemma 는 "보는" 역할만 한다 — 실제 질문에 답하는 건 늘 사용자가 고른 질문 탭
-       모델이다(SYS_CAP_DESCRIBE 참고). 여기서 미리 옮겨 적어 세션에 박아 두면 sendAsk
-       는 그림을 다시 안 보내고 이 글만 얹는다. 설명이 오기 전에 질문이 먼저 나가면
-       sendAsk 가 원본 이미지로 그 한 턴만 대신 처리한다 — 실패해도 질문 자체는 안 막는다. */
-    try {
-      let desc = "";
-      await ask(SYS_CAP_DESCRIBE, `[${shot.page}쪽에서 오려낸 영역] 이 이미지를 자세히 설명해라.`,
-        (c) => { desc += c; }, undefined, { image: b64 });
-      patchSess(sid, { imgDesc: desc.trim() });
-    } catch (e) { /* 그림(img)은 남아 있으니 sendAsk 가 대신 처리한다 */ }
+    /* 미리 옮겨 적지 않는다 — 질문이 오면 sendAsk 가 그림째 Gemini 에게 보내고, Gemini 가 막혔을
+       때만 그 자리에서 옮겨 적는다(예전엔 여기서 무조건 비전 모델을 한 번 불렀다). */
   };
 
   /* kind: "read" = 해석(비전 모델 한 번) / "solve" = 문제풀이(옮겨적기 → 질문 탭 모델이 풀이) */
@@ -3876,7 +4015,7 @@ export default function VerbatimReader() {
 
     /* 상태 표시줄이 "몇 초째 어느 단계인지"를 대신 알려 준다(모델이 식으면 첫 글자까지 실측 52초).
        중단은 이 ac 하나로 끊는다 — 캡처의 두 단계가 이어 달려도 늘 지금 도는 쪽을 가리킨다. */
-    const ac = startJob(sid, kind === "solve" ? "옮겨적는 중" : "해석하는 중");
+    const ac = startJob(sid, kind === "solve" ? "푸는 중" : "해석하는 중");
     capAbort.current = ac;
     const stepped = (name, getChars) => { setStat({ step: name, phase: "send", at: Date.now() }); return phaseHook(ac, getChars); };
 
@@ -3890,7 +4029,23 @@ export default function VerbatimReader() {
           { image: b64, onPhase: stepped("해석하는 중", () => buf.length) });
         put(buf, { live: false });
       } else {
-        // 1단계: 비전 모델이 눈 역할 — 옮겨적기. 읽은 내용을 그대로 보여줘서
+        /* 먼저 Gemini 에게 그림째 한 번에 맡긴다. 한 글자라도 받았으면 그걸로 끝 —
+           막혀서 한 글자도 못 받았을 때만 두 단계로 넘어간다. 후속 질문도 같은 경로를 타도록
+           imgDesc 는 비워 둔다(sendAsk 가 그림째 다시 보낸다). */
+        let buf = "";
+        let direct = false;
+        try {
+          await ask(SYS_CAP_SOLVE,
+            `[문서: ${docName || "제목 없음"} / ${shot.page}쪽에서 오려낸 문제]\n이 그림의 문제를 풀어라.`,
+            (c) => { buf += c; put(buf); }, ac.signal,
+            { ask: true, image: b64, visionDirect: true, onPhase: stepped("푸는 중", () => buf.length) });
+          direct = true;
+        } catch (e) {
+          if (e.name === "AbortError" || e.name === "AuthError" || buf) throw e;
+        }
+        if (direct) put(buf, { live: false });
+        else {
+        // (Gemini 가 막혔을 때) 1단계: 비전 모델이 눈 역할 — 옮겨적기. 읽은 내용을 그대로 보여줘서
         // 모델이 수식을 잘못 읽었을 때 사용자가 바로 알아챌 수 있게 한다.
         let ocr = "";
         await ask(SYS_CAP_DESCRIBE, `[${shot.page}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
@@ -3899,22 +4054,19 @@ export default function VerbatimReader() {
         if (!ocr.trim()) throw new Error("이미지에서 글자를 읽지 못했습니다.");
         const head = `[읽은 내용]\n${ocr.trim()}\n\n`;
 
-        /* 회로도·그래프가 있어도 2단계는 건너뛰지 않는다 — SYS_CAP_DESCRIBE 가 그림 자체를
-           글로 옮겨 놓으므로 텍스트 모델이 그 글만 읽고 풀 수 있다. 예전에는 여기서
-           [그림: …] 한 줄을 발견하면 비전 모델에게 직접 풀렸는데, 추론 체급이 낮은 쪽에
-           문제를 통째로 넘기는 셈이라 접었다. 옮겨 적은 글은 이 세션의 후속 질문에도
-           그대로 얹힌다(sendAsk 의 imgDesc) — 그래서 그림을 다시 보낼 일이 없다. */
+        /* 옮겨 적은 글은 이 세션의 후속 질문에도 그대로 얹힌다(sendAsk 의 imgDesc). */
         patchSess(sid, { imgDesc: ocr.trim() });
 
         put(head + "풀이 중…");
-        // 2단계: 추론은 질문 탭 모델(기본 DeepSeek)이 한다 — 이미지 없이 텍스트로.
-        let buf = "";
+        // 2단계: 추론은 질문 탭 모델이 한다 — 이미지 없이 텍스트로.
+        buf = "";
         await ask(SYS_CAP_SOLVE,
           `[문서: ${docName || "제목 없음"} / ${shot.page}쪽에서 오려낸 문제]\n` +
           `${FIG_NOTE}\n${ocr.trim()}\n\n위 문제를 풀어라.`,
           (c) => { buf += c; put(head + buf); }, ac.signal,
           { ask: true, onPhase: stepped("푸는 중", () => buf.length) });
         put(head + buf, { live: false });
+        }
       }
     } catch (e) {
       // 중단은 사고가 아니다 — 여기까지 받은 내용을 남기고 조용히 끝낸다.
@@ -5093,7 +5245,7 @@ export default function VerbatimReader() {
                           setSessMenuOpen(false);
                           if (opening) refreshHealth();
                         }}>
-                        {cfg.askModel ? (models.find((m) => m.id === cfg.askModel)?.label || "모델") : `기본${defLabel ? " — " + defLabel : ""}`}
+                        {cfg.askModel ? (models.find((m) => m.id === cfg.askModel)?.label || "모델") : `자동${defLabel ? " — " + defLabel : ""}`}
                         <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
                       </button>
                       {mdlMenuOpen && (
@@ -5101,7 +5253,7 @@ export default function VerbatimReader() {
                           <div className="vb-dropscroll">
                             <button className={"vb-mdlitem" + (!cfg.askModel ? " on" : "")} onClick={() => pickModel("")}>
                               <span className="vb-mdlrow">
-                                <span className="n">기본{defLabel ? ` — ${defLabel}` : ""}</span>
+                                <span className="n">자동{defLabel ? ` — 지금 ${defLabel}` : ""}</span>
                                 {!cfg.askModel && <span className="c">✓</span>}
                               </span>
                             </button>
@@ -5118,7 +5270,7 @@ export default function VerbatimReader() {
                                         onClick={() => pickModel(m.id)}>
                                         <span className="vb-mdlrow">
                                           <span className="n">{m.label}</span>
-                                          {m.id === defModel && <span className="d">기본</span>}
+                                          {m.id === defModel && <span className="d">자동 선택</span>}
                                           {hp && <span className={"vb-mdlhp " + hp.cls}><i />{hp.text}</span>}
                                           {cfg.askModel === m.id && <span className="c">✓</span>}
                                         </span>
@@ -5131,7 +5283,8 @@ export default function VerbatimReader() {
                             })}
                           </div>
                           <div className="vb-dropfoot">
-                            단어·문장 탭은 반응 속도 때문에 빠른 모델을 그대로 씁니다 — 이 선택은 질문 탭에만 적용됩니다.
+                            자동은 요즘 잘 답하는 모델을 서버가 골라 씁니다. 고른 모델이 막히면 다른 모델이 대신 답합니다.
+                            단어·문장 탭 모델은 ⚙ 설정에서 따로 고릅니다.
                           </div>
                         </div>
                       )}
@@ -5247,24 +5400,38 @@ export default function VerbatimReader() {
           <div className="vb-modal" onClick={(e) => { if (e.target === e.currentTarget) setSetOpen(false); }}>
             <div className="vb-card">
               <h3>엔진 설정</h3>
-              <p className="vb-sub">기본은 NVIDIA NIM입니다. 호출이 실패하면 서버가 자동으로 Gemini로 넘어가고, 이후 3분간 Gemini를 먼저 씁니다. API 키는 서버에서 관리하므로 여기에 넣지 않습니다. 설정과 배율은 이 기기에 저장됩니다.</p>
-              <label className="vb-row">
-                <input type="checkbox" checked={cfg.forceGemini}
-                  onChange={(e) => setCfg({ ...cfg, forceGemini: e.target.checked })} />
-                처음부터 Gemini만 사용
-              </label>
+              <p className="vb-sub">고른 모델이 붐비거나 답을 못 하면 서버가 다른 모델로 바꿔 대신 답하게 합니다 — 그때는 답 위에 누가 대신 답했는지 뜹니다. API 키는 서버에서 관리합니다. 설정과 배율은 이 기기에 저장됩니다.</p>
               <label className="vb-row">
                 <input type="checkbox" checked={cfg.useDict}
                   onChange={(e) => setCfg({ ...cfg, useDict: e.target.checked })} />
                 영어 단어는 사전 API를 먼저 조회 (더 빠름)
               </label>
+              {tapModels.length > 0 && (
+                <div className="vb-field">
+                  <label>단어·문장 탭 모델</label>
+                  <select value={cfg.tapModel || ""}
+                    onChange={(e) => setCfg({ ...cfg, tapModel: e.target.value })}>
+                    <option value="">
+                      자동{tapModels.find((m) => m.id === tapDef) ? ` — 지금 ${tapModels.find((m) => m.id === tapDef).label}` : ""}
+                    </option>
+                    {tapModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}{health[m.id] && !health[m.id].ok ? ` (지금 ${healthOf(m.id)?.text})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="vb-hint">
+                    {tapModels.find((m) => m.id === (cfg.tapModel || tapDef))?.note || "단어를 탭했을 때와 영역 캡처에 씁니다."}
+                  </p>
+                </div>
+              )}
               {models.length > 0 && (
                 <div className="vb-field">
                   <label>질문 탭 모델</label>
                   <select value={cfg.askModel || ""}
                     onChange={(e) => setCfg({ ...cfg, askModel: e.target.value })}>
                     <option value="">
-                      서버 기본값{defLabel ? ` — ${defLabel}` : ""}
+                      자동{defLabel ? ` — 지금 ${defLabel}` : ""}
                     </option>
                     {models.map((m) => (
                       <option key={m.id} value={m.id}>{m.label}</option>
@@ -5287,6 +5454,42 @@ export default function VerbatimReader() {
                   {remoteOn && <> 지금 <b>켜져 있음</b>.</>}
                 </p>
               </div>
+              <div className="vb-field">
+                <label>모델 목록</label>
+                <p className="vb-hint" style={{ marginTop: 0 }}>
+                  서버가 Google·NVIDIA 의 모델 목록을 한 시간마다 보고, 새 모델은 직접 불러 확인한 뒤 목록에 넣고
+                  수명이 끝난 모델은 뺍니다.{" "}
+                  {mdlInfo.discovering ? <b>지금 찾는 중 — 몇 분 걸립니다.</b>
+                    : mdlInfo.updatedAt ? <>마지막 확인 {new Date(mdlInfo.updatedAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} · 질문 {models.length}개 · 탭 {tapModels.length}개.</> : null}
+                </p>
+                <button className="vb-inboxbtn" disabled={mdlInfo.discovering} onClick={async () => {
+                  try { await libApi("/api/models/refresh", { method: "POST" }); } catch {}
+                  setMdlInfo((m) => ({ ...m, discovering: true }));
+                }}>지금 다시 찾기</button>
+              </div>
+              {inbox?.enabled && (
+                <div className="vb-field">
+                  <label>단축어로 PDF 넣기</label>
+                  <div className="vb-inbox">
+                    <code>{location.origin + u("/api/inbox")}</code>
+                    <button onClick={() => copyInbox("url", location.origin + u("/api/inbox"))}>
+                      {inboxCopied === "url" ? "복사됨" : "주소 복사"}
+                    </button>
+                  </div>
+                  <div className="vb-inbox">
+                    <code>Bearer {inbox.token.slice(0, 6)}…</code>
+                    <button onClick={() => copyInbox("tok", "Bearer " + inbox.token)}>
+                      {inboxCopied === "tok" ? "복사됨" : "토큰 복사"}
+                    </button>
+                  </div>
+                  <p className="vb-hint">
+                    단축어의 <b>URL 콘텐츠 가져오기</b>에 주소를 넣고, 메소드 <b>POST</b>, 헤더 <b>Authorization</b> 에
+                    토큰(“Bearer …” 통째로), 본문 요청 <b>양식</b>에 파일 필드(키 <b>file</b>)로 PDF 를 보냅니다.
+                    이름은 파일 이름을 그대로 씁니다. 주소 끝에 <b>?folder=폴더이름</b> 을 붙이면 그 폴더로 들어갑니다.
+                    이 토큰으로는 PDF 넣기만 됩니다.
+                  </p>
+                </div>
+              )}
               <button className="vb-done" onClick={() => { persist(); setSetOpen(false); }}>닫기</button>
             </div>
           </div>

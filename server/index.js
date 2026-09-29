@@ -2,11 +2,11 @@ import express from "express";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { PDFDocument, PDFName, PDFHexString, PDFNumber } from "pdf-lib";
 import { mountRemote } from "./remote.js";
 import { importAnnots, exportWithAnnots } from "./annots.js";
+import { createModels } from "./models.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, "..");
@@ -15,62 +15,18 @@ const PORT = Number(process.env.PORT || 8787);
 const APP_PASSWORD = process.env.APP_PASSWORD || "";
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const NIM_KEY = process.env.NIM_API_KEY || "";
-const NIM_MODEL = process.env.NIM_MODEL || "z-ai/glm-5.3-flash";
 const NIM_BASE = process.env.NIM_BASE_URL || "https://integrate.api.nvidia.com/v1";
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash-lite";
 
-/* 단어·문장 탭과 영역 캡처는 Gemini 를 먼저 부르고, NIM 은 그게 실패할 때만 쓴다.
-   2026-09-18 에 뒤집었다. 그날 NIM 은 gpt-oss-120b(당시 NIM_MODEL)·deepseek-v4-pro·
-   llama-3.3-70b 가 전부 410(수명 종료)였고, 살아 있는 모델도 같은 단어 프롬프트에 첫 글자까지
-   7~66초, 비전 모델(gemma-4·llama-3.2-90b)은 60초 넘게 헤더조차 안 보냈다.
-   gemini-3.5-flash-lite 는 같은 프롬프트에 꾸준히 2초. NIM 이 다시 빨라지면
-   TAP_ENGINE=nim 으로 원래 순서(NIM → Gemini)로 돌릴 수 있다. */
-const TAP_GEMINI_FIRST = (process.env.TAP_ENGINE || "gemini") !== "nim";
+/* 모델 목록·상태·자동 선택은 server/models.js — 목록은 서버가 스스로 찾는다(그 파일 머리말).
+   TAP_MODEL / ASK_MODEL 로 기본값을 고정할 수 있다(비우면 "자동" — 점수로 고른다). */
 
-/* NIM 한 번의 시도가 응답 헤더를 받기까지 기다리는 상한. 넘기면 다음 모델로 넘어간다.
-   전체 상한(90/180초)만 있을 땐 멈춘 모델 하나가 그 시간을 혼자 다 써서, 폴백은 시도도
-   못 하고 "전부 실패"로 끝났다(2026-09-18 gemma 캡처). 헤더가 온 뒤의 스트림에는 걸지 않는다 —
-   속생각이 긴 모델은 헤더는 금방 오고 글자가 늦게 온다. */
-const NIM_CONNECT_MS = 25_000;
-
-/* 질문 탭 전용 모델 목록.
-   단어·문장 탭은 첫 토큰 속도가 생명이라 NIM_MODEL 을 그대로 쓰고,
-   질문 탭만 아래에서 고른 모델로 부른다. 클라이언트가 이 목록을 받아 설정에 띄운다.
-   note 에는 **모델의 성질만** 적는다: 답이 촘촘한지 간결한지, 표를 쓰는지 줄글인지,
-   속생각을 흘리는지, 수식 표기에 버릇이 있는지. 이런 건 잘 안 변한다.
-   반대로 "첫 글자 0.6초", "90초 동안 무응답" 같은 그날의 상태는 여기 적지 않는다 —
-   NIM 은 529 Overloaded 를 수시로 내고 몇 분 뒤 저절로 풀려서, 한 번 재고 박아 두면
-   멀쩡한 모델을 "쓰지 마라"고 못 박게 된다(Llama 3.3 이 실제로 그렇게 적혀 있었다).
-   속도·가용성은 markHealth/probe 가 실시간으로 재서 드롭다운에 점으로 띄운다.
-   빠르기는 순위(빠름/보통/느림)로만 남긴다 — 순위는 절대 초보다 훨씬 오래 간다.
-   think: true 는 reasoning_content(속생각)를 실제로 흘리는 걸 스트리밍으로 확인한 모델이다 —
-   클라이언트 드롭다운이 이 값으로 "추론 모델"/"일반 모델"을 가른다. */
-/* id 가 "gemini/" 로 시작하면 NIM 이 아니라 Gemini 로 부른다(뒷부분이 Gemini 모델 이름).
-   2026-09-18 정리: deepseek-v4-pro·v4-flash·minimax-m3·gpt-oss-120b·mistral-medium-3.5·
-   llama-3.3-70b 는 NIM 에서 410(수명 종료) 또는 404 라 뺐다. */
-const ASK_MODELS = [
-  { id: "gemini/gemini-3.5-flash",               label: "Gemini 3.5 Flash",       think: false, note: "Google 쪽 모델이라 NIM 이 붐비거나 느려도 영향을 안 받는다. 속생각을 보여 주지 않고 조용히 생각한 뒤 한 번에 쓴다. 굵은 글씨와 소제목으로 구조를 잘 잡는다." },
-  { id: "deepseek-ai/deepseek-v4-flash-0731",    label: "DeepSeek V4 Flash",      think: true,  note: "표와 수식을 갖춰 쓰는 촘촘한 편. 속생각이 먼저 흐르고 답이 나온다." },
-  { id: "nvidia/nemotron-3-super-120b-a12b",     label: "Nemotron 3 Super 120B",  think: true,  note: "표를 가장 많이 쓴다 — 정리된 표로 받고 싶을 때. 설명량은 Pro급인데 더 빨리 끝난다. 대신 답이 시작되기 전 속생각이 한참 흐르니, 화면이 비어 있어도 멈춘 게 아니다." },
-  { id: "nvidia/nemotron-3-ultra-550b-a55b",     label: "Nemotron 3 Ultra 550B",  think: true,  note: "Super 의 큰 형. 뜻풀이에 한 줄 풀이를 덧붙이는 등 조금 더 친절하게 쓴다. 대신 가장 무거워 느린 편." },
-  { id: "z-ai/glm-5.3-flash",                    label: "GLM 5.3 Flash",          think: true,  note: "형식 지시를 잘 지키고 짧게 끝낸다. Gemini 가 실패할 때 단어·문장 탭이 넘어가는 NIM 모델이기도 하다." },
-];
-const isGeminiId = (id) => String(id).startsWith("gemini/");
-const ASK_MODEL_IDS = new Set(ASK_MODELS.map((m) => m.id));
-const NIM_ASK_MODEL = process.env.NIM_ASK_MODEL || "gemini/gemini-3.5-flash";
-
-/* 영역 캡처(이미지)를 읽는 비전 모델. ASK_MODELS 는 전부 텍스트 전용이라 이미지를 못 받는다.
-   2026-07-30 에 실제 이미지를 던져 실측한 결과(표지 썸네일, 한국어 프롬프트):
-     google/gemma-4-31b-it                    3.6초, 모든 글자 정확 + 한국어 자연스러움  ← 채택
-     meta/llama-3.2-90b-vision-instruct      13.7초, 정확하지만 느리고 장황            ← 폴백
-     nvidia/nemotron-nano-12b-v2-vl           2.1초, 제목만 읽고 나머지 놓침
-     meta/llama-3.2-11b-vision-instruct       8.3초, 같은 구절 무한 반복 (실격)
-   DeepSeek 은 NIM 에 비전 버전이 없다(v4-pro·v4-flash·coder 전부 텍스트 전용).
-   카탈로그에 있어도 계정에서 404 나는 것들: gemma-3-12b-it, phi-3-vision, cosmos-reason2-8b. */
-const NIM_VISION_MODEL = process.env.NIM_VISION_MODEL || "google/gemma-4-31b-it";
-const VISION_CHAIN = [NIM_VISION_MODEL, "meta/llama-3.2-90b-vision-instruct"]
-  .filter((m, i, a) => a.indexOf(m) === i);
+/* 첫 글자(또는 속생각)까지 기다리는 상한. 넘기면 그 모델을 버리고 다음으로 넘어간다 —
+   아직 화면에 한 글자도 안 나갔으니 사용자는 바뀐 걸 모른다. 헤더는 왔는데 글자가 안 오는
+   모델(2026-09 NIM 에서 흔했다)이 전체 상한을 혼자 다 쓰던 걸 막는다. */
+const FIRST_MS = { tap: 15_000, ask: 45_000 };
+/* 이미 쓰기 시작한 뒤 이만큼 아무것도 안 오면 멈춘 것으로 보고 끝낸다(끊겼다는 안내를 붙여서). */
+const STALL_MS = 45_000;
 
 if (!APP_PASSWORD || !SESSION_SECRET) {
   console.error("[여백] APP_PASSWORD 와 SESSION_SECRET 을 .env 에 설정하세요.");
@@ -209,64 +165,23 @@ function requireAuth(req, res, next) {
   res.status(401).json({ error: "로그인이 필요합니다." });
 }
 
-/* ── 모델 상태 ──
-   note 에 "첫 글자 0.6초" 같은 그날의 수치를 박아 두면 금세 거짓말이 된다. NIM 은 529
-   Overloaded 를 수시로 내고 몇 분 뒤 저절로 풀리기 때문이다(실제로 한 번 재 보고 "무응답"
-   이라고 적어 둔 모델이 멀쩡했다). 그래서 성질은 note 에 글로 두고, 상태는 여기서 잰다.
-
-   두 갈래로 채운다:
-   - 실사용: /api/chat 이 성공하거나 실패할 때마다 markHealth() 가 공짜로 적는다.
-   - 프로브: 안 쓰는 모델은 실사용 기록이 안 쌓이므로, 드롭다운을 열 때 max_tokens 1 짜리
-     최소 요청을 병렬로 던진다. 스트리밍 핫패스와 무관한 별도 호출이라 안전하다. */
-const health = new Map(); // id → { ok, status, at, ms }
-const HEALTH_TTL = 60 * 1000; // 이보다 최근 기록이 있으면 다시 찌르지 않는다
-const probing = new Set();    // 지금 찌르고 있는 모델 — 겹쳐 부르지 않는다
-const markHealth = (id, ok, status = 0, ms = 0) =>
-  health.set(id, { ok, status, at: Date.now(), ms });
-
-async function probe(id) {
-  if (probing.has(id)) return;
-  probing.add(id);
-  const t0 = Date.now();
-  try {
-    const r = await fetch(`${NIM_BASE}/chat/completions`, {
-      method: "POST",
-      signal: AbortSignal.timeout(8000),
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${NIM_KEY}` },
-      body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
-    });
-    markHealth(id, r.ok, r.status, Date.now() - t0);
-  } catch (e) {
-    /* 8초 안에 대답이 없는 것과 아예 못 붙는 것은 다르다. 콜드스타트는 50초도 걸리는데,
-       그걸 "응답 없음"이라고 적으면 실제로는 answer 가 오는 모델을 죽었다고 못 박게 된다
-       (note 에서 걷어낸 그 잘못을 배지에서 되풀이하는 셈). -1 은 "느리다"까지만 말한다.
-       덤으로 이 프로브가 콜드스타트를 깨워 두기도 한다. */
-    markHealth(id, false, e.name === "TimeoutError" ? -1 : 0, Date.now() - t0);
-  } finally {
-    probing.delete(id);
-  }
-}
-
-/* 오래된 기록만 뒤에서 다시 잰다. **await 하지 않는 게 요점이다** — 값을 읽는 쪽은
-   측정이 끝나기를 기다리지 않고 늘 저장값을 즉시 받는다. 새로 잰 값은 그다음 읽을 때
-   보인다. 아무도 앱을 안 쓰면 재지도 않으므로 놀고 있는 서버가 API 를 계속 두드리지도
-   않는다(고정 주기로 도는 타이머를 안 두는 이유). */
-function refreshStale() {
-  if (!NIM_KEY) return;
-  for (const m of ASK_MODELS)
-    if (!isGeminiId(m.id) && Date.now() - (health.get(m.id)?.at || 0) > HEALTH_TTL) probe(m.id);
-}
-
-/* 질문 탭에서 고를 수 있는 모델 목록 + 저장된 상태값.
-   이 라우트는 **읽기 전용이다.** 측정을 기다리는 일이 절대 없다. */
+/* 모델 목록 + 점수 + 지금 자동이 고르는 모델. 읽기 전용이라 즉시 돌아온다 —
+   오래된 점수는 응답을 보낸 뒤에 뒤에서 다시 잰다(models.touch). */
 app.get("/api/models", requireAuth, (_req, res) => {
+  const p = models.publicList();
   res.json({
-    models: ASK_MODELS,
-    default: NIM_ASK_MODEL,
-    fast: NIM_MODEL,
-    health: Object.fromEntries(health),
+    ...p,
+    // 클라이언트의 "자동 — 지금 ○○" 표시용. 고정값(.env)이 있으면 그것.
+    default: PIN_ASK && models.pickable(PIN_ASK) ? PIN_ASK : p.auto.ask,
+    tapDefault: PIN_TAP && models.pickable(PIN_TAP) ? PIN_TAP : p.auto.tap,
   });
-  refreshStale(); // 응답을 보낸 뒤에 시작한다 — 이 줄이 응답을 늦출 여지조차 없게
+  models.touch(6);
+});
+
+/* 목록 다시 찾기 — 몇 분 걸리므로 기다리지 않고 바로 돌려준다 */
+app.post("/api/models/refresh", requireAuth, (_req, res) => {
+  if (!models.isDiscovering()) models.discover({ force: true }).catch((e) => console.warn("[모델] 찾기 실패:", e.message));
+  res.status(202).json({ ok: true, discovering: true });
 });
 
 /* ───────────────── 서재 (PDF 보관함) ─────────────────
@@ -282,6 +197,10 @@ fs.mkdirSync(PDF_DIR, { recursive: true });
 fs.mkdirSync(ANNOT_DIR, { recursive: true });
 fs.mkdirSync(THUMB_DIR, { recursive: true });
 fs.mkdirSync(TEXT_DIR, { recursive: true });
+
+const models = createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE });
+const PIN_TAP = process.env.TAP_MODEL || "";
+const PIN_ASK = process.env.ASK_MODEL || "";
 
 mountRemote(app, { requireAuth, DATA_DIR });
 
@@ -349,6 +268,23 @@ app.get("/api/library/search", requireAuth, (req, res) => {
   res.json({ query: q, results: results.slice(0, 40) });
 });
 
+/* 서재에 PDF 하나를 넣는다 — 앱 업로드와 단축어 받은편지함이 같이 쓴다.
+   PDF 가 아니면 null. 같은 이름·같은 크기면 이미 있는 것으로 보고 그 항목을 돌려준다
+   (같은 PDF 를 다시 열 때마다, 단축어를 두 번 눌러도 늘어나지 않게). */
+const isPdf = (buf) => Buffer.isBuffer(buf) && buf.length >= 8 && buf.subarray(0, 1024).includes("%PDF");
+function addPdf(buf, name, folder) {
+  const dup = lib.files.find((f) => f.name === name && f.size === buf.length);
+  if (dup) return { ...dup, existing: true };
+  const id = crypto.randomUUID();
+  fs.writeFileSync(path.join(PDF_DIR, id + ".pdf"), buf);
+  // lastOpenedAt 을 업로드 시각으로 미리 채워 둔다 — 방금 추가한 책이 서재 인사말에서
+  // "오랜만이네요"로 뜨는 걸 막는다(추가 = 사실상 방금 연 것과 같다).
+  const entry = { id, name, folder, size: buf.length, at: Date.now(), lastOpenedAt: Date.now() };
+  lib.files.push(entry);
+  saveLib();
+  return entry;
+}
+
 /* 업로드 — 본문이 PDF 바이트 그대로 오고, 이름·폴더는 쿼리로 받는다 */
 app.post(
   "/api/library/upload",
@@ -356,23 +292,101 @@ app.post(
   express.raw({ type: () => true, limit: "300mb" }),
   (req, res) => {
     const buf = req.body;
-    if (!Buffer.isBuffer(buf) || buf.length < 8 || !buf.subarray(0, 1024).includes("%PDF"))
-      return res.status(400).json({ error: "PDF 파일이 아닙니다." });
+    if (!isPdf(buf)) return res.status(400).json({ error: "PDF 파일이 아닙니다." });
     const name = String(req.query.name || "문서").slice(0, 200);
     const folder = lib.folders.some((f) => f.id === req.query.folder) ? String(req.query.folder) : "";
-    // 같은 이름·같은 크기면 이미 있는 것으로 본다 — 같은 PDF 를 다시 열 때마다 늘어나지 않게
-    const dup = lib.files.find((f) => f.name === name && f.size === buf.length);
-    if (dup) return res.json({ ...dup, existing: true });
-    const id = crypto.randomUUID();
-    fs.writeFileSync(path.join(PDF_DIR, id + ".pdf"), buf);
-    // lastOpenedAt 을 업로드 시각으로 미리 채워 둔다 — 방금 추가한 책이 서재 인사말에서
-    // "오랜만이네요"로 뜨는 걸 막는다(추가 = 사실상 방금 연 것과 같다).
-    const entry = { id, name, folder, size: buf.length, at: Date.now(), lastOpenedAt: Date.now() };
-    lib.files.push(entry);
-    saveLib();
-    res.json(entry);
+    res.json(addPdf(buf, name, folder));
   }
 );
+
+/* ── 받은편지함: 단축어·공유 시트로 PDF 넣기 ────────────────────────────────
+   아이패드 단축어의 "URL 내용 가져오기", 갤럭시의 HTTP Shortcuts 앱처럼 **쿠키가 없는**
+   호출자를 위한 통로. 세션 대신 INBOX_TOKEN 을 받고, 이 토큰으로 할 수 있는 건 "서재에
+   PDF 넣기" 하나뿐이다 — 읽기·지우기는 못 한다. 그래서 기기의 단축어에 박아 둬도 새어
+   나갔을 때 피해가 스팸 PDF 정도에 그친다. INBOX_TOKEN 이 없으면 통로 자체가 없다.
+
+   본문은 두 모양 다 받는다(단축어 쪽 설정을 어떻게 하든 되게):
+   - 날 바이트 — 단축어 "요청 본문: 파일", HTTP Shortcuts "File"
+   - multipart/form-data — 단축어 "요청 본문: 양식", HTTP Shortcuts "Form data"
+   이름은 ?name= > X-Filename 헤더 > multipart/Content-Disposition 의 filename 순.
+   **아이패드 단축어는 "양식"으로 보내게 안내한다** — 헤더에 한글 이름을 넣으면 iOS 가 값을
+   빈 문자열로 보낸다(2026-09-28 실기기: x-filename 이 "" 로 옴). 양식은 파일 이름이 multipart 에 실려 온다. */
+const INBOX_TOKEN = process.env.INBOX_TOKEN || "";
+if (INBOX_TOKEN && INBOX_TOKEN.length < 24)
+  console.warn("[여백] INBOX_TOKEN 이 너무 짧습니다 — 24자 이상 무작위 문자열을 쓰세요.");
+
+function inboxOK(req) {
+  if (!INBOX_TOKEN) return false;
+  const m = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || "");
+  const given = m ? m[1].trim() : String(req.query.key || "");
+  const a = Buffer.from(given), b = Buffer.from(INBOX_TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+/* 헤더 값의 파일 이름 — RFC 5987 filename*=UTF-8''… 를 먼저, 아니면 filename="…".
+   단축어는 한글을 퍼센트 인코딩 없이 UTF-8 그대로 보내기도 하는데 Node 는 헤더를 latin1 로
+   읽으므로, 그 경우 바이트를 되살려 UTF-8 로 다시 읽는다. */
+function headerName(v) {
+  if (!v) return "";
+  v = String(v);
+  const star = /filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)/.exec(v);
+  if (star) { try { return decodeURIComponent(star[1].trim()); } catch {} }
+  const plain = /filename\s*=\s*"([^"]*)"|filename\s*=\s*([^;]+)/.exec(v);
+  return plain ? fixLatin1(plain[1] ?? plain[2].trim()) : "";
+}
+function fixLatin1(s) {
+  if (!/[\x80-\xff]/.test(s) || /[^\x00-\xff]/.test(s)) return s;
+  const t = Buffer.from(s, "latin1").toString("utf8");
+  return t.includes("\ufffd") ? s : t;
+}
+
+/* multipart 에서 첫 번째 파일 칸만 꺼낸다 — 이 용도엔 파일 하나면 충분해서 라이브러리 없이 */
+function firstPart(buf, ctype) {
+  const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(ctype || "");
+  if (!m) return null;
+  const sep = Buffer.from("--" + (m[1] || m[2]).trim());
+  let at = buf.indexOf(sep);
+  while (at >= 0) {
+    const hEnd = buf.indexOf("\r\n\r\n", at);
+    if (hEnd < 0) return null;
+    const head = buf.subarray(at + sep.length, hEnd).toString("latin1");
+    const next = buf.indexOf(sep, hEnd + 4);
+    if (next < 0) return null;
+    const body = buf.subarray(hEnd + 4, next - 2); // 칸 끝의 \r\n 은 구분자 몫
+    if (/filename/i.test(head) || isPdf(body)) return { body, name: headerName(head) };
+    at = next;
+  }
+  return null;
+}
+
+app.post("/api/inbox", express.raw({ type: () => true, limit: "300mb" }), (req, res) => {
+  // 단축어가 결과를 그대로 알림에 띄우므로 사람이 읽을 한 줄 텍스트로 답한다
+  const say = (code, msg) => res.status(code).type("text/plain; charset=utf-8").send(msg);
+  if (!inboxOK(req)) return say(INBOX_TOKEN ? 401 : 404, "여백: 토큰이 맞지 않습니다.");
+  let buf = req.body, name = "";
+  if (/multipart\/form-data/i.test(req.headers["content-type"] || "") && Buffer.isBuffer(buf)) {
+    const part = firstPart(buf, req.headers["content-type"]);
+    buf = part?.body;
+    name = part?.name || "";
+  }
+  if (!isPdf(buf)) return say(400, "여백: PDF 파일이 아닙니다.");
+  let q = String(req.query.name || "");
+  name = q || fixLatin1(String(req.headers["x-filename"] || "")) ||
+    name || headerName(req.headers["content-disposition"]);
+  try { name = decodeURIComponent(name); } catch {}
+  name = name.replace(/[\\/]+/g, " ").replace(/\.pdf$/i, "").trim().slice(0, 200) ||
+    "받은 문서 " + new Date().toLocaleString("ko-KR", { timeZone: "Asia/Seoul" });
+  // 폴더는 id 가 아니라 이름으로 — 단축어에 id 를 적어 넣게 할 수는 없다
+  const fq = String(req.query.folder || "").trim();
+  const folder = (fq && lib.folders.find((f) => f.id === fq || f.name === fq)?.id) || "";
+  const e = addPdf(buf, name, folder);
+  say(200, e.existing ? `여백: 이미 서재에 있습니다 — ${e.name}` : `여백: 서재에 넣었습니다 — ${e.name}`);
+});
+
+/* 설정 화면에서 단축어에 넣을 토큰을 보여 주기 위한 것 (로그인한 기기만).
+   주소는 안 준다 — 서버는 자기가 /yeobaek/ 밑에 사는 걸 모른다. 클라이언트가 u() 로 만든다. */
+app.get("/api/inbox/info", requireAuth, (_req, res) =>
+  res.json(INBOX_TOKEN ? { enabled: true, token: INBOX_TOKEN } : { enabled: false }));
 
 /* 읽기(기본)와 다운로드(?dl) — 경로는 목록에 있는 id 로만 만들어져 밖으로 나갈 수 없다 */
 app.get("/api/library/file/:id", requireAuth, async (req, res) => {
@@ -413,7 +427,12 @@ app.patch("/api/library/file/:id", requireAuth, (req, res) => {
   if (folder !== undefined)
     f.folder = folder && lib.folders.some((x) => x.id === folder) ? folder : "";
   if (typeof name === "string" && name.trim()) f.name = name.trim().slice(0, 200);
-  if (Number.isFinite(lastPage) && lastPage > 0) f.lastPage = Math.floor(lastPage);
+  if (Number.isFinite(lastPage) && lastPage > 0) {
+    const n = Math.floor(lastPage);
+    // 저널에 남긴다 — "나갔다 오면 앞쪽으로 돌아가 있다" 같은 신고를 로그로 되짚기 위해(2026-09-28)
+    if (n !== f.lastPage) console.log(`[쪽] ${f.name.slice(0, 40)} ${f.lastPage || "-"}→${n}`);
+    f.lastPage = n;
+  }
   // opened:true — 서재에서 이 문서를 열 때마다 찍는다. lastPage 저장은 스크롤 디바운스라
   // 첫 몇 초 안에 문서를 닫으면 안 찍힐 수 있어서, "정말 열었다"는 별도 신호를 둔다.
   // 서재 인사말이 "이어읽기"/"오랜만" 을 가르는 기준이 이 값이다.
@@ -845,12 +864,12 @@ app.delete("/api/lookups/:id", requireAuth, (req, res) => {
 });
 
 /* ───────────────── 프로바이더 ───────────────── */
-// 브라우저에는 항상 OpenAI 형식 SSE 만 내보낸다. Gemini 는 여기서 변환한다.
-function sseChunk(text) {
-  return `data: ${JSON.stringify({ choices: [{ delta: { content: text } }] })}\n\n`;
+// 브라우저에는 항상 OpenAI 형식 SSE 만 내보낸다. 두 프로바이더 모두 여기서 다시 싼다.
+function sseEvent(delta, finish) {
+  return `data: ${JSON.stringify({ choices: [{ delta, ...(finish ? { finish_reason: finish } : {}) }] })}\n\n`;
 }
 
-async function callNIM({ system, user, image, history = [], maxTokens, signal, model }) {
+async function callNIM({ system, user, image, history = [], maxTokens, signal, model, gen }) {
   if (!NIM_KEY) throw new Error("NIM 키 없음");
   // 이미지가 있으면 content 를 배열로 보낸다 (OpenAI 표준 멀티모달 형식).
   const content = image
@@ -862,7 +881,7 @@ async function callNIM({ system, user, image, history = [], maxTokens, signal, m
     signal,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${NIM_KEY}` },
     body: JSON.stringify({
-      model: model || NIM_MODEL,
+      model,
       messages: [
         { role: "system", content: system },
         ...history.map((t) => ({ role: t.role, content: t.text })),
@@ -871,18 +890,20 @@ async function callNIM({ system, user, image, history = [], maxTokens, signal, m
       max_tokens: maxTokens,
       temperature: 0.3,
       stream: true,
+      // 탭용 "속생각 끄기" 설정(찾기 때 모델마다 알아낸 것 — chat_template_kwargs 또는 reasoning_effort)
+      ...(gen || {}),
     }),
   });
   if (!res.ok) {
     const d = await res.text().catch(() => "");
-    const e = new Error(`NIM(${model || NIM_MODEL}) ${res.status}${d ? ": " + d.slice(0, 200) : ""}`);
-    e.status = res.status; // 붐빔(429/5xx)인지 판별해 재시도할 수 있게 남긴다
+    const e = new Error(`${res.status}${d ? ": " + d.slice(0, 160) : ""}`);
+    e.status = res.status;
     throw e;
   }
-  return res; // 이미 OpenAI 형식 SSE — 그대로 통과시킨다
+  return res;
 }
 
-async function callGemini({ system, user, image, history = [], maxTokens, signal, model = GEMINI_MODEL }) {
+async function callGemini({ system, user, image, history = [], maxTokens, signal, model, gen }) {
   if (!GEMINI_KEY) throw new Error("Gemini 키 없음");
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}` +
@@ -900,49 +921,65 @@ async function callGemini({ system, user, image, history = [], maxTokens, signal
         ...history.map((t) => ({ role: t.role === "assistant" ? "model" : "user", parts: [{ text: t.text }] })),
         { role: "user", parts },
       ],
-      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.3 },
+      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.3, ...(gen || {}) },
     }),
   });
   if (!res.ok) {
     const d = await res.text().catch(() => "");
-    const e = new Error(`Gemini(${model}) ${res.status}${d ? ": " + d.slice(0, 200) : ""}`);
+    // Gemini 오류 본문은 여러 줄 JSON 이다 — message 한 줄만 남긴다
+    let msg = d;
+    try { msg = JSON.parse(d).error?.message || d; } catch {}
+    const e = new Error(`${res.status}${msg ? ": " + String(msg).slice(0, 160) : ""}`);
     e.status = res.status;
     throw e;
   }
   return res;
 }
 
-// Gemini SSE → OpenAI SSE 로 바꿔서 클라이언트로 흘려보낸다
-async function pipeGemini(upstream, res) {
-  const reader = upstream.body.getReader();
+/* SSE 줄을 읽어 JSON 을 하나씩 내놓는다(두 프로바이더 공용) */
+async function* sseJSON(body) {
   const dec = new TextDecoder();
   let buf = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
+  for await (const chunk of body) {
+    buf += dec.decode(chunk, { stream: true });
     const lines = buf.split("\n");
     buf = lines.pop();
     for (const line of lines) {
       if (!line.startsWith("data:")) continue;
       const raw = line.slice(5).trim();
       if (!raw || raw === "[DONE]") continue;
-      let j;
-      try { j = JSON.parse(raw); } catch { continue; }
-      const t = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("");
-      if (t) res.write(sseChunk(t));
+      try { yield JSON.parse(raw); } catch {}
     }
   }
-  res.write("data: [DONE]\n\n");
-  res.end();
 }
 
-/* NIM 이 죽으면 3분간 Gemini 를 먼저 쓴다 (서킷 브레이커) */
-let nimDownUntil = 0;
+/* 프로바이더 스트림 → { c: 답 글자, k: 속생각, fin: 끝난 이유 } 로 맞춘다.
+   fin 은 OpenAI 식으로: "stop" 정상, "length" 상한에 걸림, 그 밖은 막힘(SAFETY 등). */
+const GEMINI_FIN = { STOP: "stop", MAX_TOKENS: "length" };
+async function* events(upstream, gemini) {
+  for await (const j of sseJSON(upstream.body)) {
+    if (j.error) throw new Error(String(j.error.message || JSON.stringify(j.error)).slice(0, 160));
+    if (gemini) {
+      const cand = j.candidates?.[0];
+      const c = (cand?.content?.parts || []).filter((p) => !p.thought).map((p) => p.text || "").join("");
+      const fr = cand?.finishReason;
+      const fin = fr ? GEMINI_FIN[fr] || fr : "";
+      if (!cand && j.promptFeedback?.blockReason) yield { fin: j.promptFeedback.blockReason };
+      else if (c || fin) yield { c, fin };
+    } else {
+      const ch = j.choices?.[0];
+      const d = ch?.delta || {};
+      const c = d.content || "";
+      const k = d.reasoning_content || d.reasoning || "";
+      const fin = ch?.finish_reason || "";
+      if (c || k || fin) yield { c, k, fin };
+    }
+  }
+}
 
 /* 질문 탭 세션의 이전 대화. 클라이언트가 이미 잘라서 보내지만,
    프롬프트가 폭주해 요금·지연이 튀지 않도록 서버에서 한 번 더 자른다.
-   이미지는 전부 버린다 — 비전 체인을 타는 이미지는 현재 턴의 image 하나뿐이다.
+   이미지는 전부 버린다 — 이미지는 현재 턴의 image 하나뿐이다.
    (이전 턴 이미지까지 실으면 텍스트 전용 모델이 받아 삼키지 못하고 400 을 낸다.) */
 const HIST_TURNS = 16;      // 최근 몇 턴까지
 /* 턴 하나의 상한 — 답변 예산이 8000 토큰으로 올라가면서 6000자로는 지난 답이 문장 중간에서
@@ -964,8 +1001,16 @@ function trimHistory(h) {
   return out;
 }
 
+/* ── /api/chat ──
+   요청 하나 = "고른 모델 → 대신 답할 모델들" 차례로 시도. 핵심 규칙은 하나다:
+   **첫 글자(또는 속생각)가 실제로 오기 전까지는 아무것도 클라이언트에 보내지 않는다.**
+   그래서 붐빔(503/529), 헤더만 오고 멈춤, 빈 답(생각만 하다 끝남·SAFETY), 스트림 초반 오류가
+   전부 "다음 모델로" 로 조용히 흡수된다. 예전엔 헤더가 오는 순간 그 모델에 묶여서, 그 뒤에
+   빈 답이 오면 화면엔 아무것도 없이 끝났고("답도 안 내고 끝난다"), 503 셋이면 곧장 502 였다.
+   쓰기 시작한 뒤에 끊기면 되돌릴 수 없으므로, 끊겼다는 한 줄을 답 끝에 붙여 알린다.
+   누가 답했는지는 X-Engine/X-Model 헤더, 고른 모델과 다르면 X-Wanted 에 원래 고른 것. */
 app.post("/api/chat", requireAuth, async (req, res) => {
-  const { system = "", user = "", image = "", maxTokens = 1000, forceGemini = false, ask = false, model = "" } = req.body || {};
+  const { system = "", user = "", image = "", maxTokens = 1000, ask = false, model = "", tapModel = "", visionDirect = false } = req.body || {};
   if (!user) return res.status(400).json({ error: "user 가 비었습니다." });
   const history = trimHistory(req.body?.history);
 
@@ -974,182 +1019,190 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   // 실제 클라이언트 이탈은 응답이 끝나기 전에 res 가 닫히는 경우다.
   res.on("close", () => { if (!res.writableEnded) ac.abort(); });
 
-  // 프로바이더가 응답하지 않을 때 탭이 영원히 멈추지 않도록 상한을 둔다.
-  // 단어·문장 탭은 탭-즉시반응이 생명이라 90초로 빡빡하게 잡지만, 질문 탭은 이미
-  // 스트리밍으로 "살아 있다"는 걸 보여주고 있어 더 기다릴 여유가 있다 — Nemotron 3 Super
-  // 120B·MiniMax M3 처럼 첫 글자 전 속생각이 긴 모델이 이 90초 상한에 자주 걸려
-  // "응답 없음"으로 잘못 죽어 보이던 것을 고친다.
+  // 전체 상한: 단어·문장 탭은 빨리 실패해야 하므로 90초, 질문 탭은 속생각이 긴 모델을 위해 180초.
   const timeoutMs = ask ? 180_000 : 90_000;
   const signal = AbortSignal.any([ac.signal, AbortSignal.timeout(timeoutMs)]);
-  // 상한 8000 — 추론 모델은 max_tokens 안에서 속생각(reasoning)까지 함께 쓰기 때문에,
+  // 상한 8000 — 추론 모델은 max_tokens 안에서 속생각까지 함께 쓰기 때문에,
   // 이름 정리처럼 긴 구조화 출력이 필요한 호출은 4000 으로는 답이 통째로 잘린다.
-  const args = { system, user, image, history, maxTokens: Math.min(Number(maxTokens) || 1000, 8000), signal };
+  const args = { system, user, image, history, maxTokens: Math.min(Number(maxTokens) || 1000, 8000) };
 
-  // 질문 탭은 더 좋은 모델을 쓴다. 클라이언트가 보낸 모델은 허용 목록에 있을 때만 받는다.
-  // 그 모델이 죽어 있어도 단어·문장 탭까지 Gemini 로 끌려가지 않도록,
-  // 먼저 기본 NIM_MODEL 로 한 번 더 시도한 뒤에 폴백한다.
-  // 영역 캡처(image)는 비전 모델 체인을 따로 탄다 — 텍스트 모델은 이미지를 못 받는다.
-  // 이 체인에는 NIM_MODEL 이 없으므로, 비전 모델이 죽어도 서킷 브레이커가 돌지 않는다
-  // (= 단어·문장 탭이 3분간 Gemini 로 끌려가는 일이 없다).
-  const picked = ask ? (ASK_MODEL_IDS.has(model) ? model : NIM_ASK_MODEL) : NIM_MODEL;
-  // 질문 탭에서 Gemini 를 골랐으면 그 모델로, 단어·문장 탭·영역 캡처는 GEMINI_MODEL 로
-  // 먼저 부른다(TAP_GEMINI_FIRST 참고). 실패하면 아래 NIM 체인으로 내려간다.
-  const askGemini = ask && !image && isGeminiId(picked);
-  const geminiFirst = !!GEMINI_KEY && (askGemini || (TAP_GEMINI_FIRST && (!ask || image)));
-  const chain = image
-    ? VISION_CHAIN
-    : picked === NIM_MODEL || askGemini ? [NIM_MODEL] : [picked, NIM_MODEL];
+  // 클라이언트가 보낸 모델은 허용 목록에 있을 때만 받는다.
+  // 사용자가 고른 모델(없으면 .env 고정값, 그것도 없으면 자동). 목록에 없는 모델은 무시한다.
+  const want = (ask ? model : tapModel) || (ask ? PIN_ASK : PIN_TAP);
+  const picked = models.pickable(want) ? want : "";
+  // 이미지는 그림을 받는 모델만(models.js 가 거른다). 캡처는 탭 모델 선택을 따른다.
+  /* maxTokens 1 은 클라이언트의 예열 요청(warmModels)이다. 예전 NIM 은 콜드스타트가 길어 미리 깨워
+     두는 게 의미가 있었지만, 이걸 대신 답할 모델까지 줄줄이 부르면 무료 한도만 태운다 — 게다가
+     속생각을 하는 Gemini 는 1토큰 예산으로는 "빈 응답"이라 다섯 모델을 다 돌고 실패로 기록됐다
+     (2026-09-28). 그래서 예열은 첫 모델 한 번만, 결과는 점수에 안 넣는다. */
+  const warm = args.maxTokens <= 1;
+  const kind = image ? "image" : ask ? "ask" : "tap";
+  /* 다음 모델은 **실패할 때마다 다시 고른다.** 처음에 줄을 한 번 세워 두고 따라가면, Gemini 가
+     줄줄이 막혀도 그 줄 그대로 Gemini 만 두드리다 끝났다. 매번 다시 고르면 방금 깎인 점수(그 모델의
+     벌점, "Google 전체가 막힘" 벌점)가 곧바로 반영돼 두세 번 실패하면 NIM 으로 넘어간다. */
+  const tried = new Set();
+  // visionDirect: 그림째 Gemini 에게만(models.chain 의 gemOnly 참고). 고른 모델은 상관하지 않는다.
+  const gemOnly = !!(image && visionDirect);
+  const nextModel = () => models.chain({ kind, picked: gemOnly ? "" : picked, gemOnly, ask }).find((id) => !tried.has(id));
+  if (!warm) models.touch();
+  const firstMs = ask ? FIRST_MS.ask : FIRST_MS.tap;
+  const lane = kind === "tap" ? "tap" : "main"; // 같은 모델도 탭(속생각 끔)과 질문(켬)은 속도가 전혀 다르다
+  const deadline = Date.now() + timeoutMs;
+  const fails = [];
+  const nap = (ms) => new Promise((r) => { const t = setTimeout(r, ms); signal.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
 
-  let upstream = null;
-  let engine = "";
-  let usedModel = "";
-  let connT0 = 0; // 성공한 시도의 시작 시각 — 실제 첫 글자 도착까지 걸린 시간을 재는 데 쓴다(아래)
-  if (geminiFirst) {
-    // Gemini 도 붐비면 503 을 낸다(3.5-flash 에서 실제로 봤다). 그럴 땐 NIM(첫 글자 수십 초)으로
-    // 내려가기 전에 가벼운 Gemini 모델을 한 번 더 거친다.
-    const gms = [askGemini ? picked.slice("gemini/".length) : GEMINI_MODEL, GEMINI_MODEL, "gemini-flash-lite-latest"]
-      .filter((m, i, a) => a.indexOf(m) === i);
-    for (const gm of gms) {
-      const t0 = Date.now();
-      try {
-        upstream = await callGemini({ ...args, model: gm });
-        engine = "Gemini";
-        usedModel = askGemini && gm === gms[0] ? picked : gm;
-        if (askGemini && gm === gms[0]) markHealth(picked, true, 200, Date.now() - t0);
-        break;
-      } catch (e) {
-        if (ac.signal.aborted) return;
-        if (askGemini && gm === gms[0]) markHealth(picked, false, e.status || 0, Date.now() - t0);
-        console.warn(`[여백] Gemini(${gm}) 실패:`, e.message.slice(0, 120));
-        if (signal.aborted) break;
-      }
-    }
-  }
-  const tryNIM = !upstream && !forceGemini && NIM_KEY && Date.now() > nimDownUntil;
-
-  if (tryNIM) {
-    outer:
-    for (const m of chain) {
-      /* 고른 모델은 붐벼서(429/5xx, 특히 529 Overloaded) 실패하면 잠깐 쉬었다 다시 부른다.
-         한 번 만에 폴백으로 넘어가던 탓에, 붐비는 시간대에는 드롭다운에서 무엇을 고르든
-         답은 늘 NIM_MODEL(gpt-oss-120b)이 하고 있었다. 붐빔은 대개 몇 백 ms 뒤에 풀린다. */
-      const tries = m === picked ? 3 : 1;
-      for (let i = 0; i < tries; i++) {
-        const t0 = Date.now();
-        // 헤더가 NIM_CONNECT_MS 안에 안 오면 이 시도만 끊고 다음 모델로 — 헤더가 오면 타이머를 푼다.
-        const cc = new AbortController();
-        const ct = setTimeout(() => cc.abort(new Error(`헤더 ${NIM_CONNECT_MS / 1000}초 무응답`)), NIM_CONNECT_MS);
-        try {
-          upstream = await callNIM({ ...args, model: m, signal: AbortSignal.any([signal, cc.signal]) });
-          clearTimeout(ct);
-          engine = "NIM";
-          usedModel = m;
-          // 여기서 바로 markHealth 를 찍지 않는다 — fetch 는 응답 헤더만 오면 resolve 되므로
-          // 이 시점의 ms 는 "연결이 열린 시간"일 뿐이다. 속생각(reasoning_content)이 긴 모델은
-          // 헤더는 금방 오고 진짜 글자(content)는 한참 뒤에 오는데, 그러면 59초를 기다려도
-          // "정상"으로 뜨는 거짓 배지가 된다. 진짜 측정은 아래 스트리밍 구간에서 첫 content
-          // 델타가 실제로 도착했을 때 한다.
-          connT0 = t0;
-          break outer;
-        } catch (e) {
-          clearTimeout(ct);
-          // 클라이언트가 떠났을 때만 조용히 끝낸다 — 응답을 기다리는 상대가 없다.
-          // 90초 상한(signal)은 여기 넣으면 안 된다. 그건 클라이언트가 아직 기다리는 중이라
-          // 아무것도 안 보내고 return 하면 탭이 영영 멈춘다.
-          if (ac.signal.aborted) return;
-          // 실사용에서 공짜로 얻는 상태 신호 — 드롭다운의 "지금 붐빔"이 이걸로 산다.
-          markHealth(m, false, e.status || 0, Date.now() - t0);
-          // 상한이 이미 터졌으면 더 시도해도 즉시 실패한다 — 아래 오류 응답으로 내려간다.
-          // (이전엔 여기서 바로 break 해서 어느 모델이 시간 초과였는지 로그에 안 남았다)
-          if (signal.aborted) { console.warn(`[여백] NIM(${m}) 실패(상한 초과):`, e.message); break outer; }
-          // 상태 코드가 붙은 실패만 재시도한다 — 타임아웃·네트워크 끊김은 다시 걸어도 같다.
-          if (i + 1 < tries && e.status >= 429) {
-            console.warn(`[여백] NIM(${m}) ${e.status} — ${i + 1}번째, 잠시 뒤 재시도`);
-            await new Promise((r) => setTimeout(r, 500 * (i + 1)));
-            continue;
-          }
-          // 기본 모델까지 실패했을 때만 NIM 전체가 죽었다고 본다.
-          if (m === NIM_MODEL) nimDownUntil = Date.now() + 3 * 60 * 1000;
-          console.warn(`[여백] NIM(${m}) 실패:`, e.message);
-        }
-      }
-    }
-  }
-  if (!upstream && !geminiFirst) {
+  /* 모델 하나에 붙어 첫 글자(또는 속생각)까지 받는다 → { id, it, first, cc, t0 }. 실패하면 기록하고 null. */
+  async function attempt(id, a) {
+    const gem = models.isGem(id);
+    const t0 = Date.now();
+    // 이 시도만의 첫 글자 상한 — 넘기면 이 모델만 끊고 다음으로
+    const cc = new AbortController();
+    const timer = setTimeout(() => cc.abort(new Error(`${firstMs / 1000}초 동안 첫 글자 없음`)), firstMs);
+    const sig = AbortSignal.any([signal, cc.signal]);
+    // 탭·캡처는 찾기 때 알아낸 "속생각 끄기" 설정으로(Gemini 는 generationConfig, NIM 은 요청 본문에 덧붙임)
+    const gen = ask ? undefined : models.get(id)?.gen;
+    let it;
     try {
-      upstream = await callGemini(args);
-      engine = "Gemini";
-      usedModel = GEMINI_MODEL;
+      const up = gem
+        ? await callGemini({ ...a, model: id.slice(7), gen, signal: sig })
+        : await callNIM({ ...a, model: id, gen, signal: sig });
+      it = events(up, gem)[Symbol.asyncIterator]();
+      for (;;) {
+        const r = await it.next();
+        if (r.done) throw new Error("빈 응답");
+        if (r.value.c || r.value.k) { clearTimeout(timer); return { id, it, first: r.value, cc, t0 }; }
+        if (r.value.fin) throw new Error(`빈 응답(${r.value.fin})`); // 한 글자도 없이 끝남
+      }
     } catch (e) {
-      if (ac.signal.aborted) return;
-      console.error("[여백] 전부 실패:", e.message);
-      return res.status(502).json({ error: e.message });
+      clearTimeout(timer);
+      it?.return?.().catch(() => {});
+      if (ac.signal.aborted) return null; // 클라이언트가 떠났다 — 기다리는 상대가 없다
+      const why = cc.signal.aborted ? cc.signal.reason?.message : signal.aborted ? "전체 상한 초과" : e.message;
+      if (!warm) models.record(id, false, e.status || (cc.signal.aborted ? 408 : 0), 0, lane);
+      console.warn(`[여백] ${id} 실패: ${String(why).slice(0, 160)}`);
+      // 사용자에게 보일 짧은 이유 — 원문(영어 오류 본문)은 로그에만
+      const st = e.status;
+      fails.push(`${models.get(id)?.label || id} ${st === 429 ? "한도 초과" : st >= 500 ? "붐빔" : cc.signal.aborted ? "응답 없음" : st === 410 || st === 404 ? "종료됨" : "실패"}`);
+      return null;
     }
   }
-  if (!upstream) {
-    // Gemini 를 먼저 불렀고 NIM 까지 실패했거나, NIM 이 서킷 브레이커로 쉬는 중이었다.
-    console.error("[여백] 전부 실패 (Gemini → NIM)");
-    return res.status(502).json({ error: "Gemini 와 NIM 이 모두 응답하지 않았습니다." });
+
+  /* ── 붙을 모델 찾기 ──
+     한 바퀴(쓸 수 있는 모델 전부)가 다 실패해도 곧장 "실패"라고 하지 않는다. 503 은 대개 몇 초면
+     풀리므로, 전체 상한이 남아 있는 동안 잠깐 쉬었다가 처음부터 다시 돈다(최대 세 바퀴). */
+  let got = null;
+  for (let round = 0; !got && !signal.aborted; ) {
+    const id = nextModel();
+    if (!id) {
+      if (warm || gemOnly || round >= 2 || deadline - Date.now() < 20_000) break;
+      round++;
+      tried.clear();
+      console.warn(`[여백] 한 바퀴 전부 실패 — ${3 * round}초 쉬고 다시 (${round}/2)`);
+      await nap(3000 * round);
+      continue;
+    }
+    tried.add(id);
+    got = await attempt(id, args);
+    if (warm) break;
+  }
+  if (ac.signal.aborted) return;
+  if (!got) {
+    console.error(`[여백] 전부 실패 — ${fails.join(" / ")}`);
+    return res.status(502).json({
+      error: fails.length
+        ? `모든 모델이 답하지 못했습니다 — ${[...new Set(fails)].join(", ")}. 잠시 뒤 다시 시도하세요.`
+        : "쓸 수 있는 모델이 없습니다 — API 키를 확인하세요.",
+    });
   }
 
+  // ── 여기서부터 이 모델로 확정. 헤더를 보내고 흘린다. ──
+  const gem0 = models.isGem(got.id);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
-  res.setHeader("X-Engine", engine);
-  res.setHeader("X-Model", usedModel);
-  // 고른 모델이 답하지 못해 다른 모델이 대신 답할 때, 원래 고른 쪽을 알려 준다.
-  // 이걸 안 알려 주면 "드롭다운을 바꿔도 늘 같은 모델이 답한다"로만 보인다.
-  // image 가 있을 땐 비교하지 않는다 — 그때는 chain 자체가 처음부터 VISION_CHAIN 이라
-  // picked(텍스트 모델)는 애초에 시도된 적이 없다. 비교하면 "무엇을 골랐든" 비전 모델이
-  // 아니기만 하면 매번 "붐벼서 대신 답했다"는 거짓 배지가 뜬다(회로도 후속 질문마다 재현됨).
-  if (ask && !image && usedModel && usedModel !== picked) res.setHeader("X-Wanted", picked);
+  res.setHeader("X-Engine", gem0 ? "Gemini" : "NIM");
+  res.setHeader("X-Model", got.id);
+  if (!gemOnly && picked && got.id !== picked) res.setHeader("X-Wanted", picked); // 자동일 땐 "대신 답했다"가 아니다
   res.setHeader("Access-Control-Expose-Headers", "X-Engine, X-Model, X-Wanted");
   res.setHeader("X-Accel-Buffering", "no"); // nginx 앞단 버퍼링 방지
   res.flushHeaders();
 
-  try {
-    if (engine === "Gemini") await pipeGemini(upstream, res);
-    else {
-      // 클라이언트가 스트리밍 도중 끊으면(단어를 연속으로 탭해 이전 요청을 abort 할 때 늘 일어난다)
-      // 이 Readable 이 'error' 를 뿜는다. 핸들러가 없으면 프로세스 전체가 죽는다.
-      // 비동기 스트림 에러라 위의 try/catch 로는 잡히지 않는다.
-      const rs = Readable.fromWeb(upstream.body);
-      rs.on("error", (e) => {
-        if (!ac.signal.aborted) console.error("[여백] 업스트림 스트림 오류:", e.message);
-        res.end();
-      });
-      res.on("error", () => rs.destroy());
-
-      // 첫 content 델타가 실제로 도착한 시점을 재서 markHealth 를 여기서 찍는다(위 참고).
-      // 델타를 소비하지 않고 훔쳐보기만 한다 — 실제 전달은 아래 rs.pipe(res) 가 그대로 한다.
-      let marked = false;
-      const markOnce = () => { if (!marked) { marked = true; markHealth(usedModel, true, 200, Date.now() - connT0); } };
-      if (usedModel) {
-        const dec = new TextDecoder();
-        let buf = "";
-        rs.on("data", (chunk) => {
-          if (marked) return;
-          buf += dec.decode(chunk, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop();
-          for (const line of lines) {
-            if (!line.startsWith("data:")) continue;
-            const payload = line.slice(5).trim();
-            if (!payload || payload === "[DONE]") continue;
-            try {
-              if (JSON.parse(payload).choices?.[0]?.delta?.content) { markOnce(); break; }
-            } catch {}
-          }
-        });
-        rs.on("end", markOnce);
-        rs.on("close", markOnce);
+  let text = ""; // 지금까지 보낸 답(content) — 끊겼을 때 이어 쓰기의 재료
+  const send = (ev) => {
+    if (ev.k) res.write(sseEvent({ reasoning_content: ev.k }));
+    if (ev.c) { res.write(sseEvent({ content: ev.c })); text += ev.c; }
+    if (ev.fin) res.write(sseEvent({}, ev.fin));
+  };
+  /* 한 모델의 스트림을 끝까지 흘린다 → 끝난 이유(fin). 끊기면 throw.
+     점수의 "속도"는 **답의 첫 글자**까지로 잰다. 속생각의 첫 조각은 0.4초에 와도 답은 90초 뒤일 수 있어서
+     (2026-09-28 nemotron-omni 캡처), 그걸로 재면 느린 추론 모델이 "가장 빠른 모델"로 뽑힌다. */
+  async function pump(g) {
+    let timed = false;
+    const timeIt = (ev) => { if (!timed && ev.c && !warm) { timed = true; models.record(g.id, true, 200, Date.now() - g.t0, lane); } };
+    // 쓰는 도중 STALL_MS 동안 아무것도 안 오면 멈춘 것으로 본다
+    let stall;
+    const arm = () => { clearTimeout(stall); stall = setTimeout(() => g.cc.abort(new Error("멈춤")), STALL_MS); };
+    let fin = g.first.fin || "";
+    try {
+      timeIt(g.first);
+      send(g.first);
+      arm();
+      for (;;) {
+        const r = await g.it.next();
+        if (r.done) break;
+        arm();
+        timeIt(r.value);
+        send(r.value);
+        if (r.value.fin) fin = r.value.fin;
       }
-      rs.pipe(res);
+    } finally {
+      clearTimeout(stall);
     }
-  } catch (e) {
-    if (!ac.signal.aborted) console.error("[여백] 스트림 중단:", e.message);
-    res.end();
+    if (!timed && !warm) models.record(g.id, true, 200, Date.now() - g.t0, lane); // 답 없이 속생각만으로 끝난 경우
+    return fin;
   }
+
+  /* 쓰는 도중에 끊기면(망·업스트림 오류·45초 멈춤) "끊겼습니다"로 끝내지 않고 **이어 쓰게 한다** —
+     지금까지 쓴 답을 어시스턴트 턴으로 넣고 "끊긴 곳 바로 다음부터 이어 써라"로 다른 모델(없으면 같은
+     모델)을 부른다. 화면에서는 답이 잠깐 멈췄다가 이어지는 것으로 보인다. 두 번까지. */
+  const CONT = "(바로 앞의 네 답이 연결 문제로 도중에 끊겼다. 끊긴 지점 바로 다음 글자부터 이어서 써라. " +
+    "이미 쓴 부분을 되풀이하거나 처음부터 다시 쓰지 말고, 인사나 설명 없이 곧바로 이어지는 내용만 써라.)";
+  let cur = got;
+  for (let conts = 0; ; ) {
+    try {
+      const fin = await pump(cur);
+      if (fin && fin !== "stop" && fin !== "length")
+        res.write(sseEvent({ content: `\n\n_(답이 도중에 막혔습니다 — ${fin}. 다시 물어보거나 다른 모델을 골라 보세요.)_` }));
+      break;
+    } catch (e) {
+      if (ac.signal.aborted) return;
+      console.warn(`[여백] ${cur.id} 쓰는 도중 끊김: ${String(cur.cc.signal.reason?.message || e.message).slice(0, 120)}`);
+      if (!warm) models.record(cur.id, false, 0, 0, lane);
+      let next = null;
+      if (conts < 2 && !signal.aborted) {
+        conts++;
+        // 답이 한 글자도 없었으면(속생각만 하다 끊김) 처음부터 다시, 있으면 이어 쓰기
+        const a = text.trim()
+          ? { ...args, history: [...args.history, { role: "user", text: args.user }, { role: "assistant", text }], user: CONT }
+          : args;
+        tried.add(cur.id);
+        for (let k = 0; k < 3 && !next && !signal.aborted; k++) {
+          const nid = nextModel() || cur.id;
+          tried.add(nid);
+          next = await attempt(nid, a);
+        }
+      }
+      if (!next) {
+        if (ac.signal.aborted) return;
+        res.write(sseEvent({ content: "\n\n_(연결이 끊겨 답이 여기서 멈췄습니다 — 다시 물어보세요.)_" }));
+        break;
+      }
+      console.warn(`[여백] ${next.id} 가 이어서 씀`);
+      cur = next;
+    }
+  }
+  res.write("data: [DONE]\n\n");
+  res.end();
 });
 
 /* ───────────────── 정적 파일 ───────────────── */
@@ -1157,9 +1210,12 @@ app.use(express.static(path.join(ROOT, "dist")));
 app.get("*", (_req, res) => res.sendFile(path.join(ROOT, "dist", "index.html")));
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`[여백] http://0.0.0.0:${PORT}  엔진: ${NIM_KEY ? NIM_MODEL : "(NIM 없음)"} → ${GEMINI_KEY ? GEMINI_MODEL : "(Gemini 없음)"}`);
-  console.log(`[여백] 질문 탭 기본 모델: ${NIM_ASK_MODEL}${ASK_MODEL_IDS.has(NIM_ASK_MODEL) ? "" : "  ← 허용 목록에 없음(ASK_MODELS 확인)"}`);
-  console.log(`[여백] 영역 캡처 비전 모델: ${VISION_CHAIN.join(" → ")}`);
-  // 켜자마자 한 번 재 둔다 — 첫 사용자가 빈 값을 안 보게. 여기서도 await 하지 않는다.
-  refreshStale();
+  const p = models.publicList();
+  console.log(`[여백] http://0.0.0.0:${PORT}  모델 ${p.models.length}개(탭 ${p.tapModels.length}) · 지금 자동: 탭 ${p.auto.tap} · 질문 ${p.auto.ask}` +
+    `${GEMINI_KEY ? "" : "  (Gemini 키 없음)"}${NIM_KEY ? "" : "  (NIM 키 없음)"}`);
+  // 켜질 때 한 번, 그 뒤 한 시간마다 목록을 본다 — 실제로 불러 보는 건 새 모델·하루 지난 모델·
+  // 붐벼서 미뤄 둔 모델뿐이라 대부분의 시간엔 목록 요청 두 번으로 끝난다.
+  const run = () => models.discover().catch((e) => console.warn("[모델] 찾기 실패:", e.message));
+  setTimeout(run, 5_000);
+  setInterval(run, 60 * 60 * 1000);
 });
