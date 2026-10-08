@@ -1,32 +1,20 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import "./App.css";
-import Rich from "./rich.jsx";
-import { fmtDate, fmtRel, pickGreeting } from "./App.jsx";
+import { ThinkingOrb } from "thinking-orbs";
+import AskView, { imageToJpeg } from "./AskView.jsx";
+import Bi from "./icons.jsx";
+import { fmtRel } from "./App.jsx";
 import { u } from "./paths.js";
 
 /* ───────────────────────── 여백 리모트 (폰) ─────────────────────────
-   설계 원칙(server/remote.js 의 주석과 같다): 아이패드가 유일하게 모델을 부르고
-   문서를 쥔 실행자다. 폰은 명령만 던진다 — 이 화면은 /api/chat 을 직접 부르지
-   않는다. 질문은 서버에 저장된 세션(/api/remote/sessions)에 문답 자리만 만들고,
-   실제 답은 아이패드가 훗날 채워 넣는 걸 SSE 로 받아서 보여준다.
-
-   단어/문장 탭에 뜨는 내용도 마찬가지로 아이패드가 /api/remote/relay 로 흘려주는
-   화면을 그대로 받아 그린다(slot: word/sent/cutout). 아이패드 쪽 배선은 아직
-   연결되지 않았으므로, 지금은 "아이패드가 리모트를 켜기 전" 빈 상태가 정상이다. */
+   아이패드(또는 PC)가 모델을 부르는 실행자고 폰은 곁 화면이다 — 이 화면은 /api/chat 을 부르지 않는다.
+   - 질문: 대화는 서버 한 곳(server/remote.js)에 있어 아이패드와 같은 대화를 본다. 폰이 질문을 남기면
+     (답 자리 pending) 문서를 연 기기가 맡아 답하고, 흐르는 답은 relay("ask")로 그대로 보인다.
+   - 단어·문장: 아이패드가 리모트 모드를 켜면 탭한 단어의 뜻이 relay("word"/"sent")로 흘러온다.
+   - 서재: 폰 혼자서도 되는 것(파일 보기·내려받기).
+   화면은 아래 탭 막대 네 칸(서재·단어·질문·기록) + 위의 기기 상태 한 줄. */
 
 const COARSE = typeof matchMedia === "function" && matchMedia("(pointer:coarse)").matches;
-
-const STAR_PATH = "M12 3.6l2.5 5.1 5.6.8-4 3.9.9 5.6-5-2.6-5 2.6.9-5.6-4-3.9 5.6-.8z";
-const CHEV_DOWN = "M6 9l6 6 6-6";
-const CHEV_LEFT = "M15 5L8 12l7 7";
-const SEND_PATH = "M12 19V5M5 12l7-7 7 7";
-
-const CONN = {
-  idle: { label: "대기 중", dot: "#8E8A81" },
-  connected: { label: "연결됨", dot: "var(--t-mark2)" },
-  reconnecting: { label: "재연결 중", dot: "var(--t-star)" },
-  disconnected: { label: "연결 끊김", dot: "var(--t-warnDot)" },
-};
 
 function jfetch(url, opts) {
   return fetch(u(url), {   // 서브패스 보정은 여기 한 곳에서 — paths.js 참고
@@ -38,38 +26,25 @@ function jfetch(url, opts) {
   });
 }
 
-// 썸네일이 아직 없는 파일의 자리표시자(문서 없이도 "파일이다"는 알아보게)
-function FileIcon() {
+function FileRow({ f, sub, onMenu, menuOpen, live }) {
   return (
-    <>
-      <div style={{ width: "72%", height: 1.4, background: "var(--t-line2)" }} />
-      <div style={{ width: "72%", height: 1.4, background: "var(--t-line2)" }} />
-      <div style={{ width: "44%", height: 1.4, background: "var(--t-line2)" }} />
-    </>
-  );
-}
-
-// 서재 히어로 아래 목록의 파일 한 줄 — 최근 본 자료·전체 파일 트리 양쪽에서 같이 쓴다.
-// 탭하면 리모트 패널로, ⋮ 는 새 탭 보기·다운로드(모두 아이패드 없이 폰 혼자 되는 것들이다).
-function FileRow({ f, sub, small, onOpen, menuOpen, onToggleMenu, dot }) {
-  return (
-    <div className="vb-rm-mat">
-      <button className="vb-rm-mattap" onClick={onOpen}>
-        <div className={"vb-rm-thumb" + (small ? " sm" : "")}>
-          {f.thumb ? <img src={u(`/api/library/thumb/${f.id}`)} alt="" /> : <FileIcon />}
-          {dot && <i style={{ background: dot }} />}
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div className="vb-rm-mtitle">{f.name}</div>
-          {sub && <div className="vb-rm-msub">{sub}</div>}
-        </div>
-      </button>
-      <div style={{ position: "relative" }}>
-        <button className="vb-rm-menubtn" onClick={(e) => { e.stopPropagation(); onToggleMenu(); }} aria-label="파일 메뉴">⋮</button>
+    <div className="vb-rp-file">
+      <a className="vb-rp-filetap" href={u(`/api/library/file/${f.id}`)} target="_blank" rel="noopener noreferrer">
+        <span className="vb-rp-thumb">
+          {f.thumb ? <img src={u(`/api/library/thumb/${f.id}`)} alt="" /> : <Bi name="journal-text" />}
+          {live && <i />}
+        </span>
+        <span className="vb-rp-fmeta">
+          <span className="t">{f.name}</span>
+          {sub && <span className="s">{sub}</span>}
+        </span>
+      </a>
+      <div className="vb-rp-fmenuwrap">
+        <button className="vb-rp-fmenu" onClick={(e) => { e.stopPropagation(); onMenu(); }} aria-label="파일 메뉴">⋯</button>
         {menuOpen && (
-          <div className="vb-dropmenu vb-rm-filemenu" style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, minWidth: 150, zIndex: 6 }}>
-            <a className="vb-rm-filemenuitem" href={u(`/api/library/file/${f.id}`)} target="_blank" rel="noopener noreferrer">새 탭에서 보기</a>
-            <a className="vb-rm-filemenuitem" href={u(`/api/library/file/${f.id}?dl=1`)}>다운로드</a>
+          <div className="vb-ak-pop vb-rp-filepop" style={{ right: 0, width: 170 }}>
+            <a href={u(`/api/library/file/${f.id}`)} target="_blank" rel="noopener noreferrer">새 탭에서 보기</a>
+            <a href={u(`/api/library/file/${f.id}?dl=1`)}>내려받기</a>
           </div>
         )}
       </div>
@@ -78,38 +53,36 @@ function FileRow({ f, sub, small, onOpen, menuOpen, onToggleMenu, dot }) {
 }
 
 export default function Remote() {
+  const theme = typeof matchMedia === "function" && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+
   /* ── 로그인 ── */
   const [authed, setAuthed] = useState(null);
   const [pw, setPw] = useState("");
   const [pwErr, setPwErr] = useState("");
   const [pwBusy, setPwBusy] = useState(false);
   const pwRef = useRef(null);
-
   useEffect(() => {
     fetch(u("/api/me")).then((r) => r.json()).then((j) => setAuthed(!!j.authed)).catch(() => setAuthed(false));
   }, []);
-
   const submitPw = async (v) => {
     if (pwBusy || !v) return;
     setPwBusy(true);
     setPwErr("");
     try {
       const r = await fetch(u("/api/login"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password: v }),
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password: v }),
       });
       if (!r.ok) {
         let d = "";
         try { d = (await r.json()).error || ""; } catch {}
-        setPwErr(d || "비밀번호가 맞지 않습니다.");
+        setPwErr(d || "비밀번호가 맞지 않아요.");
         setPw("");
         return;
       }
       setPw("");
       setAuthed(true);
     } catch {
-      setPwErr("서버에 연결하지 못했습니다.");
+      setPwErr("서버에 연결하지 못했어요.");
     } finally {
       setPwBusy(false);
     }
@@ -123,54 +96,71 @@ export default function Remote() {
   };
 
   /* ── 서버 상태(SSE) ── */
-  const [esState, setEsState] = useState("idle"); // idle(연결 전) | connected | reconnecting
+  const [online, setOnline] = useState(false);
   const [mode, setMode] = useState({ on: false, doc: null });
+  const [presence, setPresence] = useState([]);
   const [sessions, setSessions] = useState([]);
   const [cur, setCur] = useState("");
   const [relay, setRelay] = useState({}); // slot -> {seq, payload}
+  const [peerLive, setPeerLive] = useState(null); // 아이패드가 흘리는 답 { sid, i, text, run, device }
+  const [lastRun, setLastRun] = useState(null);
+  const curRef = useRef("");
+  useEffect(() => { curRef.current = cur; }, [cur]);
 
   useEffect(() => {
     if (authed !== true) return;
-    let everOpen = false;
     const es = new EventSource(u("/api/remote/stream"));
-    es.onopen = () => { everOpen = true; setEsState("connected"); };
-    es.onerror = () => setEsState(everOpen ? "reconnecting" : "idle");
+    es.onopen = () => setOnline(true);
+    es.onerror = () => setOnline(false);
+    const patchS = (id, fn) => setSessions((arr) => arr.map((s) => (s.id === id ? fn(s) : s)));
     es.addEventListener("hello", (e) => {
       const d = JSON.parse(e.data);
       setMode(d.mode || { on: false, doc: null });
-      setSessions(d.sessions || []);
-      setCur(d.cur || "");
+      setPresence(d.presence || []);
+      const ls = d.sessions || [];
+      setSessions(ls);
+      setCur((c) => (ls.some((s) => s.id === c) ? c : ls[0]?.id || ""));
     });
     es.addEventListener("mode", (e) => setMode(JSON.parse(e.data)));
     es.addEventListener("page", (e) => setMode((m) => ({ ...m, doc: JSON.parse(e.data) })));
+    es.addEventListener("presence", (e) => setPresence(JSON.parse(e.data)));
     es.addEventListener("sess-new", (e) => {
       const s = JSON.parse(e.data);
       setSessions((arr) => [s, ...arr.filter((x) => x.id !== s.id)]);
-      setCur(s.id); // 서버가 새 세션을 만들면서 cur 로 삼는다(remote.js) — 별도 이벤트 없이 따라간다
+      setCur(s.id); // 폰은 곁 화면이라 어디서 열린 새 대화든 따라간다(아이패드에서 오려낸 문제가 곧바로 뜬다)
     });
-    es.addEventListener("sess-cur", (e) => setCur(JSON.parse(e.data).id));
     es.addEventListener("sess-del", (e) => {
       const { id } = JSON.parse(e.data);
-      setSessions((arr) => arr.filter((x) => x.id !== id));
+      setSessions((arr) => {
+        const left = arr.filter((x) => x.id !== id);
+        if (curRef.current === id) setCur(left[0]?.id || "");
+        return left;
+      });
     });
     es.addEventListener("sess-patch", (e) => {
       const { id, patch } = JSON.parse(e.data);
-      setSessions((arr) => arr.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+      patchS(id, (s) => ({ ...s, ...patch, at: Date.now() }));
     });
     es.addEventListener("sess-msgs", (e) => {
-      const { id, msgs } = JSON.parse(e.data);
-      setSessions((arr) => arr.map((s) => (s.id === id ? { ...s, msgs: [...s.msgs, ...msgs] } : s)));
+      const { id, from, msgs } = JSON.parse(e.data);
+      patchS(id, (s) => (s.msgs.length >= from + msgs.length ? s : { ...s, at: Date.now(), msgs: [...s.msgs.slice(0, from), ...msgs] }));
     });
     es.addEventListener("sess-msg-patch", (e) => {
       const { id, i, patch } = JSON.parse(e.data);
-      setSessions((arr) => arr.map((s) => {
-        if (s.id !== id) return s;
-        const msgs = s.msgs.slice();
-        if (msgs[i]) msgs[i] = { ...msgs[i], ...patch };
-        return { ...s, msgs };
-      }));
+      patchS(id, (s) => ({ ...s, msgs: s.msgs.map((m, k) => (k === i ? { ...m, ...patch } : m)) }));
     });
-    for (const slot of ["word", "sent", "cutout"]) {
+    es.addEventListener("relay:ask", (e) => {
+      const { payload } = JSON.parse(e.data);
+      if (!payload) return;
+      if (payload.done) {
+        setPeerLive((p) => {
+          if (p?.run) setLastRun({ ...p.run, running: false, end: Date.now(), device: p.device,
+            outcome: p.run.outcome || (p.run.phase === "stream" ? "done" : "error") });
+          return null;
+        });
+      } else setPeerLive(payload);
+    });
+    for (const slot of ["word", "sent"]) {
       es.addEventListener("relay:" + slot, (e) => {
         const d = JSON.parse(e.data);
         setRelay((r) => (r[slot] && d.seq < r[slot].seq ? r : { ...r, [slot]: d }));
@@ -179,101 +169,33 @@ export default function Remote() {
     return () => es.close();
   }, [authed]);
 
-  const connState = esState !== "connected" ? esState : mode.on ? "connected" : "idle";
-  const connMeta = CONN[connState] || CONN.idle;
+  // 답할 수 있는 기기 = 문서를 연 채로 출석한 기기(가장 최근 것)
+  const reader = useMemo(() => [...presence].filter((p) => p.doc).sort((a, b) => b.at - a.at)[0] || null, [presence]);
 
   /* ── 서재 ── */
   const [lib, setLib] = useState({ folders: [], files: [] });
   const [openFolders, setOpenFolders] = useState({});
+  const [fileMenu, setFileMenu] = useState("");
   useEffect(() => {
     if (authed !== true) return;
     fetch(u("/api/library")).then((r) => r.json()).then((j) => {
       setLib(j);
-      setOpenFolders(Object.fromEntries((j.folders || []).map((f) => [f.id, true])));
+      setOpenFolders(Object.fromEntries((j.folders || []).map((f) => [f.id, false])));
     }).catch(() => {});
   }, [authed]);
-
-  const recentFiles = useMemo(
-    () => [...lib.files].sort((a, b) => (b.lastOpenedAt || b.at || 0) - (a.lastOpenedAt || a.at || 0)).slice(0, 5),
-    [lib.files]
-  );
-
-  const greet = useMemo(() => pickGreeting(lib, "yeobaek.greet.remote"), [lib]);
-
-  // 서재 히어로 접힘 — 연속 추적이 아니라 스냅 전환이다: 한 번 스크롤(또는 위로 스와이프)하면
-  // 인사말 컨테이너가 즉시 접히고 파일 목록이 그 자리로 튀어 오른다. 다시 열리는 건 목록이 맨
-  // 위일 때 아래로 더 당기는(pull-to-reveal) 제스처로만 — 그래서 위로 스크롤할 땐 목록 자체가
-  // 이중으로 움직이지 않는다(목록과 히어로가 서로 다른 박스). ref 로 DOM 을 직접 건드려
-  // 매 프레임 리렌더를 피한다(hot path).
-  const HERO_H = 420;
-  const heroRef = useRef(null);
-  const heroOpenRef = useRef(true);
-  const dragRef = useRef(null); // {y, top, mode}
-
-  const setHero = (px, animate) => {
-    const h = heroRef.current;
-    if (!h) return;
-    h.style.transition = animate ? "height .32s cubic-bezier(.22,.8,.24,1), opacity .32s ease" : "none";
-    const clamped = Math.max(0, Math.min(HERO_H, px));
-    h.style.height = clamped + "px";
-    h.style.opacity = String(clamped / HERO_H);
-  };
-
-  const onLibScroll = (e) => {
-    if (heroOpenRef.current && e.target.scrollTop > 8) {
-      heroOpenRef.current = false;
-      setHero(0, true);
-    }
-  };
-  const onLibTouchStart = (e) => {
-    if (e.touches.length !== 1) { dragRef.current = null; return; }
-    dragRef.current = { y: e.touches[0].clientY, top: e.currentTarget.scrollTop, mode: null };
-  };
-  const onLibTouchMove = (e) => {
-    const d = dragRef.current;
-    if (!d) return;
-    const dy = e.touches[0].clientY - d.y;
-    if (!d.mode) {
-      if (Math.abs(dy) < 6) return;
-      if (heroOpenRef.current && dy < 0 && d.top <= 0) {
-        d.mode = "collapse";
-        heroOpenRef.current = false;
-        setHero(0, true);
-      } else if (!heroOpenRef.current && dy > 0 && d.top <= 0) {
-        d.mode = "reveal";
-      } else {
-        d.mode = "scroll";
-      }
-    }
-    if (d.mode === "reveal") {
-      if (!e.cancelable) return;
-      e.preventDefault();
-      setHero(dy * 0.6, false);
-    }
-  };
-  const onLibTouchEnd = () => {
-    const d = dragRef.current;
-    dragRef.current = null;
-    if (!d || d.mode !== "reveal") return;
-    const h = heroRef.current;
-    const cur = h ? parseFloat(h.style.height) || 0 : 0;
-    if (cur > HERO_H * 0.32) {
-      heroOpenRef.current = true;
-      setHero(HERO_H, true);
-    } else setHero(0, true);
-  };
-
-  const [fileMenuOpen, setFileMenuOpen] = useState(""); // 열려 있는 파일의 id (⋮ 메뉴)
   useEffect(() => {
-    if (!fileMenuOpen) return;
-    const onDown = (e) => {
-      if (!e.target.closest(".vb-rm-menubtn") && !e.target.closest(".vb-rm-filemenu")) setFileMenuOpen("");
-    };
+    if (!fileMenu) return;
+    const onDown = (e) => { if (!e.target.closest(".vb-rp-fmenuwrap")) setFileMenu(""); };
     document.addEventListener("pointerdown", onDown);
     return () => document.removeEventListener("pointerdown", onDown);
-  }, [fileMenuOpen]);
+  }, [fileMenu]);
+  const recentFiles = useMemo(
+    () => [...lib.files].sort((a, b) => (b.lastOpenedAt || b.at || 0) - (a.lastOpenedAt || a.at || 0)).slice(0, 4),
+    [lib.files]
+  );
+  const readingFile = reader?.doc?.id ? lib.files.find((f) => f.id === reader.doc.id) : null;
 
-  /* ── 단어장 · 조회 기록(기록 탭) ── */
+  /* ── 단어장 · 조회 기록 ── */
   const [vocab, setVocab] = useState([]);
   const [lookups, setLookups] = useState([]);
   const refreshHistory = () => {
@@ -282,170 +204,142 @@ export default function Remote() {
   };
   useEffect(() => { if (authed === true) refreshHistory(); }, [authed]);
 
-  /* ── 화면 · 탭 ── */
-  const [screen, setScreen] = useState("library"); // library | panel
-  const [tab, setTab] = useState("word"); // word | ask | log
-  const goPanel = () => setScreen("panel");
+  /* ── 탭 ── */
+  const [tab, setTab] = useState(() => {
+    try { return localStorage.getItem("yeobaek.rtab") || "ask"; } catch { return "ask"; }
+  });
+  const go = (t) => { setTab(t); try { localStorage.setItem("yeobaek.rtab", t); } catch {} if (t === "log") refreshHistory(); };
 
-  /* ── 모델 목록 · 상태 ── */
+  /* ── 모델 ── */
   const [models, setModels] = useState([]);
+  const [askRank, setAskRank] = useState([]);
   const [defModel, setDefModel] = useState("");
   const [health, setHealth] = useState({});
-  const [healthBusy, setHealthBusy] = useState(false);
-  const [selModel, setSelModel] = useState("");
-  const [mdlMenuOpen, setMdlMenuOpen] = useState(false);
-  useEffect(() => {
-    if (authed !== true) return;
-    fetch(u("/api/models")).then((r) => r.json()).then((j) => {
-      setModels(Array.isArray(j.models) ? j.models : []);
-      setDefModel(j.default || "");
-      if (j.health) setHealth(j.health);
-    }).catch(() => {});
-  }, [authed]);
-  const healthReq = useRef(false);
-  const refreshHealthNow = () => {
-    if (healthReq.current) return;
-    healthReq.current = true;
-    setHealthBusy(true);
-    fetch(u("/api/models")).then((r) => (r.ok ? r.json() : null)).then((j) => { if (j?.health) setHealth(j.health); })
-      .catch(() => {}).finally(() => { healthReq.current = false; setHealthBusy(false); });
-  };
-  useEffect(() => {
-    if (!mdlMenuOpen) return;
-    const t = setInterval(refreshHealthNow, 2000);
-    return () => clearInterval(t);
-  }, [mdlMenuOpen]);
+  const [selModel, setSelModel] = useState(() => {
+    try { return localStorage.getItem("yeobaek.rmodel") || ""; } catch { return ""; }
+  });
+  const loadModels = () => fetch(u("/api/models")).then((r) => r.json()).then((j) => {
+    setModels(Array.isArray(j.models) ? j.models : []);
+    setAskRank(Array.isArray(j.askRank) ? j.askRank : []);
+    setDefModel(j.default || "");
+    if (j.health) setHealth(j.health);
+  }).catch(() => {});
+  useEffect(() => { if (authed === true) loadModels(); }, [authed]);
+  useEffect(() => { if (lastRun) loadModels(); }, [lastRun]); // 답이 끝나면 자동 순서가 바뀌었을 수 있다
   const healthOf = (id) => {
     const h = health[id];
-    if (!h) return healthBusy ? { cls: "wait", text: "측정 중" } : null;
+    if (!h) return null;
     if (h.ok) return h.ms > 4000 ? { cls: "busy", text: "혼잡" } : { cls: "ok", text: "정상" };
     if (h.status >= 429) return { cls: "jam", text: "붐빔" };
-    if (h.status === -1) return { cls: "busy", text: "느림" };
+    if (h.status === -1 || h.status === 408) return { cls: "busy", text: "느림" };
     return { cls: "jam", text: "응답 없음" };
   };
-  const defLabel = models.find((m) => m.id === defModel)?.label || "";
+  const pickModel = (id) => { setSelModel(id); try { localStorage.setItem("yeobaek.rmodel", id); } catch {} };
 
-  /* ── 세션(질문 탭) ── */
+  /* ── 질문 ── */
   const sess = sessions.find((s) => s.id === cur) || null;
-  const [sessMenuOpen, setSessMenuOpen] = useState(false);
-  const [delId, setDelId] = useState(""); // 두 번 눌러야 지워지는 확인창(두 상태 다 로컬)
-  const delRef = useRef(null);
-  const tapDel = (id, fn) => {
-    if (delId === id) { setDelId(""); clearTimeout(delRef.current); fn(); return; }
-    setDelId(id);
-    clearTimeout(delRef.current);
-    delRef.current = setTimeout(() => setDelId(""), 2600);
-  };
-  const newSess = () => jfetch("/api/remote/sessions", { method: "POST", body: JSON.stringify({ title: "새 대화" }) }).catch(() => {});
-  const delSess = (id) => jfetch(`/api/remote/sessions/${id}`, { method: "DELETE" }).catch(() => {});
-  const pickSess = (id) => jfetch("/api/remote/cur", { method: "POST", body: JSON.stringify({ id }) }).catch(() => {});
-
-  // 드롭다운(대화·모델) 바깥을 누르면 닫는다
-  useEffect(() => {
-    if (!sessMenuOpen && !mdlMenuOpen) return;
-    const onDown = (e) => {
-      if (sessMenuOpen && !e.target.closest(".vb-sessbtn") && !e.target.closest(".vb-dropmenu")) setSessMenuOpen(false);
-      if (mdlMenuOpen && !e.target.closest(".vb-mdlbtn") && !e.target.closest(".vb-dropmenu")) setMdlMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", onDown);
-    return () => document.removeEventListener("pointerdown", onDown);
-  }, [sessMenuOpen, mdlMenuOpen]);
-
-  /* ── 질문 입력 ── */
-  const [chatInput, setChatInput] = useState("");
-  const [chatBusy, setChatBusy] = useState(false);
-  const [chatErr, setChatErr] = useState("");
-  const [image, setImage] = useState(null); // { blob, url }
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [sendErr, setSendErr] = useState("");
+  const [image, setImage] = useState(null); // { blob, url } — 폰에서 고른 그림
+  const [useSessImg, setUseSessImg] = useState(true); // 아이패드가 오려 둔 그림을 함께 보낼지
+  useEffect(() => { setUseSessImg(true); }, [cur, sess?.img]);
   const fileRef = useRef(null);
-  const [expandSet, setExpandSet] = useState(new Set());
 
-  const onPickImage = (e) => {
-    const f = e.target.files?.[0];
-    e.target.value = "";
-    if (!f) return;
-    setImage({ blob: f, url: URL.createObjectURL(f) });
-  };
-  const clearImage = () => { if (image) URL.revokeObjectURL(image.url); setImage(null); };
+  const newSess = (title = "새 대화") =>
+    jfetch("/api/remote/sessions", { method: "POST", body: JSON.stringify({ title, extra: { origin: "phone" } }) })
+      .then((s) => { setSessions((arr) => [s, ...arr.filter((x) => x.id !== s.id)]); setCur(s.id); return s; });
 
-  const sendChat = async () => {
-    const text = chatInput.trim();
-    if (!text || chatBusy) return;
-    setChatBusy(true);
-    setChatErr("");
+  const send = async (text) => {
+    const q = (typeof text === "string" ? text : input).trim();
+    if (!q || busy) return;
+    setBusy(true);
+    setSendErr("");
     try {
-      let sid = cur;
-      if (!sid) {
-        const s = await jfetch("/api/remote/sessions", { method: "POST", body: JSON.stringify({ title: text.slice(0, 40) }) });
-        sid = s.id;
-      }
-      let imgId = "";
+      let sid = sess?.id;
+      if (!sid) sid = (await newSess(q.length > 16 ? q.slice(0, 16) + "…" : q)).id;
+      let img = "";
       if (image) {
-        const up = await fetch(u(`/api/remote/sessions/${sid}/image`), {
+        const r = await fetch(u(`/api/remote/sessions/${sid}/image`), {
           method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: image.blob,
-        }).then((r) => { if (!r.ok) throw new Error("업로드 실패"); return r.json(); });
-        imgId = up.id;
-      } else if (sess?.img) {
-        // 아이패드가 오려내기로 이 세션에 미리 얹어 둔 그림 — 다시 올리지 않고 그대로 쓴다.
-        imgId = sess.img;
-      }
+        });
+        if (!r.ok) throw new Error("그림을 올리지 못했어요.");
+        img = (await r.json()).id;
+      } else if (sess?.img && useSessImg) img = sess.img;
       await jfetch(`/api/remote/sessions/${sid}/msgs`, {
         method: "POST",
-        body: JSON.stringify({
-          msgs: [
-            { role: "user", text, at: Date.now(), model: selModel, img: imgId || undefined },
-            { role: "assistant", text: "", at: Date.now(), pending: true },
-          ],
-        }),
+        body: JSON.stringify({ msgs: [
+          { role: "me", text: q, at: Date.now(), model: selModel || undefined, img: img || undefined, from: "phone" },
+          { role: "ai", text: "", at: Date.now(), pending: true },
+        ] }),
       });
-      setChatInput("");
-      clearImage();
+      if (typeof text !== "string") setInput("");
+      if (image) { URL.revokeObjectURL(image.url); setImage(null); }
     } catch (e) {
-      setChatErr(e.message || "전송하지 못했습니다.");
+      setSendErr(e.message || "보내지 못했어요.");
     } finally {
-      setChatBusy(false);
+      setBusy(false);
     }
   };
 
-  const pairs = useMemo(() => {
-    const msgs = sess?.msgs || [];
-    const out = [];
-    for (let i = 0; i < msgs.length; i += 2) out.push({ i, q: msgs[i], a: msgs[i + 1] });
-    return out.reverse();
-  }, [sess]);
+  const msgs = useMemo(() => {
+    const m = sess?.msgs || [];
+    if (!peerLive || peerLive.sid !== cur || !m[peerLive.i]) return m;
+    return m.map((x, k) => (k === peerLive.i ? { ...x, text: peerLive.text || x.text, pending: true } : x));
+  }, [sess, peerLive, cur]);
+  const lastAi = msgs.length && msgs[msgs.length - 1]?.role === "ai" ? msgs[msgs.length - 1] : null;
+  const answering = !!(lastAi?.pending && !lastAi?.err);
+  const run = peerLive?.run?.running ? { ...peerLive.run, device: peerLive.device } : null;
 
-  /* ── 단어 탭 ── */
+  const stop = () => {
+    if (!sess || !lastAi) return;
+    jfetch(`/api/remote/sessions/${sess.id}/msgs/${msgs.length - 1}/cancel`, { method: "POST" }).catch(() => {});
+  };
+  const redo = () => {
+    if (!sess || !lastAi) return;
+    jfetch(`/api/remote/sessions/${sess.id}/msgs/${msgs.length - 1}`, {
+      method: "PATCH",
+      body: JSON.stringify({ patch: { text: "", err: "", stopped: false, by: null, swap: null, pending: true, claim: "", claimAt: 0 } }),
+    }).catch(() => {});
+  };
+
+  const waiting = answering && !peerLive && !lastAi?.claim;
+  const notice = sendErr ? (
+    <div className="vb-rp-note warn"><Bi name="exclamation-circle" /><span>{sendErr}</span></div>
+  ) : !reader ? (
+    <div className="vb-rp-note">
+      <Bi name="tablet" />
+      <span><b>답할 기기가 없어요.</b> 아이패드나 컴퓨터에서 여백으로 문서를 열어 두면 질문에 답해요. 질문은 먼저 남겨 둘 수 있어요.</span>
+    </div>
+  ) : waiting ? (
+    <div className="vb-rp-note"><Bi name="tablet" /><span>{reader.label}에 질문을 넘기는 중이에요…</span></div>
+  ) : null;
+
+  /* ── 단어 ── */
   const word = relay.word?.payload || null;
+  const sent = relay.sent?.payload || null;
   const savedWord = word && vocab.find((v) => v.word.toLowerCase() === (word.head || "").toLowerCase());
   const toggleSaveWord = () => {
     if (!word) return;
-    if (savedWord) {
-      jfetch(`/api/vocab/${savedWord.id}`, { method: "DELETE" }).then(refreshHistory).catch(() => {});
-    } else {
-      jfetch("/api/vocab", {
+    const p = savedWord
+      ? jfetch(`/api/vocab/${savedWord.id}`, { method: "DELETE" })
+      : jfetch("/api/vocab", {
         method: "POST",
-        body: JSON.stringify({
-          word: word.head, mean: (word.senses || []).join(" / "), ctx: word.ctx,
-          quote: word.quote, doc: word.doc || mode.doc?.name || "",
-        }),
-      }).then(refreshHistory).catch(() => {});
-    }
-  };
-  const [sentOpen, setSentOpen] = useState(false);
-  const askAboutWord = () => {
-    if (!word) return;
-    setChatInput(`"${word.head}" — `);
-    setTab("ask");
+        body: JSON.stringify({ word: word.head, mean: (word.senses || []).join(" / "), ctx: word.ctx, quote: word.quote, doc: word.doc || reader?.doc?.name || "" }),
+      });
+    p.then(refreshHistory).catch(() => {});
   };
 
-  if (authed === null) return <div className="vb-root vb-rm" />;
+  /* ───────── 그리기 ───────── */
+  if (authed === null) return <div className="vb-root vb-rp" />;
 
   if (authed === false) {
     return (
-      <div className="vb-root vb-rm">
+      <div className="vb-root vb-rp">
         <div className="vb-modal" style={{ zIndex: 100 }}>
           <form className="vb-card" onSubmit={(e) => { e.preventDefault(); submitPw(pw); }}>
             <h3>여백 리모트</h3>
-            <p className="vb-sub">숫자 6자리 비밀번호를 입력하세요. 6자리가 다 차면 자동으로 들어갑니다.</p>
+            <p className="vb-sub">숫자 6자리 비밀번호를 입력하세요. 6자리를 다 누르면 바로 들어가요.</p>
             <div className="vb-field">
               <label>비밀번호</label>
               <input ref={pwRef} type="password" inputMode="numeric" autoFocus={!COARSE}
@@ -473,349 +367,214 @@ export default function Remote() {
     );
   }
 
+  const TABS = [["lib", "서재", "collection"], ["word", "단어", "book"], ["ask", "질문", "chat"], ["log", "기록", "clock-history"]];
+
   return (
-    <div className="vb-root vb-rm">
-      {screen === "library" && (
-        <div className="vb-rm-lib">
-          <div className="vb-rm-brand">
-            <svg width="26" height="26" viewBox="0 0 128 128">
-              <rect width="128" height="128" rx="28" fill="var(--paper)" />
-              <rect x="84" y="26" width="1.6" height="76" fill="var(--t-mark2)" opacity="0.7" />
-              <rect x="26" y="38" width="46" height="5" rx="2.5" fill="#15130F" />
-              <rect x="26" y="55" width="46" height="5" rx="2.5" fill="#15130F" />
-              <rect x="26" y="72" width="30" height="5" rx="2.5" fill="#15130F" />
-              <circle cx="102" cy="57.5" r="8" fill="var(--mark)" />
-            </svg>
-            <div style={{ fontFamily: "var(--serif)", fontSize: 19, letterSpacing: ".05em", color: "var(--t-ink)" }}>여백</div>
-          </div>
+    <div className={"vb-root vb-rp" + (theme === "light" ? " light" : "")}>
+      {/* ── 위: 기기 상태 한 줄 ── */}
+      <header className="vb-rp-top">
+        <span className="vb-rp-brand">여백</span>
+        <span className={"vb-rp-dev" + (reader ? " on" : "") + (!online ? " off" : "")}>
+          <i />
+          {!online ? "서버 연결 끊김"
+            : reader ? <><b>{reader.label}</b><span>{reader.doc.name}{reader.doc.page ? ` · ${reader.doc.page}쪽` : ""}</span></>
+              : "열린 문서 없음"}
+        </span>
+      </header>
 
-          <div className="vb-rm-hero" ref={heroRef}>
-            <div className="vb-greet" style={{ padding: 0 }}>
-              <div className="vb-greetstamp">{greet.stamp}</div>
-              <div className="vb-greetline" style={{ fontSize: 26 }}>{greet.line}</div>
-              <div className="vb-greetsub">{greet.sub}</div>
-              <button className="vb-rm-cta" onClick={goPanel}>리모트 시작 →</button>
-            </div>
-          </div>
-
-          <div className="vb-rm-scroll" onScroll={onLibScroll}
-            onTouchStart={onLibTouchStart} onTouchMove={onLibTouchMove} onTouchEnd={onLibTouchEnd}>
+      <main className="vb-rp-main">
+        {tab === "lib" && (
+          <div className="vb-rp-scroll">
+            {reader && (
+              <a className="vb-rp-now" href={readingFile ? u(`/api/library/file/${readingFile.id}`) : undefined}
+                target="_blank" rel="noopener noreferrer">
+                <span className="vb-rp-nowthumb">
+                  {readingFile?.thumb ? <img src={u(`/api/library/thumb/${readingFile.id}`)} alt="" /> : <Bi name="journal-text" />}
+                </span>
+                <span className="vb-rp-nowmeta">
+                  <span className="k">{reader.label}에서 읽는 중</span>
+                  <span className="t">{reader.doc.name}</span>
+                  <span className="s">{reader.doc.page}쪽{readingFile?.totalPages ? ` / ${readingFile.totalPages}쪽` : ""}</span>
+                </span>
+              </a>
+            )}
             {recentFiles.length > 0 && (
               <>
-                <div className="vb-rm-sec"><span>최근 본 자료</span><b /></div>
+                <div className="vb-rp-sec">최근 본 자료</div>
                 {recentFiles.map((f) => (
-                  <FileRow key={f.id} f={f} onOpen={goPanel}
+                  <FileRow key={f.id} f={f} live={f.id === reader?.doc?.id}
                     sub={`${f.lastPage || 1}쪽 · ${fmtRel(f.lastOpenedAt || f.at)}`}
-                    dot={f.id === mode.doc?.id ? "var(--mark)" : "var(--t-line2)"}
-                    menuOpen={fileMenuOpen === f.id} onToggleMenu={() => setFileMenuOpen((v) => (v === f.id ? "" : f.id))} />
+                    menuOpen={fileMenu === f.id} onMenu={() => setFileMenu((v) => (v === f.id ? "" : f.id))} />
                 ))}
               </>
             )}
-
-            <div className="vb-rm-sec"><span>전체 파일</span><b /></div>
-            {lib.folders.map((fo) => (
-              <div key={fo.id}>
-                <div className="vb-rm-tree">
-                  <button className="vb-rm-treetap" onClick={() => setOpenFolders((s) => ({ ...s, [fo.id]: !s[fo.id] }))}>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
-                      style={{ transform: `rotate(${openFolders[fo.id] ? 90 : 0}deg)`, transition: "transform .15s", flex: "0 0 auto" }}>
-                      <path d={CHEV_DOWN} stroke="var(--t-faint)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" transform="rotate(-90 12 12)" />
-                    </svg>
-                    <span className="vb-rm-tname" style={{ color: "var(--t-sub)" }}>{fo.name}</span>
+            <div className="vb-rp-sec">전체 자료</div>
+            {lib.folders.map((fo) => {
+              const files = lib.files.filter((f) => f.folder === fo.id);
+              return (
+                <div key={fo.id} className="vb-rp-folder">
+                  <button className={"vb-rp-foldtap" + (openFolders[fo.id] ? " open" : "")}
+                    onClick={() => setOpenFolders((s) => ({ ...s, [fo.id]: !s[fo.id] }))}>
+                    <Bi name="chevron-down" className="chev" />
+                    <span className="t">{fo.name}</span>
+                    <span className="n">{files.length}</span>
                   </button>
+                  {openFolders[fo.id] && files.map((f) => (
+                    <FileRow key={f.id} f={f} live={f.id === reader?.doc?.id}
+                      sub={`${f.lastPage || 1}쪽 · ${fmtRel(f.lastOpenedAt || f.at)}`}
+                      menuOpen={fileMenu === f.id} onMenu={() => setFileMenu((v) => (v === f.id ? "" : f.id))} />
+                  ))}
                 </div>
-                {openFolders[fo.id] && lib.files.filter((f) => f.folder === fo.id).map((f) => (
-                  <div key={f.id} style={{ paddingLeft: 22 }}>
-                    <FileRow f={f} small onOpen={goPanel}
-                      menuOpen={fileMenuOpen === f.id} onToggleMenu={() => setFileMenuOpen((v) => (v === f.id ? "" : f.id))} />
-                  </div>
-                ))}
-              </div>
-            ))}
+              );
+            })}
             {lib.files.filter((f) => !f.folder).map((f) => (
-              <FileRow key={f.id} f={f} small onOpen={goPanel}
-                menuOpen={fileMenuOpen === f.id} onToggleMenu={() => setFileMenuOpen((v) => (v === f.id ? "" : f.id))} />
+              <FileRow key={f.id} f={f} live={f.id === reader?.doc?.id}
+                sub={`${f.lastPage || 1}쪽 · ${fmtRel(f.lastOpenedAt || f.at)}`}
+                menuOpen={fileMenu === f.id} onMenu={() => setFileMenu((v) => (v === f.id ? "" : f.id))} />
             ))}
             {!lib.folders.length && !lib.files.length && (
-              <div className="vb-ph">서재가 비어 있습니다. 아이패드에서 PDF를 추가해 보세요.</div>
+              <div className="vb-rp-empty"><Bi name="collection" /><p>서재가 비어 있어요. 아이패드에서 PDF를 추가해 보세요.</p></div>
             )}
           </div>
-        </div>
-      )}
+        )}
 
-      {screen === "panel" && (
-        <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
-          <div className="vb-rm-top">
-            <button className="vb-rm-back" onClick={() => setScreen("library")} aria-label="서재로">
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d={CHEV_LEFT} stroke="var(--t-ink)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </button>
-            <div className="vb-rm-doc">
-              <div className="vb-rm-dtitle">{mode.doc?.name || "문서 없음"}</div>
-              <div className="vb-rm-dpage">{mode.doc ? `${mode.doc.page}쪽 읽는 중` : "대기 중"}</div>
-            </div>
-            <div className="vb-rm-status">
-              <div className="vb-rm-dot" style={{ background: connMeta.dot }} />
-              <span>{connMeta.label}</span>
-            </div>
-          </div>
-
-          {!mode.on && (
-            <div className="vb-rm-banner warn">
-              <div className="vb-rm-dot" style={{ background: CONN.disconnected.dot }} />
-              <div>
-                <div className="vb-rm-btitle">아이패드가 리모트를 켜지 않았어요</div>
-                <div className="vb-rm-bsub">아이패드의 여백 앱에서 리모트 모드를 켜면 자동으로 이어집니다.</div>
+        {tab === "word" && (
+          <div className="vb-rp-scroll">
+            {!word ? (
+              <div className="vb-rp-empty">
+                <ThinkingOrb state="listening" size={64} theme={theme} aria-label="" />
+                <h3>단어를 기다리는 중이에요</h3>
+                <p>{mode.on
+                  ? "아이패드에서 단어를 탭하면 여기에 뜻이 떠요."
+                  : "아이패드 여백의 설정에서 리모트를 켜면, 탭한 단어의 뜻이 여기에 떠요."}</p>
               </div>
-            </div>
-          )}
-
-          <div className="vb-rm-tabs">
-            <div className="vb-seg2">
-              {[["word", "단어"], ["ask", "질문"], ["log", "기록"]].map(([k, label]) => (
-                <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>{label}</button>
-              ))}
-            </div>
-          </div>
-
-          {tab === "word" && (
-            <div className="vb-panes">
-              <div className="vb-pe" style={{ padding: "0 20px" }}>
-                {!word ? (
-                  <div className="vb-ph">아이패드에서 리모트를 켜고 단어를 탭하면 여기에 뜻이 나타납니다.</div>
-                ) : (
-                  <div className="vb-wpane">
-                    <div className="vb-head">
-                      <div>
-                        <div className="vb-hw">{word.head}</div>
-                        {word.pos && <span className="vb-pos">{word.pos}</span>}
-                      </div>
-                      <button className={"vb-star" + (savedWord ? " on" : "")} onClick={toggleSaveWord}
-                        aria-label={savedWord ? "단어장에서 빼기" : "단어장에 담기"}>
-                        <svg viewBox="0 0 24 24"><path d={STAR_PATH} /></svg>
-                      </button>
-                    </div>
-                    <div className="vb-accbox">
-                      <p className="vb-lbl">이 문맥에서</p>
-                      <p className={"vb-acctxt" + (word.live ? " vb-cur" : "")}>{word.ctx}</p>
-                      {word.err && <p className="vb-err">답을 받지 못했습니다 — {word.err}</p>}
-                    </div>
-                    {!!(word.senses || []).length && (
-                      <>
-                        <p className="vb-lbl" style={{ marginTop: 22 }}>사전</p>
-                        <ol className="vb-senses">
-                          {word.senses.map((s, i) => <li key={i}><i>{i + 1}</i><span>{s}</span></li>)}
-                        </ol>
-                      </>
-                    )}
-                    {word.quote && (
-                      <>
-                        <p className="vb-lbl" style={{ marginTop: 22 }}>원문{word.page ? ` · ${word.page}쪽` : ""}</p>
-                        <p className="vb-quote">{word.quote}</p>
-                      </>
-                    )}
-                    <div className="vb-wacts">
-                      <button className="vb-wactbtn" onClick={() => setSentOpen((v) => !v)}>문장 해석</button>
-                      <button className="vb-wactbtn" onClick={askAboutWord}>이 낱말로 질문</button>
-                    </div>
-                    {sentOpen && (
-                      <div style={{ marginTop: 14, padding: 14, borderRadius: 14, background: "var(--t-glass)", border: "1px solid var(--t-line2)" }}>
-                        <p className="vb-lbl">해석</p>
-                        <p style={{ margin: 0, fontSize: "14.5px", lineHeight: 1.7, color: "var(--t-ink)" }}>
-                          {relay.sent?.payload?.text || "아이패드 응답을 기다리는 중…"}
-                        </p>
-                      </div>
-                    )}
+            ) : (
+              <div className="vb-rp-word vb-pe">
+                <div className="vb-rp-whead">
+                  <div>
+                    <div className="vb-hw">{word.head}</div>
+                    {word.pos && <span className="vb-pos">{word.pos}</span>}
                   </div>
-                )}
-              </div>
-            </div>
-          )}
-
-          {tab === "ask" && (
-            <div className="vb-askwrap">
-              <div className="vb-atop">
-                <div className="vb-sessrow">
-                  <div style={{ position: "relative" }}>
-                    <button className={"vb-sessbtn" + (sessMenuOpen ? " open" : "")} onClick={() => setSessMenuOpen((v) => !v)}>
-                      <i />
-                      <span>{sess ? sess.title : "대화 없음"}</span>
-                      <svg viewBox="0 0 24 24"><path d={CHEV_DOWN} /></svg>
-                    </button>
-                    {sessMenuOpen && (
-                      <div className="vb-dropmenu" style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, minWidth: 220, zIndex: 5 }}>
-                        <div className="vb-dropscroll">
-                          {sessions.length === 0 && <div className="vb-dropfoot">대화가 없습니다.</div>}
-                          {sessions.map((s) => (
-                            <div key={s.id} className={"vb-sessitem" + (s.id === cur ? " on" : "")}
-                              style={{ cursor: "pointer" }}
-                              onClick={() => { pickSess(s.id); setSessMenuOpen(false); }}>
-                              <i />
-                              <span className="t">{s.title}</span>
-                              <span className="m">{fmtDate(s.at)}</span>
-                              <button className={"x" + (delId === "rs" + s.id ? " ask" : "")}
-                                onClick={(e) => { e.stopPropagation(); tapDel("rs" + s.id, () => delSess(s.id)); }}
-                                aria-label="대화 삭제">
-                                {delId === "rs" + s.id ? "삭제?" : "✕"}
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="vb-dropfoot">대화는 마지막 질문에서 2시간 뒤 사라집니다.</div>
-                      </div>
-                    )}
-                  </div>
-                  <button className="vb-newsess" onClick={() => { newSess(); setSessMenuOpen(false); }}>＋ 새 대화</button>
-                </div>
-
-                <div className="vb-composer">
-                  <textarea className="vb-askin" rows={1} value={chatInput}
-                    placeholder="이 자료에 대해 물어보세요"
-                    onChange={(e) => setChatInput(e.target.value)} />
-                  <button className="vb-send" disabled={chatBusy || !chatInput.trim()} onClick={sendChat} aria-label="보내기">
-                    <svg viewBox="0 0 24 24"><path d={SEND_PATH} /></svg>
+                  <button className={"vb-rp-star" + (savedWord ? " on" : "")} onClick={toggleSaveWord}
+                    aria-label={savedWord ? "단어장에서 빼기" : "단어장에 담기"}>
+                    <Bi name={savedWord ? "star-fill" : "star"} />
                   </button>
                 </div>
-
-                <div className="vb-attrow">
-                  {image ? (
-                    <span className="vb-rm-attach">
-                      <img src={image.url} alt="" />
-                      이미지 1개
-                      <button onClick={clearImage} aria-label="첨부 빼기">✕</button>
-                    </span>
-                  ) : sess?.img && (
-                    <span className="vb-rm-attach">
-                      <img src={u(`/api/remote/sessions/${sess.id}/image/${sess.img}`)} alt="" />
-                      오려낸 그림
-                      <button onClick={() => jfetch(`/api/remote/sessions/${sess.id}`, {
-                        method: "PATCH", body: JSON.stringify({ patch: { img: "" } }),
-                      }).catch(() => {})} aria-label="첨부 빼기">✕</button>
-                    </span>
-                  )}
-                  <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }} onChange={onPickImage} />
-                  <button className="vb-capchip" onClick={() => fileRef.current?.click()}>＋ 이미지 첨부</button>
-                  {models.length > 0 && (
-                    <div style={{ position: "relative", marginLeft: "auto" }}>
-                      <button className={"vb-mdlbtn" + (mdlMenuOpen ? " open" : "")}
-                        onClick={() => { const o = !mdlMenuOpen; setMdlMenuOpen(o); if (o) refreshHealthNow(); }}>
-                        {selModel ? (models.find((m) => m.id === selModel)?.label || "모델") : `자동${defLabel ? " — " + defLabel : ""}`}
-                        <svg viewBox="0 0 24 24"><path d={CHEV_DOWN} /></svg>
-                      </button>
-                      {mdlMenuOpen && (
-                        <div className="vb-dropmenu" style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, minWidth: 250, zIndex: 5 }}>
-                          <div className="vb-dropscroll">
-                            <button className={"vb-mdlitem" + (!selModel ? " on" : "")} onClick={() => { setSelModel(""); setMdlMenuOpen(false); }}>
-                              <span className="vb-mdlrow">
-                                <span className="n">자동{defLabel ? ` — 지금 ${defLabel}` : ""}</span>
-                                {!selModel && <span className="c">✓</span>}
-                              </span>
-                            </button>
-                            {models.map((m) => {
-                              const hp = healthOf(m.id);
-                              return (
-                                <button key={m.id} className={"vb-mdlitem" + (selModel === m.id ? " on" : "")}
-                                  onClick={() => { setSelModel(m.id); setMdlMenuOpen(false); }}>
-                                  <span className="vb-mdlrow">
-                                    <span className="n">{m.label}</span>
-                                    {m.id === defModel && <span className="d">자동 선택</span>}
-                                    {hp && <span className={"vb-mdlhp " + hp.cls}><i />{hp.text}</span>}
-                                    {selModel === m.id && <span className="c">✓</span>}
-                                  </span>
-                                </button>
-                              );
-                            })}
-                          </div>
-                          <div className="vb-dropfoot">아이패드가 이 선택으로 질문 탭 모델을 부릅니다.</div>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                <div className="vb-rp-card">
+                  <div className="k">이 문맥에서</div>
+                  <p className={word.live ? "vb-cur" : ""}>{word.ctx || (word.live ? "" : "—")}</p>
+                  {word.err && <p className="err">뜻을 받지 못했어요 · {word.err}</p>}
                 </div>
-                {chatErr && <p className="vb-err" style={{ marginTop: 8 }}>{chatErr}</p>}
-              </div>
-
-              <div className="vb-scroll">
-                {pairs.length === 0 ? (
-                  <div className="vb-ph">
-                    <p>여기서 물어보면 아이패드가 지금 보고 있는 페이지를 근거로 답합니다.</p>
-                    <p style={{ margin: 0 }}>아이패드가 리모트를 켜고 있어야 답이 옵니다 — 꺼져 있어도 질문은 쌓아 둘 수 있어요.</p>
+                {!!(word.senses || []).length && (
+                  <div className="vb-rp-block">
+                    <div className="k">사전</div>
+                    <ol className="vb-senses">
+                      {word.senses.map((x, i) => <li key={i}><i>{i + 1}</i><span>{x}</span></li>)}
+                    </ol>
                   </div>
-                ) : (
-                  <>
-                    <div className="vb-recent">최신<b /></div>
-                    {pairs.map((p, k) => {
-                      const latest = k === 0;
-                      const ek = (sess?.id || "") + ":" + p.i;
-                      const expanded = latest || expandSet.has(ek);
-                      const pending = p.a?.pending && !p.a?.text;
-                      return (
-                        <div key={p.i} className={"vb-qa" + (latest ? " vb-pe" : " past" + (expanded ? " open" : ""))}>
-                          {p.q?.img && <img className="vb-msgimg" src={u(`/api/remote/sessions/${sess.id}/image/${p.q.img}`)} alt="첨부 이미지" />}
-                          <div className="vb-qbubble">{p.q?.text}</div>
-                          {pending ? (
-                            <div className="vb-abody">
-                              <span className="vb-err" style={{ color: "var(--t-muted)" }}>
-                                {mode.on ? "아이패드가 답하는 중…" : "아이패드가 리모트를 켜면 답합니다…"}
-                              </span>
-                            </div>
-                          ) : p.a?.text || p.a?.err ? (
-                            <div className={"vb-abody" + (!expanded ? " clamp" : "")}>
-                              {p.a.text && <Rich text={p.a.text} live={false} />}
-                              {p.a.err && <span className="vb-err">{p.a.text ? p.a.err : `답을 받지 못했습니다 — ${p.a.err}`}</span>}
-                            </div>
-                          ) : null}
-                          {!latest && p.a?.text && (
-                            <button className="vb-expand"
-                              onClick={() => setExpandSet((s) => {
-                                const n = new Set(s);
-                                n.has(ek) ? n.delete(ek) : n.add(ek);
-                                return n;
-                              })}>
-                              {expanded ? "접기" : "펼치기"}
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </>
                 )}
+                {word.quote && (
+                  <div className="vb-rp-block">
+                    <div className="k">원문{word.page ? ` · ${word.page}쪽` : ""}</div>
+                    <p className="vb-quote">{word.quote}</p>
+                  </div>
+                )}
+                {sent?.text && (
+                  <div className="vb-rp-block">
+                    <div className="k">문장 해석</div>
+                    <p className="vb-rp-sent">{sent.text}</p>
+                  </div>
+                )}
+                <div className="vb-rp-acts">
+                  <button onClick={() => { setInput(`"${word.head}" — `); go("ask"); }}>
+                    <Bi name="chat" /><span>이 낱말로 질문</span>
+                  </button>
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
+        )}
 
-          {tab === "log" && (
-            <div className="vb-rm-hist">
-              <div className="vb-lhead"><span>단어장</span><b /></div>
-              {vocab.length === 0 ? (
-                <div className="vb-ph">★ 로 담은 단어가 여기 모입니다.</div>
-              ) : vocab.slice(0, 30).map((v) => (
-                <div key={v.id} className="vb-litem" style={{ cursor: "default" }}>
-                  <span className="vb-lrow">
-                    <i className="vb-ldot" style={{ background: "var(--t-star)" }} />
-                    <span className="vb-ltitle" style={{ fontFamily: "var(--serif)" }}>{v.word}</span>
-                    <span className="vb-lat">{fmtDate(v.at)}</span>
-                  </span>
-                  {v.mean && <span className="vb-lsub">{v.mean}</span>}
-                </div>
-              ))}
+        {tab === "ask" && (
+          <AskView
+            theme={theme} active
+            sessions={sessions} curId={cur}
+            onPickSess={setCur}
+            onNewSess={() => { newSess().catch(() => {}); }}
+            onDelSess={(id) => jfetch(`/api/remote/sessions/${id}`, { method: "DELETE" }).catch(() => {})}
+            msgs={msgs} imgUrl={(id) => u(`/api/remote/sessions/${cur}/image/${id}`)}
+            value={input} onChange={setInput} onSend={send}
+            onStop={answering ? stop : null} busy={busy || answering}
+            placeholder={reader ? `${reader.doc.name} ${reader.doc.page}쪽에 대해 물어보세요` : "물어보세요"}
+            empty={{
+              title: "폰에서 물어보세요",
+              text: reader
+                ? `${reader.label}가 지금 보는 ${reader.doc.page}쪽을 근거로 답해요. 아이패드와 같은 대화를 함께 봐요.`
+                : "아이패드나 컴퓨터에서 문서를 열어 두면, 그 문서를 근거로 답해요.",
+              suggestions: reader ? ["지금 쪽 핵심만 정리해 줘", "이 문서는 어떤 내용이야?"] : [],
+            }}
+            notice={notice}
+            attach={image
+              ? { src: image.url, label: "고른 그림", onRemove: () => { URL.revokeObjectURL(image.url); setImage(null); } }
+              : sess?.img && useSessImg
+                ? { src: u(`/api/remote/sessions/${sess.id}/image/${sess.img}`), label: "오려낸 영역", onRemove: () => setUseSessImg(false) }
+                : null}
+            capture={{ icon: "image", label: "그림 첨부", onClick: () => fileRef.current?.click() }}
+            models={models} askRank={askRank} selModel={selModel} onPickModel={pickModel}
+            onModelsOpen={loadModels} healthOf={healthOf} defLabel={models.find((m) => m.id === defModel)?.label || ""}
+            run={run} lastRun={lastRun}
+            onRedo={redo} canRedo={(p) => !p.q.hist}
+            onImage={(f) => imageToJpeg(f).then(({ blob, url }) => {
+              setImage((old) => { if (old) URL.revokeObjectURL(old.url); return { blob, url }; });
+            }).catch((e) => setSendErr(e.message))}
+          />
+        )}
+        <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            e.target.value = "";
+            if (f) setImage({ blob: f, url: URL.createObjectURL(f) });
+          }} />
 
-              <div className="vb-lhead" style={{ marginTop: 20 }}><span>조회 기록</span><b /></div>
-              {lookups.length === 0 ? (
-                <div className="vb-ph">단어를 탭해 찾아본 기록이 여기 모입니다.</div>
-              ) : lookups.map((it) => (
-                <div key={it.id} className="vb-litem" style={{ cursor: "default" }}>
-                  <span className="vb-lrow">
-                    <i className="vb-ldot" style={{ background: "var(--t-mark2)" }} />
-                    <span className="vb-ltitle">{it.word}</span>
-                    <span className="vb-lat">{fmtRel(it.at)}</span>
-                  </span>
-                  <span className="vb-lsub">{it.doc}{it.mean ? ` · ${it.mean}` : ""}</span>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+        {tab === "log" && (
+          <div className="vb-rp-scroll">
+            <div className="vb-rp-sec">단어장 <em>{vocab.length}</em></div>
+            {vocab.length === 0 ? (
+              <div className="vb-rp-hint">단어 탭에서 ☆ 을 누르면 여기에 모여요.</div>
+            ) : vocab.slice(0, 40).map((v) => (
+              <div key={v.id} className="vb-rp-item">
+                <span className="t serif">{v.word}</span>
+                {v.mean && <span className="s">{v.mean}</span>}
+                <span className="m">{fmtRel(v.at)}</span>
+              </div>
+            ))}
+            <div className="vb-rp-sec">찾아본 단어</div>
+            {lookups.length === 0 ? (
+              <div className="vb-rp-hint">아이패드에서 단어를 탭한 기록이 여기에 모여요.</div>
+            ) : lookups.map((it) => (
+              <div key={it.id} className="vb-rp-item">
+                <span className="t">{it.word}</span>
+                <span className="s">{it.doc}{it.mean ? ` · ${it.mean}` : ""}</span>
+                <span className="m">{fmtRel(it.at)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </main>
+
+      {/* ── 아래: 탭 막대 ── */}
+      <nav className="vb-rp-tabs">
+        {TABS.map(([k, label, icon]) => (
+          <button key={k} className={tab === k ? "on" : ""} onClick={() => go(k)}>
+            <span className="ic">
+              <Bi name={icon} />
+              {k === "word" && word?.live && <i className="dot" />}
+              {k === "ask" && answering && tab !== "ask" && <i className="dot" />}
+            </span>
+            <span className="l">{label}</span>
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }

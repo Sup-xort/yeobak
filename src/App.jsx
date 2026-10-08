@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import "katex/dist/katex.min.css";
 import "./App.css";
 import Rich from "./rich.jsx";
+import AskView, { imageToJpeg } from "./AskView.jsx";
 import { u } from "./paths.js";
 import { drawStroke, hitStroke, strokeInLasso, polyBox, bbox as inkBox, snapLine, tidyPts, strokePath, HL_ALPHA } from "./ink.js";
 
@@ -21,7 +22,6 @@ const DEFAULT_CFG = {
    2시간이 지난 세션은 버린다. 마지막 활동 기준이라 대화가 이어지는 동안은 살아 있다. */
 const SESS_TTL = 2 * 60 * 60 * 1000;
 const SESS_MAX = 20;      // 이보다 많아지면 오래된 것부터 버린다
-const SESS_KEY = "yeobaek.ask";
 const WIDE = 880;
 /* 서재 카드의 "매트" 규격 — 슬롯 높이(px)와 좁은 화면 축소율, 비율을 모를 때 쓰는 A4 세로.
    SLOT_H 는 App.css 의 .vb-slot / .vb-slot.sm 높이와 같이 움직여야 한다. */
@@ -238,7 +238,7 @@ async function callServer(cfg, system, user, onDelta, signal, opts = {}) {
     think += k.length;
     opts.onPhase?.("think", { engine, model, think });
   }, (fr) => { stop = fr; }, (name, d) => {
-    if (name === "error") { failed = d.error || "모든 모델이 답하지 못했습니다."; return; }
+    if (name === "error") { failed = d.error || "지금은 답할 수 있는 모델이 없어요."; return; }
     if (name === "pick") {
       engine = d.engine || ""; model = d.model || "";
       if (d.wanted) opts.onPhase?.("swap", { wanted: d.wanted, model });
@@ -366,8 +366,12 @@ const SYS_SENT = `너는 영어 원서·논문을 읽는 한국 대학생의 번
 번역문만 출력한다. 인사·설명·마크다운 금지.
 문장 구조가 까다로울 때만 마지막 줄에 "핵심: "으로 시작하는 한 줄을 덧붙인다.`;
 
-/* 답변은 마크다운·LaTeX 로 그린다(src/rich.jsx). 세 캡처 프롬프트도 같은 규칙을 쓴다. */
-const FMT_RICH = `마크다운으로 쓴다. 소제목·목록·표·굵게를 필요한 만큼만 쓰고 장식용으로 남발하지 않는다.
+/* 답변은 마크다운·LaTeX 로 그린다(src/rich.jsx). 세 캡처 프롬프트도 같은 규칙을 쓴다.
+   말투도 여기서 정한다 — 지시문이 "~다"체라 모델도 "31쪽이다" 같은 서술체로 답했는데, 사용자에겐
+   서비스가 아니라 메모처럼 읽혔다(2026-09-29). 목록 항목은 명사형으로 끝나도 자연스럽다. */
+const FMT_RICH = `말투: 존댓말 해요체로 쓴다("~예요", "~해요", "~있어요"). "~이다", "~한다" 같은 서술체는 쓰지 않는다.
+목록 항목이나 표 칸은 명사형으로 끝내도 된다. 번역한 본문(원문을 옮긴 부분)은 원문의 문체를 따른다.
+마크다운으로 쓴다. 소제목·목록·표·굵게를 필요한 만큼만 쓰고 장식용으로 남발하지 않는다.
 수식과 기호는 반드시 LaTeX 로 쓴다 — 문장 안에서는 $…$, 따로 세울 때는 $$…$$.
 (예: $O(n\\log n)$, $\\frac{\\partial f}{\\partial x}$) 유니코드 첨자나 ASCII 흉내는 쓰지 않는다.`;
 
@@ -581,9 +585,6 @@ export default function VerbatimReader() {
   const [theme, setTheme] = useState("dark");           // "dark" | "light"
   const [invert, setInvert] = useState(false);          // 야간 반전 — 페이지(캔버스+텍스트레이어)만 filter:invert
   const [panelMode, setPanelMode] = useState("panel");  // "panel" | "card"
-  const [sessMenuOpen, setSessMenuOpen] = useState(false);
-  const [mdlMenuOpen, setMdlMenuOpen] = useState(false);
-  const [expandSet, setExpandSet] = useState(() => new Set()); // 펼친 지난 문답 "sid:i"
   // 문장 해석은 캔버스 위에 뜨는 카드다 — 페이지가 래스터라 실제 행간 삽입은 불가능해서
   // 원문 위치에 앵커한 오버레이로 대신한다. 위치는 트리거 시점에 한 번 계산한다(vb-bubble과 동일한 타협).
   const [sentPos, setSentPos] = useState(null); // {left, top} — .vb-body 기준. null 이면 카드 숨김
@@ -599,6 +600,8 @@ export default function VerbatimReader() {
   const dataRef = useRef([]);
   const renderedRef = useRef(new Set());
   const queueRef = useRef(new Set());
+  const jobsRef = useRef(new Map());          // n → 진행 중인 renderPage 의 {task} — 취소·낡음 판정용
+  const leftRef = useRef(new Set());          // relayout 뒤 옛 배율 캔버스가 아직 붙어 있는 쪽 — 멀어지면 syncPages 가 치운다
   const ioRef = useRef(null);
   const scaleRef = useRef(1);
   const zoomRef = useRef(1);
@@ -683,78 +686,114 @@ export default function VerbatimReader() {
   }, []);
 
   /* ───────── 질문 탭 세션 ─────────
-     sessRef 가 원본이고 state 는 그 거울이다. ask() 가 스트리밍 도중 부르는 콜백은
-     setState 가 반영되기 전에 다시 세션을 읽어야 하는데, state 로만 두면
-     같은 tick 안에서 방금 만든 세션이 안 보인다(캡처가 세션을 만들자마자 메시지를 넣는다). */
+     2026-09-29 부터 대화는 서버(server/remote.js 의 세션 저장소) 한 곳에 있다 — 아이패드·PC·폰이 같은 대화를 본다.
+     예전엔 아이패드는 localStorage, 폰은 서버라 둘을 잇는 거울(remoteSessRef·mirrorCaptureToRemote)과
+     폰 질문 전용 파이프라인(processRemoteQ)이 따로 있었다. 이제 전부 이 한 벌로 돈다.
+
+     sessRef 가 원본이고 state 는 그 거울이다(스트리밍 콜백이 setState 반영 전에 다시 읽어야 한다).
+     쓰기는 낙관적으로: 로컬을 먼저 바꾸고 서버에 보낸다. 단, 토큰마다 서버에 쓰지 않는다 —
+     답이 흐르는 동안(sync=false)은 로컬만, 정착(질문 추가·답 완료/중단/실패)할 때만 서버에 쓴다.
+     흐르는 모습은 relay("ask")로 다른 기기에 따로 흘린다. */
   const sessRef = useRef([]);
   const curSessRef = useRef("");
   useEffect(() => { curSessRef.current = curSess; }, [curSess]);
-
-  const saveSess = useCallback((ls, cur) => {
-    /* 오려낸 그림은 data URL 이라 크다. localStorage 가 넘치면 그림부터 버리고,
-       그래도 안 되면 최근 세션만 남긴다. 저장 실패로 대화가 날아가지는 않는다. */
-    const strip = (s) => ({ ...s, img: "", msgs: s.msgs.map((m) => ({ ...m, img: "" })) });
-    const tries = [
-      () => ls,
-      () => ls.map((s, i) => (i === 0 ? s : strip(s))),
-      () => ls.map(strip),
-      () => ls.slice(0, 3).map(strip),
-    ];
-    for (const build of tries) {
-      try {
-        localStorage.setItem(SESS_KEY, JSON.stringify({ v: 1, cur, sessions: build() }));
-        return;
-      } catch {}
+  // 이 창의 이름 — 폰 질문 답 자리를 맡을 때(claim) 쓴다. 새로고침해도 같은 창이면 같은 이름.
+  const deviceRef = useRef("");
+  if (!deviceRef.current) {
+    try { deviceRef.current = sessionStorage.getItem("yeobaek.dev") || ""; } catch {}
+    if (!deviceRef.current) {
+      deviceRef.current = "d" + Math.random().toString(36).slice(2, 10);
+      try { sessionStorage.setItem("yeobaek.dev", deviceRef.current); } catch {}
     }
-    try { localStorage.removeItem(SESS_KEY); } catch {}
-  }, []);
+  }
+  const DEVICE_LABEL = typeof navigator !== "undefined" && navigator.maxTouchPoints > 1 ? "아이패드" : "컴퓨터";
 
-  /* 저장은 미뤄서 한다. commitSess 는 스트리밍 중 토큰마다 불리는데,
-     그때마다 세션 전체를 JSON 으로 굳히면 답 하나 받는 동안 수백 번 직렬화한다. */
-  const saveTimer = useRef(0);
+  const sapi = (url, method = "GET", body) => fetch(u(url), {
+    method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body),
+  }).then(async (r) => {
+    if (r.status === 401) { setAuthed(false); throw new AuthError(); }
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || "요청 실패 " + r.status);
+    return r.json();
+  });
+
   const commitSess = useCallback((ls, cur) => {
     sessRef.current = ls;
     setSessions(ls);
-    if (cur !== undefined) { curSessRef.current = cur; setCurSess(cur); }
-    clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveSess(sessRef.current, curSessRef.current), 800);
-  }, [saveSess]);
+    if (cur !== undefined) {
+      curSessRef.current = cur; setCurSess(cur);
+      try { localStorage.setItem("yeobaek.askcur", cur); } catch {}
+    }
+  }, []);
+  const mapSess = (sid, fn) => commitSess(sessRef.current.map((s) => (s.id === sid ? fn(s) : s)));
 
-  // 탭을 닫거나 홈 화면으로 나가면 미뤄 둔 저장을 흘리지 말고 지금 쓴다.
-  useEffect(() => {
-    const flush = () => { clearTimeout(saveTimer.current); saveSess(sessRef.current, curSessRef.current); };
-    const onHide = () => { if (document.hidden) flush(); };
-    window.addEventListener("pagehide", flush);
-    document.addEventListener("visibilitychange", onHide);
-    return () => {
-      window.removeEventListener("pagehide", flush);
-      document.removeEventListener("visibilitychange", onHide);
-    };
-  }, [saveSess]);
+  // 서버에 보낼 모양 — 로컬 전용 표시(live)는 빼고, "아직 답 중"은 pending 으로
+  const wire = (m) => {
+    const { live, ...rest } = m;
+    return live ? { ...rest, pending: true, claim: deviceRef.current, claimAt: Date.now() } : rest;
+  };
 
-  const newSess = useCallback((title, extra = {}) => {
-    const id = "s" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    const s = { id, title: title || "새 대화", at: Date.now(), msgs: [], img: "", ...extra };
-    commitSess([s, ...sessRef.current].slice(0, SESS_MAX), id);
-    return id;
-  }, [commitSess]);
+  const newSess = async (title, extra = {}) => {
+    const s = await sapi("/api/remote/sessions", "POST", { title: title || "새 대화", extra: { origin: "ipad", ...extra } });
+    commitSess([s, ...sessRef.current.filter((x) => x.id !== s.id)].slice(0, SESS_MAX), s.id);
+    return s.id;
+  };
 
   /* 메시지를 넣거나 고칠 때마다 at 을 밀어 준다 — 대화가 이어지는 동안은 2시간이 다시 시작된다. */
-  const addMsgs = useCallback((sid, arr) => commitSess(
-    sessRef.current.map((s) => (s.id === sid ? { ...s, at: Date.now(), msgs: [...s.msgs, ...arr] } : s))
-  ), [commitSess]);
+  const addMsgs = (sid, arr) => {
+    mapSess(sid, (s) => ({ ...s, at: Date.now(), msgs: [...s.msgs, ...arr] }));
+    return sapi(`/api/remote/sessions/${sid}/msgs`, "POST", { msgs: arr.map(wire) }).catch(() => {});
+  };
 
-  const patchMsg = useCallback((sid, i, patch) => commitSess(
-    sessRef.current.map((s) => (s.id === sid
-      ? { ...s, at: Date.now(), msgs: s.msgs.map((m, k) => (k === i ? { ...m, ...patch } : m)) }
-      : s))
-  ), [commitSess]);
+  const patchMsg = (sid, i, patch, sync = true) => {
+    mapSess(sid, (s) => ({ ...s, at: Date.now(), msgs: s.msgs.map((m, k) => (k === i ? { ...m, ...patch } : m)) }));
+    if (!sync) return;
+    const { live, ...rest } = patch;
+    if (live === false) rest.pending = false;
+    if (live === true) Object.assign(rest, { pending: true, claim: deviceRef.current, claimAt: Date.now() });
+    sapi(`/api/remote/sessions/${sid}/msgs/${i}`, "PATCH", { patch: rest }).catch(() => {});
+  };
 
-  const patchSess = useCallback((sid, patch) => commitSess(
-    sessRef.current.map((s) => (s.id === sid ? { ...s, ...patch } : s))
-  ), [commitSess]);
+  const patchSess = (sid, patch) => {
+    mapSess(sid, (s) => ({ ...s, ...patch }));
+    sapi(`/api/remote/sessions/${sid}`, "PATCH", { patch }).catch(() => {});
+  };
+
+  const delSess = (id) => {
+    const left = sessRef.current.filter((s) => s.id !== id);
+    commitSess(left, id === curSessRef.current ? left[0]?.id || "" : curSessRef.current);
+    sapi(`/api/remote/sessions/${id}`, "DELETE").catch(() => {});
+  };
 
   const findSess = (sid) => sessRef.current.find((s) => s.id === sid) || null;
+
+  /* 오려낸 그림은 서버에 파일로(세션에 속해 함께 지워진다), 모델에 보낼 base64 는 여기 캐시 */
+  const imgCache = useRef(new Map()); // imgId → base64
+  const putImg = async (sid, b64) => {
+    const blob = await fetch("data:image/jpeg;base64," + b64).then((r) => r.blob());
+    const r = await fetch(u(`/api/remote/sessions/${sid}/image`), {
+      method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: blob,
+    });
+    if (!r.ok) throw new Error("그림을 올리지 못했어요.");
+    const { id } = await r.json();
+    imgCache.current.set(id, b64);
+    return id;
+  };
+  const getImg = async (sid, id) => {
+    if (imgCache.current.has(id)) return imgCache.current.get(id);
+    const blob = await fetch(u(`/api/remote/sessions/${sid}/image/${id}`)).then((r) => {
+      if (!r.ok) throw new Error("그림을 불러오지 못했어요.");
+      return r.blob();
+    });
+    const b64 = await new Promise((res, rej) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result).split(",")[1] || "");
+      fr.onerror = rej;
+      fr.readAsDataURL(blob);
+    });
+    imgCache.current.set(id, b64);
+    return b64;
+  };
+  const imgUrl = (id) => (String(id).startsWith("data:") ? id : u(`/api/remote/sessions/${curSessRef.current}/image/${id}`));
 
   /* 지난 문답을 모델이 받을 형태로 바꾼다.
      본문 컨텍스트(buildAskContext)는 여기 넣지 않는다 — 턴마다 다시 실으면
@@ -769,36 +808,125 @@ export default function VerbatimReader() {
       /* err 가 붙었어도 받아 둔 답이 있으면 히스토리에 넣는다 — 끊긴 답을 빼 버리면
          "이어서 말해 줘"가 앞을 못 보고, 방금 고친 흐름 문제가 그대로 재현된다.
          답이 아예 없는 실패는 아래 text 검사에서 이미 걸러진다. */
-      .filter((m) => !m.live && (m.hist || m.text || "").trim())
+      .filter((m) => !m.live && !m.pending && (m.hist || m.text || "").trim())
       .map((m) => ({ role: m.role === "me" ? "user" : "assistant", text: m.hist || m.text }));
   };
 
-  /* 복원 + 2시간 지난 세션 청소 */
+  /* ── 서버와 맞추기(SSE) ── 로그인한 동안 늘 붙어 있다. 다른 기기가 만든 대화·질문·답이 여기로 온다.
+     내가 방금 낙관적으로 넣은 것의 메아리는 길이·id 로 걸러 두 번 들어가지 않게 한다.
+     내가 흘리는 중인 답(live)은 서버 값이 덮어쓰지 못하게 지킨다. */
+  const [peerLive, setPeerLive] = useState(null); // 다른 기기가 흘리는 답 { sid, i, text, run, device }
+  const [remoteMode, setRemoteMode] = useState({ on: false, doc: null });
   useEffect(() => {
-    let cur = "";
-    let ls = [];
-    try {
-      const raw = localStorage.getItem(SESS_KEY);
-      if (raw) {
-        const j = JSON.parse(raw);
-        ls = (Array.isArray(j?.sessions) ? j.sessions : [])
-          .filter((s) => s && s.id && Array.isArray(s.msgs) && Date.now() - (s.at || 0) < SESS_TTL)
-          /* 새로고침으로 끊긴 답변은 스트리밍 상태로 굳어 있다 — 커서가 영영 깜박인다. */
-          .map((s) => ({ ...s, msgs: s.msgs.map((m) => (m.live ? { ...m, live: false } : m)) }));
-        cur = ls.some((s) => s.id === j?.cur) ? j.cur : ls[0]?.id || "";
-      }
-    } catch {}
-    commitSess(ls, cur);
-
-    const sweep = () => {
-      setNowTick((n) => n + 1); // 남은 시간 표시 갱신
-      const live = sessRef.current.filter((s) => Date.now() - (s.at || 0) < SESS_TTL);
-      if (live.length === sessRef.current.length) return;
-      commitSess(live, live.some((s) => s.id === curSessRef.current) ? curSessRef.current : live[0]?.id || "");
+    if (authed !== true) return;
+    const es = new EventSource(u("/api/remote/stream"));
+    const keepLive = (srv) => {
+      const mine = findSess(srv.id);
+      if (!mine) return srv;
+      return { ...srv, msgs: srv.msgs.map((m, k) => (mine.msgs[k]?.live ? mine.msgs[k] : m)) };
     };
-    const t = setInterval(sweep, 60_000);
+    es.addEventListener("hello", (e) => {
+      const d = JSON.parse(e.data);
+      const ls = (d.sessions || []).map(keepLive);
+      let cur = curSessRef.current;
+      if (!ls.some((s) => s.id === cur)) {
+        try { cur = localStorage.getItem("yeobaek.askcur") || ""; } catch {}
+        if (!ls.some((s) => s.id === cur)) cur = ls[0]?.id || "";
+      }
+      commitSess(ls, cur);
+      setRemoteMode(d.mode || { on: false, doc: null });
+    });
+    es.addEventListener("mode", (e) => setRemoteMode(JSON.parse(e.data)));
+    es.addEventListener("sess-new", (e) => {
+      const s = JSON.parse(e.data);
+      if (findSess(s.id)) return;
+      commitSess([s, ...sessRef.current]);
+      // 폰에서 새로 연 대화는 따라가지 않는다 — 아이패드에서 읽던 대화가 멋대로 바뀌면 안 된다
+    });
+    es.addEventListener("sess-del", (e) => {
+      const { id } = JSON.parse(e.data);
+      if (!findSess(id)) return;
+      const left = sessRef.current.filter((s) => s.id !== id);
+      commitSess(left, id === curSessRef.current ? left[0]?.id || "" : undefined);
+    });
+    es.addEventListener("sess-patch", (e) => {
+      const { id, patch } = JSON.parse(e.data);
+      if (findSess(id)) mapSess(id, (s) => ({ ...s, ...patch, at: Date.now() }));
+    });
+    es.addEventListener("sess-msgs", (e) => {
+      const { id, from, msgs } = JSON.parse(e.data);
+      const s = findSess(id);
+      if (!s || s.msgs.length >= from + msgs.length) return; // 내가 넣은 것의 메아리
+      mapSess(id, (x) => ({ ...x, at: Date.now(), msgs: [...x.msgs.slice(0, from), ...msgs] }));
+    });
+    es.addEventListener("sess-msg-patch", (e) => {
+      const { id, i, patch } = JSON.parse(e.data);
+      const s = findSess(id);
+      if (!s?.msgs[i] || s.msgs[i].live) return; // 내가 흘리는 중인 답은 건드리지 않는다
+      mapSess(id, (x) => ({ ...x, msgs: x.msgs.map((m, k) => (k === i ? { ...m, ...patch } : m)) }));
+      if (patch.pending === false) setPeerLive((p) => (p && p.sid === id && p.i === i ? null : p));
+    });
+    es.addEventListener("ask-cancel", (e) => {
+      const { id, i } = JSON.parse(e.data);
+      if (jobRef.current?.sid === id && (jobRef.current.i === undefined || jobRef.current.i === i)) stopAsk();
+    });
+    es.addEventListener("relay:ask", (e) => {
+      const { payload } = JSON.parse(e.data);
+      if (!payload || payload.from === deviceRef.current) return;
+      setPeerLive(payload.done ? null : payload);
+    });
+    return () => es.close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
+
+  /* 흐르는 답을 다른 기기로 — 0.3초에 한 번만. 끝날 때는 done 으로 한 번 더(받는 쪽이 겹쳐 그리던 걸 치운다). */
+  const askRelay = useRef({ seq: 0, t: 0, timer: 0, last: null });
+  const relayAsk = (payload, now) => {
+    const r = askRelay.current;
+    r.last = payload;
+    const send = () => {
+      r.t = Date.now(); r.timer = 0;
+      fetch(u("/api/remote/relay"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slot: "ask", seq: ++r.seq, payload: { ...r.last, from: deviceRef.current, device: DEVICE_LABEL } }),
+      }).catch(() => {});
+    };
+    if (now) { clearTimeout(r.timer); send(); return; }
+    if (!r.timer) r.timer = setTimeout(send, Math.max(0, 300 - (Date.now() - r.t)));
+  };
+
+  /* 출석 — 폰이 "지금 답할 기기가 있나 · 몇 쪽을 보나"를 알 수 있게 30초마다(쪽이 바뀌면 곧바로) 알린다.
+     문서가 열려 있을 때만 doc 을 싣는다 — 문서 없는 창은 폰 질문에 답하지 못한다(본문이 없다). */
+  const presRef = useRef({ timer: 0 });
+  const sendPresence = (bye = false) => {
+    fetch(u("/api/remote/presence"), {
+      method: "POST", headers: { "Content-Type": "application/json" }, keepalive: bye,
+      body: JSON.stringify({
+        device: deviceRef.current, label: DEVICE_LABEL, bye,
+        doc: pdfRef.current ? { id: curFileRef.current?.id || "", name: docNameRef.current, page: curRef.current } : null,
+      }),
+    }).catch(() => {});
+  };
+  useEffect(() => {
+    if (authed !== true) return;
+    clearTimeout(presRef.current.timer);
+    presRef.current.timer = setTimeout(() => sendPresence(), 800);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed, numPages, curPage, docName]);
+  useEffect(() => {
+    if (authed !== true) return;
+    const t = setInterval(() => { if (!document.hidden) sendPresence(); }, 30_000);
+    const bye = () => sendPresence(true);
+    window.addEventListener("pagehide", bye);
+    return () => { clearInterval(t); window.removeEventListener("pagehide", bye); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authed]);
+
+  /* 남은 시간 표시용 1분 틱(청소는 서버가 한다 — sess-del 로 온다) */
+  useEffect(() => {
+    const t = setInterval(() => setNowTick((n) => n + 1), 60_000);
     return () => clearInterval(t);
-  }, [commitSess]);
+  }, []);
 
   const sess = useMemo(() => sessions.find((s) => s.id === curSess) || null, [sessions, curSess]);
   const askLog = sess ? sess.msgs : [];
@@ -858,6 +986,9 @@ export default function VerbatimReader() {
     if (p === "swap") return;
     if (p === "tick") { bumpStat({ at: Date.now(), chars: getChars?.() ?? 0 }); return; }
     const now = Date.now();
+    // 단계마다 처음 들어선 때를 적어 둔다 — 상태 섬의 4단계(보냄·연결·생각·답변) 소요 시간
+    const marks = statRef.current?.marks || {};
+    if (!marks[p]) bumpStat({ marks: { ...marks, [p]: now } });
     // 서버가 모델을 고르는 과정(progress) — 누구에게 묻는 중이고, 누가 왜 떨어졌나
     if (p === "try") { setStat({ phase: "try", tryLabel: info.label, at: now }); return; }
     if (p === "fail") { setStat({ trail: [...(statRef.current?.trail || []), { label: info.label, why: info.why }], at: now }); return; }
@@ -882,120 +1013,25 @@ export default function VerbatimReader() {
     jobRef.current?.ac.abort();               // 앞의 요청이 남아 있으면 먼저 끊는다
     const ac = new AbortController();
     jobRef.current = { ac, sid };
-    setStat({ running: true, phase: "send", t0: Date.now(), at: Date.now(), chars: 0, step, engine: "", model: "" });
+    statRef.current = null; // 앞 요청의 떨어진 모델·단계 기록이 섞이지 않게
+    const now = Date.now();
+    setStat({ running: true, phase: "send", t0: now, at: now, chars: 0, step, engine: "", model: "", marks: { send: now } });
     return ac;
+  };
+  /* 끝난 요청은 lastRun 으로 남겨 상태 섬이 "완료 · 4.2초"를 잠깐 보여 주고, 펼치면 경과를 되짚을 수 있게 한다.
+     outcome 은 부르는 쪽이 bumpStat 으로 적는다(없으면 답이 흐르기 시작했는지로 가늠). */
+  const [lastRun, setLastRun] = useState(null);
+  const keepRun = (outcome) => {
+    const st = statRef.current;
+    if (st?.running) setLastRun({ ...st, running: false, end: Date.now(), outcome: outcome || st.outcome || (st.phase === "stream" ? "done" : "error") });
   };
   const endJob = (ac) => {
     if (jobRef.current && !isCur(ac)) return;  // 이미 다음 요청이 자리를 잡았다
+    keepRun();
     jobRef.current = null;
     setStat(null);
   };
-  const stopAsk = () => { jobRef.current?.ac.abort(); jobRef.current = null; setStat(null); };
-
-  /* 상태 카드 한 줄 + 왜 이 모델인지 + 떨어진 모델들.
-     예전엔 첫 글자 전까지 서버가 뭘 하는지 몰라 "차례를 기다리는 중"과 4칸 막대(보냄·배정·생각·답변)뿐이었고,
-     서버가 몰래 모델을 갈아타도 화면엔 안 보였다. 이제 서버가 try/fail/pick 을 흘려 준다(progress). */
-  const PICK_WHY = { auto: "자동 1순위", picked: "직접 고른 모델", fallback: "앞 모델이 안 돼서 넘어옴", cont: "끊겨서 이어 쓰는 중" };
-  const statView = useMemo(() => {
-    const st = aiStat;
-    if (!st?.running) return null;
-    const sec = Math.max(0, Math.round((Date.now() - st.t0) / 1000));
-    const gap = Math.max(0, Math.round((Date.now() - (st.at || st.t0)) / 1000));
-    const who = st.pickLabel || (st.model ? st.model.split("/").pop() : "");
-    const step = st.step ? `${st.step} · ` : "";
-    const base = { why: PICK_WHY[st.pickWhy] || "", trail: st.trail || [] };
-    if (st.phase === "send") return { ...base, text: `${step}보내는 중 · ${sec}초`, warn: sec * 1000 >= STALL_WAIT };
-    if (st.phase === "try") return { ...base, text: `${step}${st.tryLabel}에 묻는 중 · ${sec}초`, warn: false };
-    if (st.phase === "nap") return { ...base, text: `모두 막혀 ${st.napSec}초 쉬고 다시 시도 · ${sec}초`, warn: true };
-    /* 속생각이 흐르는 동안은 답이 한 글자도 안 나오지만 모델은 분명히 살아 있다 — 경고하지 않는다. */
-    if (st.phase === "think")
-      return { ...base, text: `${step}${who} 생각하는 중 · ${st.think || 0}자 · ${sec}초`, warn: false };
-    if (st.phase === "wait") {
-      const warn = gap * 1000 >= STALL_WAIT;
-      return {
-        ...base,
-        text: warn ? `${step}${who} — ${gap}초째 첫 글자가 없습니다` : `${step}${who} 계산 중 · ${sec}초`,
-        warn,
-      };
-    }
-    const warn = gap * 1000 >= STALL_GAP;
-    return {
-      ...base,
-      text: warn
-        ? `${step}${who} — ${gap}초째 멈춰 있습니다`
-        : `${step}${who} 답하는 중 · ${st.chars || 0}자 · ${sec}초`,
-      warn,
-    };
-  }, [aiStat, statTick]);
-
-  /* ── 질문 탭 스크롤 ──
-     새 문답은 맨 위("최신")에 꽂힌다. 그런데 예전엔
-     (1) 탭을 오가거나 시트를 여닫기만 해도 맨 위로 튀었고(스크롤 칸이 새로 그려지면서 0 이 된다),
-     (2) 아래의 지난 답을 읽는 동안 위에서 새 답이 자라면 읽던 글이 아래로 밀려 내려갔다
-         — 아이패드 사파리는 브라우저 스크롤 고정(overflow-anchor)이 없다.
-     그래서: 맨 위로 올리는 건 **내가 질문을 보냈을 때와 대화를 새로 열었을 때만**, 그 밖엔 대화마다 읽던 자리를
-     기억해 되돌리고, 내용 높이가 바뀌면 화면 맨 위에 걸친 문답을 기준점 삼아 그 자리를 붙잡는다. */
-  const panesRef = useRef(null);
-  const askInRef = useRef(null);
-  const askPos = useRef({});      // 대화 id → 읽던 scrollTop
-  const askLen = useRef({});      // 대화 id → 마지막으로 본 메시지 수
-  const askAnchor = useRef(null); // { el, off } — 화면 맨 위에 걸친 칸과 그 칸의 위쪽 어긋남
-  const [jumpUp, setJumpUp] = useState(false);
-  const jumpRef = useRef(false);
-
-  const pinAnchor = () => {
-    const el = panesRef.current;
-    const box = askInRef.current;
-    if (!el || !box) return;
-    const top = el.scrollTop;
-    const hit = [...box.children].find((c) => c.offsetTop + c.offsetHeight > top);
-    askAnchor.current = top > 4 && hit ? { el: hit, off: hit.offsetTop - top } : null;
-  };
-  const onAskScroll = () => {
-    const el = panesRef.current;
-    if (!el) return;
-    askPos.current[curSessRef.current] = el.scrollTop;
-    pinAnchor();
-    const far = el.scrollTop > 240;
-    if (far !== jumpRef.current) { jumpRef.current = far; setJumpUp(far); }
-  };
-
-  useEffect(() => {
-    if (tab !== "ask" || !sheetOpen) return;
-    const el = panesRef.current;
-    if (!el) return;
-    const prev = askLen.current[curSess];
-    askLen.current[curSess] = askLog.length;
-    const grew = prev !== undefined && askLog.length > prev;
-    requestAnimationFrame(() => {
-      el.scrollTop = grew ? 0 : askPos.current[curSess] || 0;
-      onAskScroll();
-    });
-  }, [askLog.length, curSess, tab, sheetOpen]);
-
-  // 내용 높이가 바뀌면(위에서 새 답이 자람·상태 카드가 뜨고 사라짐) 기준점을 제자리로
-  useEffect(() => {
-    if (tab !== "ask" || !sheetOpen) return;
-    const box = askInRef.current;
-    const el = panesRef.current;
-    if (!box || !el) return;
-    const ro = new ResizeObserver(() => {
-      const a = askAnchor.current;
-      if (!a || !a.el.isConnected) return;
-      const want = a.el.offsetTop - a.off;
-      if (Math.abs(want - el.scrollTop) > 1) el.scrollTop = want;
-    });
-    ro.observe(box);
-    return () => ro.disconnect();
-  }, [tab, sheetOpen]);
-
-  const ttlLeft = useMemo(() => {
-    if (!sess) return "";
-    const ms = SESS_TTL - (Date.now() - (sess.at || 0));
-    if (ms <= 0) return "";
-    const min = Math.ceil(ms / 60000);
-    return min >= 60 ? `${Math.floor(min / 60)}시간 ${min % 60}분 남음` : `${min}분 남음`;
-  }, [sess, nowTick]);
+  const stopAsk = () => { keepRun("stopped"); jobRef.current?.ac.abort(); jobRef.current = null; setStat(null); };
 
   /* 로그인 상태 확인 */
   useEffect(() => {
@@ -1060,13 +1096,6 @@ export default function VerbatimReader() {
 
   const refreshModels = refreshHealth; // 답이 끝날 때마다 — 자동 순서가 방금 결과로 바뀌었을 수 있다
 
-  /* 드롭다운이 열려 있는 동안만 저장값을 2초마다 다시 읽는다. 읽기는 2ms 짜리라 부담이
-     없고, 서버가 뒤에서 다시 재고 있는 값이 보고 있는 사이에 채워진다. 닫으면 멈춘다. */
-  useEffect(() => {
-    if (!mdlMenuOpen) return;
-    const t = setInterval(refreshHealth, 2000);
-    return () => clearInterval(t);
-  }, [mdlMenuOpen]);
 
   /* 상태 한 줄 요약. 판단이 애매하면 아무 말도 안 하는 쪽을 고른다 —
      멀쩡한 모델을 "붐빈다"고 적어 두는 게 제일 나쁘다(note 에서 수치를 걷어낸 이유). */
@@ -1729,24 +1758,9 @@ export default function VerbatimReader() {
   /* 프로바이더 선택과 폴백은 서버가 처리한다. 어느 쪽이 응답했는지는 X-Engine 헤더로 온다. */
   const ask = useCallback(async (system, user, onDelta, signal, opts) => {
     try {
-      const { text, engine } = await callServer(cfgRef.current, system, user, onDelta, signal, opts);
-      if (engine) setEngine(engine);
-      return text;
-    } catch (e) {
-      if (e.name === "AuthError") setAuthed(false);
-      throw e;
-    }
-  }, []);
-
-  /* ask() 와 같지만 질문 탭 모델을 그때그때 다른 값으로 지정할 수 있다 — 리모트(폰)가
-     고른 모델로 답해야 하는데, cfgRef.current.askModel 을 건드리면 동시에 도는 아이패드
-     자체 질문과 서로 값을 덮어써서 경합한다. */
-  const remoteAsk = useCallback(async (system, user, model, onDelta, signal, opts) => {
-    try {
-      const { text, engine } = await callServer(
-        { ...cfgRef.current, askModel: model || cfgRef.current.askModel },
-        system, user, onDelta, signal, opts
-      );
+      // opts.askModel: 이 질문만 다른 모델로(폰에서 고른 모델) — cfgRef 를 건드리지 않는다
+      const cfg = opts?.askModel ? { ...cfgRef.current, askModel: opts.askModel } : cfgRef.current;
+      const { text, engine } = await callServer(cfg, system, user, onDelta, signal, opts);
       if (engine) setEngine(engine);
       return text;
     } catch (e) {
@@ -1816,12 +1830,20 @@ export default function VerbatimReader() {
 
   const renderPage = async (n) => {
     if (renderedRef.current.has(n) || queueRef.current.has(n)) return;
+    const job = { task: null };
     queueRef.current.add(n);
+    jobsRef.current.set(n, job);
+    /* 배율이 바뀌었거나(relayout 이 layoutKeyRef 를 새 객체로 바꾼다) 문서가 바뀌었거나 이 쪽이 치워졌으면
+       하던 일을 버린다. 예전엔 옛 배율 렌더가 끝까지 돌아서, 확대·축소를 몇 번 하면 워커에 옛 렌더가
+       줄줄이 쌓이고 그동안 새 쪽은 흰 캔버스로 기다렸다(2026-10-06 실기기 "하얗게 보인다"). */
+    const key = layoutKeyRef.current;
+    const pdf = pdfRef.current;
+    const stale = () => layoutKeyRef.current !== key || pdfRef.current !== pdf || jobsRef.current.get(n) !== job;
+    let cv = null, drawn = false;
     try {
-      const pdf = pdfRef.current;
       const page = await pdf.getPage(n);
       const el = pagesRef.current[n - 1];
-      if (!el) return;
+      if (!el || stale()) return;
       const vp = page.getViewport({ scale: scaleRef.current * zoomRef.current });
       el.style.width = vp.width + "px";
       el.style.height = vp.height + "px";
@@ -1843,7 +1865,7 @@ export default function VerbatimReader() {
       if (fit < 1) dpr *= fit;
       // 상한에 걸려 흐려진 쪽 — 화면에 보이는 부분만 선명하게 다시 그린다(renderDetails)
       el.dataset.lowres = fit < 0.98 ? "1" : "";
-      const cv = document.createElement("canvas");
+      cv = document.createElement("canvas");
       cv.width = Math.floor(vp.width * dpr);
       cv.height = Math.floor(vp.height * dpr);
       const ctx = cv.getContext("2d", { alpha: false });
@@ -1852,17 +1874,20 @@ export default function VerbatimReader() {
       // 이전 배율의 캔버스가 있으면 그 '아래'에 깔아 두고 그린다 — 완성될 때까지
       // 흐릿한 이전 그림이 보이고, 흰 화면이 번쩍이지 않는다.
       el.insertBefore(cv, el.firstChild);
-      await page.render({
+      job.task = page.render({
         canvasContext: ctx, viewport: vp,
         transform: dpr !== 1 ? [dpr, 0, 0, dpr, 0, 0] : null,
         // PDF 주석을 필기로 가져온 문서는 원본 주석 외관을 끈다 — 안 그러면 같은 획이 두 겹으로 보이고,
         // 여백에서 지우거나 옮겨도 원본이 그 자리에 남는다
         annotationMode: annotsRef.current?.imported
           ? window.pdfjsLib.AnnotationMode.DISABLE : window.pdfjsLib.AnnotationMode.ENABLE,
-      }).promise;
+      });
+      await job.task.promise;
+      if (stale()) return;
       // 완성 — 이전 캔버스(선명화 조각 포함)와 남아 있던 텍스트 레이어를 걷어낸다.
       // 필기(svg.vb-ink)는 벡터라 배율이 바뀌어도 그대로 두면 된다
       el.querySelectorAll("canvas").forEach((c) => { if (c !== cv) c.remove(); });
+      drawn = true;
       el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
       el.dataset.w1 = String(vp.width / vp.scale); // 이 쪽의 배율 1 크기 — 필기 좌표 환산 기준
       el.dataset.h1 = String(vp.height / vp.scale);
@@ -1871,13 +1896,18 @@ export default function VerbatimReader() {
       layer.className = "vb-tl";
       el.appendChild(layer);
       await buildTextLayer(page, vp, layer, n);
+      if (stale()) { layer.remove(); return; }
       if (markRef.current?.page === n) applyMarks(); // 재배치로 지워진 하이라이트 복원
       renderedRef.current.add(n);
+      leftRef.current.delete(n);
       if (el.dataset.lowres) scheduleDetail();
     } catch (e) {
-      console.error("page " + n, e);
+      if (e?.name !== "RenderingCancelledException") console.error("page " + n, e);
     } finally {
-      queueRef.current.delete(n);
+      // 끝까지 못 간 렌더의 흰 캔버스는 걷는다 — 옛 캔버스(흐릿해도 그림)가 다시 보이게
+      if (cv && !drawn) cv.remove();
+      else if (drawn && !renderedRef.current.has(n)) leftRef.current.add(n); // 다 그렸는데 낡았다 — 그림은 두고 멀어지면 치운다
+      if (jobsRef.current.get(n) === job) { jobsRef.current.delete(n); queueRef.current.delete(n); }
     }
   };
 
@@ -1977,18 +2007,51 @@ export default function VerbatimReader() {
     return () => { view.removeEventListener("scroll", on); clearTimeout(detailTimerRef.current); };
   }, []);
 
-  const prune = () => {
-    for (const n of [...renderedRef.current]) {
-      if (Math.abs(n - curRef.current) > 4) {
-        const el = pagesRef.current[n - 1];
-        if (el) {
-          el.querySelectorAll("canvas, svg.vb-ink").forEach((c) => c.remove());
-          el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
-        }
-        detailRef.current.get(n)?.cancel();
-        renderedRef.current.delete(n);
-        dataRef.current[n - 1] = null;
+  const cancelJob = (n) => {
+    const j = jobsRef.current.get(n);
+    if (!j) return;
+    j.task?.cancel();
+    jobsRef.current.delete(n);
+    queueRef.current.delete(n);
+  };
+  const cancelJobs = () => { for (const n of [...jobsRef.current.keys()]) cancelJob(n); };
+
+  /* 그릴 쪽과 치울 쪽을 **화면 좌표로** 정한다 — 보이는 범위 위아래 SYNC_M 픽셀 안의 쪽은 그리고,
+     거기서 2쪽 더 벗어난 쪽은 치운다. 스크롤마다(rAF)와 IntersectionObserver 보고 때 돈다.
+
+     예전엔 IO 의 '들어옴' 보고로만 그리고 "현재 쪽 ±4" 밖을 치웠다. 축소하면 쪽이 작아져 1000px 여유
+     안에 ±4 보다 많은 쪽이 들어오는데, 그 쪽들은 그리자마자 치워지고, IO 는 경계를 **넘을 때만** 보고하니
+     나중에 화면 한가운데로 와도 다시 안 그려졌다 — 축소한 채 스크롤하면 흰 쪽만 남던 원인
+     (2026-10-06 실기기, 37쪽 슬라이드 19~22쪽이 전부 흰색). */
+  const SYNC_M = 1000;
+  const syncPages = () => {
+    const view = viewRef.current;
+    const pages = pagesRef.current;
+    if (!view || !pages.length || !pdfRef.current || gestureRef.current) return;
+    if (document.visibilityState === "hidden") return;
+    pickCur();
+    const vr = view.getBoundingClientRect();
+    const a = pageAt(pages, vr.top - SYNC_M);
+    const b = pageAt(pages, vr.bottom + SYNC_M);
+    const c = curRef.current;
+    const want = [];
+    for (let n = a; n <= b; n++) want.push(n);
+    // 가운데 쪽부터 — 워커는 받은 순서대로 그린다
+    want.sort((x, y) => Math.abs(x - c) - Math.abs(y - c));
+    for (const n of want) renderPage(n);
+    for (const n of new Set([...renderedRef.current, ...jobsRef.current.keys(), ...leftRef.current])) {
+      if (n >= a - 2 && n <= b + 2) continue;
+      cancelJob(n);
+      if (!renderedRef.current.has(n) && !leftRef.current.has(n)) continue;
+      leftRef.current.delete(n);
+      const el = pagesRef.current[n - 1];
+      if (el) {
+        el.querySelectorAll("canvas, svg.vb-ink").forEach((cv) => cv.remove());
+        el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
       }
+      detailRef.current.get(n)?.cancel();
+      renderedRef.current.delete(n);
+      dataRef.current[n - 1] = null;
     }
   };
 
@@ -2015,11 +2078,8 @@ export default function VerbatimReader() {
 
   const observe = () => {
     ioRef.current?.disconnect();
-    ioRef.current = new IntersectionObserver((ents) => {
-      for (const e of ents) if (e.isIntersecting) renderPage(+e.target.dataset.n);
-      pickCur();
-      prune();
-    }, { root: viewRef.current, rootMargin: "1000px 0px", threshold: 0 });
+    ioRef.current = new IntersectionObserver(() => syncPages(),
+      { root: viewRef.current, rootMargin: SYNC_M + "px 0px", threshold: 0 });
     pagesRef.current.forEach((el) => el && ioRef.current.observe(el));
   };
 
@@ -2053,7 +2113,8 @@ export default function VerbatimReader() {
     setLoadErr("");
     try {
       renderedRef.current.clear();
-      queueRef.current.clear();
+      leftRef.current.clear();
+      cancelJobs();
       dataRef.current = [];
       bookTextRef.current = [];
       const pdf = await window.pdfjsLib.getDocument({
@@ -2354,8 +2415,9 @@ export default function VerbatimReader() {
       // 텍스트 레이어는 옛 배율 좌표라 어긋나므로 걷어낸다.
       el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
     }
+    for (const n of renderedRef.current) leftRef.current.add(n);
     renderedRef.current.clear();
-    queueRef.current.clear();
+    cancelJobs();
     dataRef.current = [];
 
     /* 새 크기가 반영된 뒤(첫 getBoundingClientRect 가 레이아웃을 확정시킨다) 목표를
@@ -2374,6 +2436,28 @@ export default function VerbatimReader() {
       }
       curRef.current = keep;
       setCurPage(keep);
+      /* 대입한 자리를 몇 프레임 지킨다. 2026-10-06 37쪽 슬라이드 7쪽에서 축소하자 19쪽에 가 있었는데,
+         이건 "scrollTop 이 옛 값 그대로 남고 쪽만 작아졌다"와 숫자가 맞는다(옛 위치 ÷ 배율 0.35 ≈ 19쪽).
+         iOS 는 스크롤 위치를 UI 프로세스가 따로 들고 있어서, 손가락이 남아 있거나 관성이 살아 있으면
+         우리가 넣은 값을 제 값으로 덮어쓴다. 사용자가 새로 만지기 전까지만 되돌린다. */
+      const want = { top: view.scrollTop, left: view.scrollLeft };
+      const key = layoutKeyRef.current;
+      let touched = false;
+      const off = () => { touched = true; };
+      view.addEventListener("touchstart", off, { passive: true });
+      view.addEventListener("wheel", off, { passive: true });
+      const hold = () => {
+        if (touched || layoutKeyRef.current !== key) return;
+        if (Math.abs(view.scrollTop - want.top) > 4) view.scrollTop = want.top;
+        if (Math.abs(view.scrollLeft - want.left) > 4) view.scrollLeft = want.left;
+      };
+      requestAnimationFrame(() => { hold(); requestAnimationFrame(hold); });
+      setTimeout(hold, 120);
+      setTimeout(() => {
+        hold();
+        view.removeEventListener("touchstart", off);
+        view.removeEventListener("wheel", off);
+      }, 350);
     }
     /* 관찰은 스크롤을 고친 **다음에** 붙인다. 사파리는 observe() 의 첫 보고를 0ms 타이머로
        흘려서 rAF 보다 먼저 올 수 있는데, 먼저 붙이면 아직 안 고친 위치를 기준으로
@@ -2407,11 +2491,12 @@ export default function VerbatimReader() {
     let raf = 0;
     const on = () => {
       if (raf) return;
-      raf = requestAnimationFrame(() => { raf = 0; pickCur(); });
+      // 그리기·치우기도 같이 — IO 는 경계를 넘을 때만 깨어나서 그것만으론 빈 쪽이 남았다(syncPages)
+      raf = requestAnimationFrame(() => { raf = 0; syncPages(); });
     };
     view.addEventListener("scroll", on, { passive: true });
     return () => { view.removeEventListener("scroll", on); cancelAnimationFrame(raf); };
-    // pickCur 은 ref 만 읽으므로 첫 렌더의 클로저를 그대로 써도 안전하다
+    // syncPages·renderPage 는 ref 만 읽으므로 첫 렌더의 클로저를 그대로 써도 안전하다(relayout 도 그렇게 쓴다)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2692,7 +2777,7 @@ export default function VerbatimReader() {
     const view = viewRef.current;
     const stage = stageRef.current;
     if (!view || !stage) return;
-    let pinching = false, startD = 0, startZoom = 1, factor = 1, lastMid = null;
+    let pinching = false, startD = 0, startZoom = 1, factor = 1, lastMid = null, ids = new Set();
     const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
     const mid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
     const reset = () => {
@@ -2735,8 +2820,19 @@ export default function VerbatimReader() {
       }
     };
     const onStart = (e) => {
-      // 핀치 중인데 손가락이 2개 이하로 새로 닿았다 — 지난 제스처의 끝을 놓친 것
-      if (pinching && e.touches.length <= 2) abort();
+      if (pinching) {
+        // 한 손가락을 남긴 채 다른 손가락을 다시 댔다 — 같은 핀치를 지금 배율에서 이어 간다
+        const kept = [...e.touches].filter((t) => ids.has(t.identifier));
+        if (e.touches.length === 2 && kept.length === 1) {
+          hook(e);
+          ids = new Set([...e.touches].map((t) => t.identifier));
+          startD = dist(e.touches) / factor;
+          lastMid = mid(e.touches);
+          return;
+        }
+        // 그 밖에 손가락이 2개 이하로 새로 닿았다 — 지난 제스처의 끝을 놓친 것
+        if (e.touches.length <= 2) abort();
+      }
       if (e.touches.length !== 2 || !pdfRef.current) return;
       // 필기 중 손바닥이 닿아 생긴 '두 손가락'은 핀치가 아니다
       if (inkOnRef.current && [...e.touches].some((t) => t.touchType === "stylus")) return;
@@ -2746,6 +2842,7 @@ export default function VerbatimReader() {
       pinching = true;
       gestureRef.current = true;
       hook(e);
+      ids = new Set([...e.touches].map((t) => t.identifier));
       startD = dist(e.touches);
       startZoom = zoomRef.current;
       factor = 1;
@@ -2756,7 +2853,15 @@ export default function VerbatimReader() {
       stage.style.transformOrigin = `${lastMid.x - sr.left}px ${lastMid.y - sr.top}px`;
     };
     const onMove = (e) => {
-      if (!pinching || e.touches.length !== 2) return;
+      if (!pinching) return;
+      /* 한 손가락을 먼저 뗀 뒤 남은 손가락 — 다 뗄 때까지 확정을 미루므로 그동안 네이티브 스크롤을
+         막는다. 막을 수 없으면(이미 네이티브가 가져갔으면) 지금 확정한다. */
+      if (e.touches.length === 1) {
+        if (e.cancelable) e.preventDefault();
+        else commit();
+        return;
+      }
+      if (e.touches.length !== 2) return;
       if (!e.cancelable) {
         // 네이티브 스크롤이 이미 제스처를 가져갔다 — 핀치를 포기한다
         pinching = false;
@@ -2801,8 +2906,16 @@ export default function VerbatimReader() {
       observe();
     };
 
+    /* 확정은 손가락이 **전부** 떨어진 뒤에 한다. 예전엔 하나만 떼도 확정했는데, 그러면 남은
+       손가락이 곧바로 네이티브 스크롤을 시작해 iOS 가 relayout 이 넣은 scrollTop 을 옛 값으로
+       덮어쓸 수 있었다(relayout 의 hold 주석) — 쪽은 작아지고 위치는 그대로라 한참 아래로 갔다. */
     const onEnd = (e) => {
-      if (!pinching || e.touches.length >= 2) return;
+      if (!pinching) return;
+      if (e.touches.length === 0) commit();
+      else ids = new Set([...e.touches].map((t) => t.identifier));
+    };
+    const commit = () => {
+      if (!pinching) return;
       pinching = false;
       unhook();
       // 앵커는 끝나는 순간의 중점에서 계산한다 (변환이 걸린 채로 측정)
@@ -2956,22 +3069,29 @@ export default function VerbatimReader() {
   }, [numPages]);
 
   /* ── 질문 ── */
-  const sendAsk = async () => {
-    const q = askVal.trim();
+  const sendAsk = async (text) => {
+    // text: 빈 화면의 추천 질문처럼 입력창을 거치지 않고 곧바로 보낼 때
+    const typed = typeof text !== "string";
+    const q = (typed ? askVal : text).trim();
     if (!q || asking) return;
-    setAskVal("");
+    if (typed) setAskVal("");
 
+    setAsking(true); // 새 대화를 여는 동안 두 번 눌리지 않게
     // 세션이 없으면(처음이거나 2시간이 지나 청소됐으면) 첫 질문을 제목 삼아 하나 연다.
-    const sid = curSessRef.current && findSess(curSessRef.current)
-      ? curSessRef.current
-      : newSess(q.length > 16 ? q.slice(0, 16) + "…" : q);
+    let sid = curSessRef.current && findSess(curSessRef.current) ? curSessRef.current : "";
+    if (!sid) {
+      try { sid = await newSess(q.length > 16 ? q.slice(0, 16) + "…" : q); } catch (e) {
+        setAsking(false); if (typed) setAskVal(q); return;
+      }
+    }
 
     const s = findSess(sid);
     const history = histOf(sid);              // 반드시 이번 문답을 넣기 전에 뽑는다
     const idx = (s?.msgs.length || 0) + 1;    // 방금 넣을 ai 자리
+    const img = sendFig && s?.img ? s.img : "";
     // pg: 이 질문을 어느 쪽에서 했나 — 뒤의 질문들이 이 쪽을 근거 범위에 계속 붙인다(buildAskContext)
-    addMsgs(sid, [{ role: "me", text: q, pg: curRef.current }, { role: "ai", text: "", live: true }]);
-    await answerInto(sid, idx, q, history);
+    addMsgs(sid, [{ role: "me", text: q, pg: curRef.current, ...(img ? { img } : {}) }, { role: "ai", text: "", live: true }]);
+    await answerInto(sid, idx, q, history, { img });
   };
 
   /* 마지막 답을 지우고 같은 질문을 다시 보낸다 — 실패했거나, 모델을 바꿔 다시 듣고 싶을 때.
@@ -2985,23 +3105,24 @@ export default function VerbatimReader() {
     const qm = s?.msgs[idx - 1];
     if (idx < 1 || qm?.role !== "me" || qm.hist || s.msgs[idx]?.live) return;
     const history = histOf(sid, idx - 1);
-    patchMsg(sid, idx, { text: "", live: true, err: "", stopped: false, swap: null });
-    await answerInto(sid, idx, qm.text, history);
+    patchMsg(sid, idx, { text: "", live: true, err: "", stopped: false, swap: null, by: null });
+    await answerInto(sid, idx, qm.text, history, { img: qm.img || "", model: qm.model });
   };
 
-  /* 답 하나를 채운다(새 질문·다시 답하기 공용). idx 는 채울 ai 자리, history 는 그 앞의 문답. */
-  const answerInto = async (sid, idx, q, history) => {
+  /* 답 하나를 채운다(새 질문·다시 답하기·폰 질문 공용). idx 는 채울 ai 자리, history 는 그 앞의 문답.
+     opts.img: 딸려 보낼 그림 id(서버에 저장된 것), opts.model: 폰에서 고른 모델(없으면 이 기기의 선택). */
+  const answerInto = async (sid, idx, q, history, opts = {}) => {
     setAsking(true);
     const s = findSess(sid);
 
-    /* 그림이 딸린 세션의 질문: 옮겨 적은 글(imgDesc)이 없으면 그림째 Gemini 에게 보낸다(visionDirect).
+    /* 그림이 딸린 질문: 옮겨 적은 글(imgDesc, 같은 그림의 것)이 있으면 그 글로, 없으면 그림째 Gemini 에게(visionDirect).
        Gemini 가 막혀 있으면 그 자리에서 비전 모델이 옮겨 적고, 고른 질문 탭 모델이 그 글로 답한다 —
        옮긴 글은 세션에 남아 다음 질문부터는 곧장 텍스트로 간다. */
     let image = "";
     let figBlock = "";
-    if (sendFig && s?.img) {
-      if (s.imgDesc) figBlock = `\n\n${FIG_NOTE}\n${s.imgDesc}`;
-      else image = s.img; // 그림째 Gemini 에게(아래 visionDirect). 막히면 그 자리에서 옮겨 적는다
+    if (opts.img) {
+      if (s?.imgDesc && (s.imgDescFor || s.img) === opts.img) figBlock = `\n\n${FIG_NOTE}\n${s.imgDesc}`;
+      else { try { image = await getImg(sid, opts.img); } catch {} }
     }
 
     /* 본문·쪽·짚은 문장은 user 턴이 아니라 system 에 싣는다. user 턴에 얹으면 지난 턴들은
@@ -3022,6 +3143,7 @@ export default function VerbatimReader() {
     const t0 = Date.now();
     const by = { label: "", trail: [], first: 0 };
     const ac = startJob(sid, image ? "그림과 함께" : (figBlock ? "그림 설명과 함께" : ""));
+    jobRef.current.i = idx; // 폰의 [멈추기](ask-cancel)가 어느 답인지 알아보게
     try {
       const hook = phaseHook(ac, () => buf.length);
       const onPhase = (p, info) => {
@@ -3035,11 +3157,18 @@ export default function VerbatimReader() {
         if (p === "stream" && !by.first) by.first = Math.round((Date.now() - t0) / 1000);
         hook(p, info);
       };
-      const onDelta = (c) => { buf += c; patchMsg(sid, idx, { text: buf }); };
+      const onDelta = (c) => {
+        buf += c;
+        patchMsg(sid, idx, { text: buf }, false); // 흐르는 동안은 로컬만 — 정착할 때 서버에
+        relayAsk({ sid, i: idx, text: buf, run: statRef.current });
+      };
+      const onPhaseR = onPhase;
+      const onPhaseRelay = (p, info) => { onPhaseR(p, info); if (p !== "tick") relayAsk({ sid, i: idx, text: buf, run: statRef.current }); };
+      const mdl = opts.model !== undefined && opts.model !== "" ? { askModel: opts.model } : {};
       let done = false;
       if (image) {
         try {
-          await ask(sysBase, q, onDelta, ac.signal, { ask: true, history, image, visionDirect: true, onPhase });
+          await ask(sysBase, q, onDelta, ac.signal, { ask: true, history, image, visionDirect: true, onPhase: onPhaseRelay, ...mdl });
           done = true;
         } catch (e) {
           if (e.name === "AbortError" || e.name === "AuthError" || buf) throw e;
@@ -3048,24 +3177,25 @@ export default function VerbatimReader() {
           let desc = "";
           await ask(SYS_CAP_DESCRIBE, `[${curRef.current}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
             (c) => { desc += c; }, ac.signal, { image });
-          if (!desc.trim()) throw new Error("그림을 읽지 못했습니다 — 잠시 뒤 다시 시도하세요.");
-          patchSess(sid, { imgDesc: desc.trim() });
+          if (!desc.trim()) throw new Error("그림을 읽지 못했어요. 잠시 후 다시 시도해 주세요.");
+          patchSess(sid, { imgDesc: desc.trim(), imgDescFor: opts.img });
           image = "";
           figBlock = `\n\n${FIG_NOTE}\n${desc.trim()}`;
         }
       }
       if (!done) await ask(sysBase + figBlock, q, onDelta, ac.signal, {
         ask: true, history,
-        onPhase,
+        onPhase: onPhaseRelay, ...mdl,
       });
       // 끊긴 걸 표시해 두지 않으면 답이 원래 그렇게 끝난 줄 안다.
       // swap 은 text 가 아니라 별도 칸에 둔다 — text 에 섞으면 다음 턴 히스토리까지 따라간다.
       patchMsg(sid, idx, {
-        text: buf + (cut ? "\n\n*(길이 제한에 걸려 여기서 끊겼습니다 — 이어서 물어보세요)*" : ""),
+        text: buf + (cut ? "\n\n*(답변이 길어 여기서 끊겼어요. \"이어서\"라고 보내면 계속해요.)*" : ""),
         live: false,
         swap: swap && { wanted: modelName(swap.wanted), model: modelName(swap.model) },
         by: by.label ? { ...by, trail: by.trail.slice(-4) } : null,
       });
+      if (isCur(ac)) bumpStat({ outcome: "done" });
       maybeFold(sid);
       refreshModels();
     } catch (e) {
@@ -3074,18 +3204,46 @@ export default function VerbatimReader() {
          사라지고 "답을 받지 못했습니다"만 남았다. 아이패드에서 망이 잠깐 끊기거나 앱을
          나갔다 오면 늘 이 경로다. 서버 로그에는 아무것도 안 남는다(연결만 끊긴 것이라). */
       const stopped = e.name === "AbortError";
+      if (isCur(ac)) bumpStat({ outcome: stopped ? "stopped" : "error", err: e.message });
       patchMsg(sid, idx, {
         text: buf,
         live: false,
         stopped: stopped && !!buf,
         // 답이 이미 있으면 "못 받았다"가 아니라 "여기서 끊겼다"가 맞는 말이다
-        err: stopped ? "" : buf ? "연결이 끊겨 여기서 멈췄습니다 — " + e.message : e.message,
+        err: stopped ? "" : e.message,
       });
     } finally {
       endJob(ac);
       setAsking(false);
+      relayAsk({ sid, i: idx, done: true }, true);
     }
   };
+
+  /* ── 다른 기기(폰)가 남긴 질문에 답한다 ──
+     답 자리가 pending 인데 아무도 맡지 않았으면(또는 맡은 기기가 3분 넘게 조용하면) 이 창이 맡는다.
+     문서가 열려 있어야 한다 — 책 본문을 쥔 게 이 창이기 때문이다. 한 번에 하나씩, 내 질문이 도는 중이면 기다린다. */
+  const peerBusy = useRef(new Set());
+  useEffect(() => {
+    if (authed !== true || asking || !numPages) return;
+    for (const s of sessions) {
+      const i = s.msgs.length - 1;
+      const a = s.msgs[i], q = s.msgs[i - 1];
+      if (!a || a.role !== "ai" || !a.pending || a.live || a.text || q?.role !== "me") continue;
+      if (a.claim && a.claim !== deviceRef.current && Date.now() - (a.claimAt || 0) < 180_000) continue;
+      const key = s.id + ":" + i;
+      if (peerBusy.current.has(key)) continue;
+      peerBusy.current.add(key);
+      sapi(`/api/remote/sessions/${s.id}/msgs/${i}/claim`, "POST", { by: deviceRef.current })
+        .then(() => {
+          mapSess(s.id, (x) => ({ ...x, msgs: x.msgs.map((m, k) => (k === i ? { ...m, live: true } : m)) }));
+          return answerInto(s.id, i, q.text, histOf(s.id, i - 1), { img: q.img || "", model: q.model });
+        })
+        .catch(() => {})
+        .finally(() => peerBusy.current.delete(key)); // 폰에서 [다시 답변]을 누르면 같은 자리가 다시 pending 이 된다
+      break;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, asking, authed, numPages]);
 
   /* ── 긴 대화 접기 ──
      최근 FOLD_KEEP 개 메시지(6문답)는 그대로 두고, 그보다 오래된 것이 2문답 이상 쌓이면 요약 하나로 접는다.
@@ -3116,168 +3274,6 @@ export default function VerbatimReader() {
     }
   };
 
-  const [copied, setCopied] = useState("");
-  const copyAnswer = async (key, text) => {
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // 홈 화면 웹앱에서 clipboard API 가 막힐 때 — 숨긴 textarea 로
-      const ta = document.createElement("textarea");
-      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
-      document.body.appendChild(ta); ta.select();
-      try { document.execCommand("copy"); } catch {}
-      ta.remove();
-    }
-    setCopied(key);
-    setTimeout(() => setCopied((k) => (k === key ? "" : k)), 1500);
-  };
-
-  /* ── 리모트(폰)가 만든 질문을 아이패드가 실행 ──
-     폰은 서버 세션(/api/remote/sessions)에 질문 + 빈 답 자리만 만든다(src/Remote.jsx
-     sendChat). 여기 아이패드 쪽 로컬 질문 탭(sessRef/sendAsk, localStorage 에 저장)과는
-     완전히 별개의 저장소다 — 화면에 그리지 않고 백그라운드로 채우기만 하므로 ref 로만
-     들고 있는다. 세션 전체 사본을 들고 있는 건 history(지난 문답)를 구성하려면
-     그 세션의 지난 메시지가 필요한데, SSE 의 sess-msgs 이벤트는 새로 추가된 것만 주기
-     때문이다 — hello 로 받는 최초 스냅샷에는 전체가 있다. */
-  const remoteSessRef = useRef([]);
-  const remoteBusyRef = useRef(new Set()); // 이미 처리했거나 처리 중인 "세션id:메시지인덱스"
-
-  const processRemoteQ = async (sid, idx) => {
-    const key = sid + ":" + idx;
-    if (remoteBusyRef.current.has(key)) return;
-    remoteBusyRef.current.add(key);
-    const s = remoteSessRef.current.find((x) => x.id === sid);
-    const qMsg = s?.msgs[idx - 1];
-    if (!s || !qMsg) return;
-
-    /* 폰이 그림을 한 번 얹으면 그 뒤 모든 질문에 같은 그림이 다시 붙는다(Remote.jsx 의
-       sess.img). 그걸 그대로 실어 보내면 서버가 매번 비전 체인으로 돌려서, 폰에서 고른
-       모델이 무엇이든 gemma 가 답한다 — 실사용 로그에서 Nemotron 을 골라 놓고 네 턴 내내
-       gemma 가 답한 게 이것이다. 아이패드 쪽(sendAsk)과 똑같이 처리한다: gemma 는 한 번
-       옮겨 적기만 하고, 그 글을 세션에 박아 두고, 답은 늘 고른 모델이 한다.
-       imgDescFor 에 어느 그림의 설명인지 함께 적어 둔다 — 폰이 새 그림으로 갈아 끼우면
-       id 가 달라지므로 따로 지울 필요 없이 저절로 다시 옮겨 적는다. */
-    let image = "";
-    let figBlock = "";
-    if (qMsg.img) {
-      if (s.imgDesc && s.imgDescFor === qMsg.img) {
-        figBlock = `\n\n${FIG_NOTE}\n${s.imgDesc}`;
-      } else {
-        try {
-          const blob = await fetch(u(`/api/remote/sessions/${sid}/image/${qMsg.img}`)).then((r) => r.blob());
-          image = await new Promise((res, rej) => {
-            const fr = new FileReader();
-            fr.onload = () => res(String(fr.result).split(",")[1] || "");
-            fr.onerror = rej;
-            fr.readAsDataURL(blob);
-          });
-        } catch {}
-        // 옮겨적기는 아래에서 Gemini 가 막혔을 때만 한다(그림째 먼저 — sendAsk 와 같은 규칙)
-      }
-    }
-
-    // 답이 이미 있는 지난 문답만 history 로 — 지금 채우려는 자리(idx) 자체는 뺀다.
-    const history = s.msgs.slice(0, idx - 1)
-      .filter((m) => (m.text || "").trim())
-      .map((m) => ({ role: m.role, text: m.text }));
-    const { scope, text } = buildAskContext(history.length ? ASK_CAP_MORE : ASK_CAP);
-    const sys =
-      `${SYS_ASK}\n\n[문서: ${docNameRef.current || "제목 없음"} — 제공 범위: ${scope || "없음"}]\n${text}\n\n` +
-      `[읽는 이가 지금 보고 있는 쪽] ${curRef.current}쪽\n[방금 짚은 문장] ${lastSentRef.current || "(없음)"}`; // 그림 설명(figBlock)은 부를 때 붙인다
-    let buf = "";
-    let cut = false;
-    try {
-      const onPhase = (p) => { if (p === "cut") cut = true; };
-      let done = false;
-      if (image) {
-        try {
-          await remoteAsk(sys, qMsg.text, qMsg.model, (c) => { buf += c; }, undefined,
-            { ask: true, history, image, visionDirect: true, onPhase });
-          done = true;
-        } catch (e) {
-          if (e.name === "AuthError" || buf) throw e;
-          // Gemini 가 막혔다 — 옮겨 적고, 폰에서 고른 모델이 그 글로 답한다
-          let desc = "";
-          await ask(SYS_CAP_DESCRIBE, `[${curRef.current}쪽에서 오려낸 영역] 이 이미지를 옮겨 적어라.`,
-            (c) => { desc += c; }, undefined, { image });
-          if (!desc.trim()) throw new Error("그림을 읽지 못했습니다 — 잠시 뒤 다시 시도하세요.");
-          figBlock = `\n\n${FIG_NOTE}\n${desc.trim()}`;
-          image = "";
-          await fetch(u(`/api/remote/sessions/${sid}`), {
-            method: "PATCH", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ patch: { imgDesc: desc.trim(), imgDescFor: qMsg.img } }),
-          }).catch(() => {});
-        }
-      }
-      if (!done) await remoteAsk(sys + figBlock, qMsg.text, qMsg.model, (c) => { buf += c; }, undefined, {
-        ask: true, history,
-        onPhase,
-      });
-      await fetch(u(`/api/remote/sessions/${sid}/msgs/${idx}`), {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patch: {
-          text: buf + (cut ? "\n\n*(길이 제한에 걸려 여기서 끊겼습니다 — 이어서 물어보세요)*" : ""),
-          pending: false,
-        } }),
-      });
-    } catch (e) {
-      await fetch(u(`/api/remote/sessions/${sid}/msgs/${idx}`), {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patch: { text: buf, pending: false, err: buf ? "연결이 끊겨 여기서 멈췄습니다 — " + e.message : e.message } }),
-      }).catch(() => {});
-    }
-  };
-
-  // 세션의 맨 끝이 "빈 답 + pending" 이면 그 자리가 아직 안 채워진 질문이다.
-  const scanRemotePending = (s) => {
-    const i = s.msgs.length - 1;
-    if (i >= 0 && s.msgs[i]?.role === "assistant" && s.msgs[i]?.pending && !s.msgs[i]?.text) processRemoteQ(s.id, i);
-  };
-
-  /* remoteOn 이 켜져 있는 동안만 붙는다 — 리모트를 안 쓰면 아이패드가 굳이 이 스트림을
-     열어 둘 이유가 없다. hello 로 받는 최초 스냅샷에서 이미 쌓여 있던 미답 질문(아이패드가
-     꺼져 있는 동안 폰이 물어본 것)까지 훑는다. */
-  useEffect(() => {
-    if (!remoteOn) return;
-    const es = new EventSource(u("/api/remote/stream"));
-    es.addEventListener("hello", (e) => {
-      const d = JSON.parse(e.data);
-      remoteSessRef.current = Array.isArray(d.sessions) ? d.sessions : [];
-      for (const s of remoteSessRef.current) scanRemotePending(s);
-    });
-    es.addEventListener("sess-new", (e) => {
-      const s = JSON.parse(e.data);
-      remoteSessRef.current = [s, ...remoteSessRef.current.filter((x) => x.id !== s.id)];
-    });
-    es.addEventListener("sess-del", (e) => {
-      const { id } = JSON.parse(e.data);
-      remoteSessRef.current = remoteSessRef.current.filter((x) => x.id !== id);
-    });
-    es.addEventListener("sess-patch", (e) => {
-      const { id, patch } = JSON.parse(e.data);
-      remoteSessRef.current = remoteSessRef.current.map((s) => (s.id === id ? { ...s, ...patch } : s));
-    });
-    es.addEventListener("sess-msgs", (e) => {
-      const { id, msgs } = JSON.parse(e.data);
-      let updated = null;
-      remoteSessRef.current = remoteSessRef.current.map((s) => {
-        if (s.id !== id) return s;
-        updated = { ...s, msgs: [...s.msgs, ...msgs] };
-        return updated;
-      });
-      if (updated) scanRemotePending(updated);
-    });
-    es.addEventListener("sess-msg-patch", (e) => {
-      const { id, i, patch } = JSON.parse(e.data);
-      remoteSessRef.current = remoteSessRef.current.map((s) => {
-        if (s.id !== id) return s;
-        const msgs = s.msgs.slice();
-        if (msgs[i]) msgs[i] = { ...msgs[i], ...patch };
-        return { ...s, msgs };
-      });
-    });
-    return () => es.close();
-  }, [remoteOn]);
 
   const toggleRemote = () => {
     const v = !remoteOn;
@@ -3286,42 +3282,6 @@ export default function VerbatimReader() {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ on: v }),
     }).catch(() => {});
-  };
-
-  const delSess = (id) => {
-    const left = sessRef.current.filter((s) => s.id !== id);
-    commitSess(left, id === curSessRef.current ? left[0]?.id || "" : curSessRef.current);
-  };
-
-  /* ── 오려내기 "질문"을 폰에도 그대로 얹는다 ──
-     아이패드의 로컬 질문 탭(sessRef)과 서버 세션(/api/remote/sessions)은 완전히 별개
-     저장소라, 오려낸 그림도 따로 올려야 폰이 볼 수 있다. 세션 자체에 img(=imgId)를
-     얹어 두면(질문 텍스트 없이도) 폰이 "그림 첨부됨" 칩으로 보여주고, 사용자가 폰에서
-     직접 물음을 타이핑해 보내면 이미 있는 processRemoteQ 파이프라인이 그대로 답한다.
-     로컬 세션 하나가 여러 번 이어서 캡처될 수 있어 sid → 원격 세션 id 매핑을 들고
-     있다가, 이미 매핑된 세션이면 새로 만들지 않고 img 만 갈아 끼운다. */
-  const remoteMirrorRef = useRef(new Map()); // 로컬 sid -> 원격 sid
-  const mirrorCaptureToRemote = async (localSid, title, dataURL) => {
-    if (!remoteOnRef.current) return;
-    try {
-      const blob = await fetch(dataURL).then((r) => r.blob());
-      let remoteSid = remoteMirrorRef.current.get(localSid);
-      if (!remoteSid || !remoteSessRef.current.some((s) => s.id === remoteSid)) {
-        const s = await fetch(u("/api/remote/sessions"), {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ title }),
-        }).then((r) => r.json());
-        remoteSid = s.id;
-        remoteMirrorRef.current.set(localSid, remoteSid);
-      }
-      const up = await fetch(u(`/api/remote/sessions/${remoteSid}/image`), {
-        method: "POST", headers: { "Content-Type": "application/octet-stream" }, body: blob,
-      }).then((r) => r.json());
-      await fetch(u(`/api/remote/sessions/${remoteSid}`), {
-        method: "PATCH", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ patch: { img: up.id } }),
-      });
-    } catch {}
   };
 
   /* ── 영역 캡처 ──
@@ -4124,6 +4084,34 @@ export default function VerbatimReader() {
     return { page: n, url: cv.toDataURL("image/jpeg", 0.85) };
   };
 
+  /* 오려내기가 실패하면 질문 탭에 한 쌍(무엇을 하려 했나 + 왜 실패했나)으로 남긴다 */
+  const capFail = async (e, what = "영역 오려내기") => {
+    setTab("ask"); setSheetOpen(true);
+    try {
+      const sid = curSessRef.current && findSess(curSessRef.current) ? curSessRef.current : await newSess("영역 캡처");
+      addMsgs(sid, [{ role: "me", text: what }, { role: "ai", text: "", err: e.message }]);
+    } catch {}
+  };
+
+  /* 그림 하나를 대화에 얹는다 — continueSid 가 살아 있으면 그 대화에, 아니면 새 대화를 열어서.
+     fig: 이 세션의 질문에는 그림(또는 그 설명)을 딸려 보낸다는 표시 — 위 sendFig effect 참고 */
+  const attachFig = async (b64, title, continueSid) => {
+    const target = continueSid && findSess(continueSid);
+    const sid = target ? target.id : await newSess(title, { fig: true });
+    const img = await putImg(sid, b64); // 그림은 서버에 — 폰에서도 이 대화에 붙은 그림이 보인다
+    patchSess(sid, { img, imgDesc: "", imgDescFor: "", fig: true }); // 새 그림이 오면 옛 설명은 비운다
+    setSendFig(true);
+  };
+  /* 질문 탭에 붙여넣거나 끌어다 놓은 그림(스크린숏·복사한 그림) — 지금 대화에 얹는다 */
+  const pasteFig = async (file) => {
+    try {
+      const { b64 } = await imageToJpeg(file);
+      await attachFig(b64, "붙인 그림", curSessRef.current);
+    } catch (e) {
+      await capFail(e, "그림 붙이기");
+    }
+  };
+
   /* "질문" — 해석/문제풀이처럼 정해진 프롬프트를 바로 쏘지 않고, 오려낸 그림만 새 세션에
      붙여 질문 탭으로 넘긴다. 사용자가 직접 무엇을 물어볼지 타이핑하게 두는 쪽. */
   const runCaptureAsk = async () => {
@@ -4134,9 +4122,7 @@ export default function VerbatimReader() {
       shot = await cropRegion(capSel);
     } catch (e) {
       exitCap();
-      const sid = curSessRef.current && findSess(curSessRef.current) ? curSessRef.current : newSess("영역 캡처");
-      addMsgs(sid, [{ role: "ai", text: "", live: false, err: e.message }]);
-      setTab("ask"); setSheetOpen(true);
+      await capFail(e);
       return;
     }
     const b64 = shot.url.split(",")[1];
@@ -4149,14 +4135,11 @@ export default function VerbatimReader() {
        짝 없는 me 하나를 끼우면 그다음 진짜 질문·답이 한 칸씩 밀려 잘못 묶인다.
        첨부 사실은 입력창 위 vb-chip(기존 "그림 함께" 표시)이 그대로 보여준다 —
        새 그림이 오면 그 칩의 썸네일도 자동으로 바뀐다. */
-    const continueSid = capContinueRef.current;
-    const target = continueSid && findSess(continueSid);
-    const title = `${shot.page}쪽 질문`;
-    // fig: 이 세션의 질문에는 그림(또는 그 설명)을 딸려 보낸다는 표시 — 위 sendFig effect 참고
-    const sid = target ? target.id : newSess(title, { img: b64, fig: true });
-    if (target) patchSess(sid, { img: b64, imgDesc: "", fig: true }); // 새 그림이 오면 옛 설명은 비운다
-    setSendFig(true);
-    mirrorCaptureToRemote(sid, target ? target.title : title, shot.url);
+    try {
+      await attachFig(b64, `${shot.page}쪽 질문`, capContinueRef.current);
+    } catch (e) {
+      await capFail(e);
+    }
     setCapBusy("");
 
     /* 미리 옮겨 적지 않는다 — 질문이 오면 sendAsk 가 그림째 Gemini 에게 보내고, Gemini 가 막혔을
@@ -4173,10 +4156,7 @@ export default function VerbatimReader() {
     } catch (e) {
       // 오버레이(z42)가 시트(z35)를 가리므로, 모드에서 나온 뒤에 알린다
       exitCap();
-      const sid = curSessRef.current && findSess(curSessRef.current)
-        ? curSessRef.current : newSess("영역 캡처");
-      addMsgs(sid, [{ role: "ai", text: "", live: false, err: e.message }]);
-      setTab("ask"); setSheetOpen(true);
+      await capFail(e);
       return;
     }
     const b64 = shot.url.split(",")[1];
@@ -4190,13 +4170,22 @@ export default function VerbatimReader() {
        끌어다 쓴다. 오려낸 그림(b64)은 세션에 남겨 둔다 — 후속 질문에서 다시 붙일 수 있게.
        fig 는 문제풀이만 켠다: 후속 질문("이 단계 왜 이래?")이 문제를 다시 봐야 하기 때문이다.
        해석은 번역문이 이미 지난 문답에 남아 그림을 다시 붙일 이유가 없다. */
-    const sid = newSess(`${shot.page}쪽 ${label}`, { img: b64, fig: kind === "solve" });
+    let sid, img;
+    try {
+      sid = await newSess(`${shot.page}쪽 ${label}`, { fig: kind === "solve" });
+      img = await putImg(sid, b64);
+      patchSess(sid, { img });
+    } catch (e) {
+      await capFail(e);
+      setCapBusy("");
+      return;
+    }
     const idx = 1; // 방금 연 세션이라 [me, ai] 중 ai 는 1번
     addMsgs(sid, [
       {
         role: "me",
         text: `${shot.page}쪽 영역 — ${label}`,
-        img: shot.url,
+        img,
         // 화면에 보이는 짧은 라벨 대신, 모델에게는 무엇을 시켰는지 문장으로 남긴다
         hist: kind === "solve"
           ? `[${shot.page}쪽에서 오려낸 문제] 이 문제를 풀어 달라.`
@@ -4204,7 +4193,11 @@ export default function VerbatimReader() {
       },
       { role: "ai", text: "", live: true },
     ]);
-    const put = (t, extra) => patchMsg(sid, idx, { text: t, ...extra });
+    // 흐르는 동안은 로컬만, 끝(extra 가 있을 때)에 서버로 — 다른 기기에는 relay 로
+    const put = (t, extra) => {
+      patchMsg(sid, idx, { text: t, ...extra }, !!extra);
+      if (!extra) relayAsk({ sid, i: idx, text: t, run: statRef.current });
+    };
 
     /* 상태 표시줄이 "몇 초째 어느 단계인지"를 대신 알려 준다(모델이 식으면 첫 글자까지 실측 52초).
        중단은 이 ac 하나로 끊는다 — 캡처의 두 단계가 이어 달려도 늘 지금 도는 쪽을 가리킨다. */
@@ -4268,6 +4261,7 @@ export default function VerbatimReader() {
     } finally {
       endJob(ac);
       setAsking(false);
+      relayAsk({ sid, i: idx, done: true }, true);
     }
   };
 
@@ -4365,8 +4359,6 @@ export default function VerbatimReader() {
   };
 
   const defLabel = models.find((m) => m.id === defModel)?.label || "";
-  // 질문이 도는 동안 모델 버튼에 띄울 이름 — 서버가 보내는 try/pick(progress) 그대로
-  const liveModel = aiStat?.running ? (aiStat.pickLabel || aiStat.tryLabel || "") : "";
   const askNote = models.find((m) => m.id === (cfg.askModel || defModel))?.note || "";
   const folders = lib.folders; // 서버가 준 배열 순서 그대로 — 사이드바 드래그 정렬이 이 순서를 바꾼다
   const shownFiles = lib.files
@@ -4501,32 +4493,19 @@ export default function VerbatimReader() {
     ? vocab.find((v) => v.word.toLowerCase() === word.head.toLowerCase())
     : null;
 
-  /* ── 질문 탭: 문답을 쌍으로 묶고 최신이 위로 오게 뒤집는다 ── */
-  const qaPairs = useMemo(() => {
-    const pairs = [];
-    for (let i = 0; i < askLog.length; i += 2) {
-      if (askLog[i]) pairs.push({ q: askLog[i], a: askLog[i + 1] || null, i });
-    }
-    return pairs.reverse();
-  }, [askLog]);
+  /* 질문 탭에 넘길 것 — 다른 기기가 흘리는 중인 답(peerLive)은 그 자리에 겹쳐 그린다 */
+  const askMsgs = useMemo(() => {
+    if (!peerLive || peerLive.sid !== curSess || !askLog[peerLive.i]) return askLog;
+    return askLog.map((m, k) => (k === peerLive.i && !m.live ? { ...m, text: peerLive.text || m.text, pending: true } : m));
+  }, [askLog, peerLive, curSess]);
+  const askRun = aiStat?.running ? aiStat : peerLive?.run?.running ? { ...peerLive.run, device: peerLive.device } : null;
 
   const pickModel = (id) => {
     const next = { ...cfg, askModel: id };
     setCfg(next); cfgRef.current = next; persist();
-    setMdlMenuOpen(false);
   };
 
 
-  // 드롭다운(대화·모델) 바깥을 누르면 닫는다
-  useEffect(() => {
-    if (!sessMenuOpen && !mdlMenuOpen) return;
-    const onDown = (e) => {
-      if (sessMenuOpen && !e.target.closest(".vb-sessbtn") && !e.target.closest(".vb-dropmenu")) setSessMenuOpen(false);
-      if (mdlMenuOpen && !e.target.closest(".vb-mdlbtn") && !e.target.closest(".vb-dropmenu")) setMdlMenuOpen(false);
-    };
-    document.addEventListener("pointerdown", onDown);
-    return () => document.removeEventListener("pointerdown", onDown);
-  }, [sessMenuOpen, mdlMenuOpen]);
 
   /* ── 기록 탭: 단어·해석·질문 이력을 시각순으로 병합 ── */
   const logItems = useMemo(() => {
@@ -5361,233 +5340,28 @@ export default function VerbatimReader() {
           )}
 
           {tab === "ask" && (
-            <div className="vb-askwrap">
-              <div className="vb-atop">
-                <div className="vb-sessrow">
-                  <div style={{ position: "relative" }}>
-                    <button className={"vb-sessbtn" + (sessMenuOpen ? " open" : "")}
-                      onClick={() => { setSessMenuOpen((v) => !v); setMdlMenuOpen(false); }}>
-                      <i />
-                      <span>{sess ? sess.title : "대화 없음"}</span>
-                      <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
-                    </button>
-                    {sessMenuOpen && (
-                      <div className="vb-dropmenu" style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, minWidth: 230, zIndex: 5 }}>
-                        <div className="vb-dropscroll">
-                          {sessions.length === 0 && <div className="vb-dropfoot">대화가 없습니다.</div>}
-                          {sessions.map((s) => (
-                            <div key={s.id} className={"vb-sessitem" + (s.id === curSess ? " on" : "")}
-                              style={{ cursor: "pointer" }}
-                              onClick={() => { setCurSess(s.id); setSessMenuOpen(false); }}>
-                              <i />
-                              <span className="t">{s.img ? "◨ " : ""}{s.title}</span>
-                              <span className="m">{fmtDate(s.at)}</span>
-                              <button className={"x" + (delAsk === "as" + s.id ? " ask" : "")}
-                                onClick={(e) => { e.stopPropagation(); tapDel("as" + s.id, () => delSess(s.id)); }}
-                                aria-label="대화 삭제">
-                                {delAsk === "as" + s.id ? "삭제?" : "✕"}
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                        <div className="vb-dropfoot">
-                          한 대화 안에서만 앞의 문답을 기억합니다 · 마지막 질문에서 2시간 뒤 사라짐 · 영역을 오려내면 새 대화가 열립니다
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  {ttlLeft && <span className="vb-ttl">{ttlLeft}</span>}
-                  <button className="vb-newsess" onClick={() => { newSess("새 대화"); setSessMenuOpen(false); }}>＋ 새 대화</button>
-                </div>
-
-                <div className="vb-composer">
-                  <textarea className="vb-askin" rows={1} value={askVal} placeholder={`${curPage}쪽을 근거로 물어보기`}
-                    onChange={(e) => setAskVal(e.target.value)}
-                    onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && wide) { e.preventDefault(); sendAsk(); } }} />
-                  <button className="vb-send" disabled={asking || !askVal.trim()} onClick={sendAsk} aria-label="보내기">
-                    <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
-                  </button>
-                </div>
-
-                <div className="vb-attrow">
-                  {sess?.img && sendFig && (
-                    <span className="vb-chip">
-                      <img src={"data:image/jpeg;base64," + sess.img} alt="" />
-                      영역 1
-                      <button onClick={() => setSendFig(false)} aria-label="첨부 빼기">✕</button>
-                    </span>
-                  )}
-                  <button className="vb-capchip" onClick={() => enterCap(curSessRef.current)}>＋ 오려내기</button>
-                  {models.length > 0 && (
-                    <div style={{ position: "relative", marginLeft: "auto" }}>
-                      <button className={"vb-mdlbtn" + (mdlMenuOpen ? " open" : "")}
-                        onClick={() => {
-                          // 열기는 곧바로 하고 측정은 뒤따라 붙는다 — await 하지 않는다.
-                          // refreshHealth 를 setState 업데이터 안에 넣으면 안 된다(순수해야 한다).
-                          const opening = !mdlMenuOpen;
-                          setMdlMenuOpen(opening);
-                          setSessMenuOpen(false);
-                          if (opening) refreshHealth();
-                        }}>
-                        {/* 지금 실제로 도는 모델을 보여 준다. 예전엔 "자동 — (로그인 때 받은 1순위)"가 고정이라
-                            다른 모델이 답하는 중에도 엉뚱한 이름이 떠 있었다. */}
-                        <i className={"vb-mdldot " + (liveModel ? "run" : (askRank[0]?.cls || ""))} />
-                        <span className="vb-mdlmode">{cfg.askModel ? "고정" : "자동"}</span>
-                        <span className="vb-mdlname">
-                          {liveModel || (cfg.askModel
-                            ? (models.find((m) => m.id === cfg.askModel)?.label || "모델")
-                            : (askRank[0]?.label || defLabel || "—"))}
-                        </span>
-                        <svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6" /></svg>
-                      </button>
-                      {mdlMenuOpen && (
-                        <div className="vb-dropmenu" style={{ position: "absolute", top: "calc(100% + 4px)", right: 0, minWidth: 270, zIndex: 5 }}>
-                          <div className="vb-dropscroll">
-                            <button className={"vb-mdlitem" + (!cfg.askModel ? " on" : "")} onClick={() => pickModel("")}>
-                              <span className="vb-mdlrow">
-                                <span className="n">자동</span>
-                                {!cfg.askModel && <span className="c">✓</span>}
-                              </span>
-                              <span className="vb-mdlnote">답을 잘하는 모델부터 차례로 묻고, 막히거나 방금 실패한 모델은 뒤로 밀립니다. 순서는 실제로 써 본 결과로 계속 바뀝니다.</span>
-                            </button>
-                            {askRank.length > 0 && (
-                              <div className="vb-rank">
-                                {askRank.map((r, i) => (
-                                  <div key={r.id} className={"vb-rankrow" + (aiStat?.running && aiStat.model === r.id ? " run" : "")}>
-                                    <b>{i + 1}</b>
-                                    <span className="n">{r.label}</span>
-                                    {aiStat?.running && aiStat.model === r.id
-                                      ? <span className="vb-mdlhp run"><i />지금 답하는 중</span>
-                                      : <span className={"vb-mdlhp " + r.cls}><i />{r.text}</span>}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
-                            {["chat", "reason"].map((grp) => {
-                              const list = models.filter((m) => (m.think ? "reason" : "chat") === grp);
-                              if (!list.length) return null;
-                              return (
-                                <div key={grp}>
-                                  <div className="vb-mdlgrp">{grp === "reason" ? "직접 고르기 · 추론 모델 — 속생각을 먼저 흘린 뒤 답한다" : "직접 고르기 · 일반 모델"}</div>
-                                  {list.map((m) => {
-                                    const hp = healthOf(m.id);
-                                    return (
-                                      <button key={m.id} className={"vb-mdlitem" + (cfg.askModel === m.id ? " on" : "")}
-                                        onClick={() => pickModel(m.id)}>
-                                        <span className="vb-mdlrow">
-                                          <span className="n">{m.label}</span>
-                                          {m.id === defModel && <span className="d">자동 선택</span>}
-                                          {hp && <span className={"vb-mdlhp " + hp.cls}><i />{hp.text}</span>}
-                                          {cfg.askModel === m.id && <span className="c">✓</span>}
-                                        </span>
-                                        <span className="vb-mdlnote">{m.note}</span>
-                                      </button>
-                                    );
-                                  })}
-                                </div>
-                              );
-                            })}
-                          </div>
-                          <div className="vb-dropfoot">
-                            자동은 요즘 잘 답하는 모델을 서버가 골라 씁니다. 고른 모델이 막히면 다른 모델이 대신 답합니다.
-                            단어·문장 탭 모델은 ⚙ 설정에서 따로 고릅니다.
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-
-              <div className="vb-scrollwrap">
-              <div className="vb-scroll" ref={panesRef} onScroll={onAskScroll}>
-               <div className="vb-scrollin" ref={askInRef}>
-                {statView && (
-                  <div className={"vb-statcard" + (statView.warn ? " warn" : "")}>
-                    <div className="vb-statrow1">
-                      <i className="vb-statdot" />
-                      <span className="vb-statlbl">{statView.text}</span>
-                      <button className="vb-statstop" onClick={stopAsk}>중단</button>
-                    </div>
-                    {(statView.why || statView.trail.length > 0) && (
-                      <div className="vb-stattrail">
-                        {statView.trail.map((t, i) => (
-                          <span key={i} className="x">{t.label} <em>{t.why}</em></span>
-                        ))}
-                        {statView.why && <span className="why">{statView.why}</span>}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {qaPairs.length === 0 ? (
-                  <div className="vb-ph">
-                    <p>책 본문을 근거로 답합니다 — 짧은 책은 전체를, 긴 책은 지금 보는 {curPage}쪽 주변과 목차를 함께 보냅니다.</p>
-                    <p style={{ margin: 0 }}>한 대화 안에서는 앞의 문답을 기억하므로 이어서 되물을 수 있습니다. 대화는 마지막 질문에서 2시간 뒤 사라집니다.</p>
-                  </div>
-                ) : qaPairs.map((p, k) => {
-                  const latest = k === 0;
-                  const ek = (sess?.id || "") + ":" + p.i;
-                  const expanded = latest || expandSet.has(ek);
-                  const toggle = () => setExpandSet((s) => {
-                    const n = new Set(s);
-                    n.has(ek) ? n.delete(ek) : n.add(ek);
-                    return n;
-                  });
-                  const by = p.a?.by;
-                  return (
-                    <div key={p.i} className={"vb-qa" + (latest ? " vb-pe latest" : " past" + (expanded ? " open" : ""))}>
-                      {k === 1 && <div className="vb-earlier">앞의 문답</div>}
-                      {p.q.img && <img className="vb-msgimg" src={p.q.img} alt="오려낸 영역" />}
-                      <div className="vb-qbubble" onClick={!latest ? toggle : undefined}>{p.q.text}</div>
-                      {p.a && (
-                        <div className={"vb-abody" + (!expanded ? " clamp" : "")} onClick={!expanded ? toggle : undefined}>
-                          {/* 끊겼어도 받아 둔 답이 있으면 그걸 먼저 보여 주고, 사정은 아래에 적는다 */}
-                          {p.a.text && <Rich text={p.a.text} live={!!p.a.live} />}
-                          {p.a.err && (
-                            <span className="vb-err">
-                              {p.a.text ? p.a.err : `답을 받지 못했습니다 — ${p.a.err}`}
-                            </span>
-                          )}
-                          {p.a.stopped && <div className="vb-stopped">여기서 중단했습니다</div>}
-                        </div>
-                      )}
-                      {p.a && !p.a.live && (expanded || !latest) && (
-                        <div className="vb-afoot">
-                          {expanded && p.a.text && (
-                            <button onClick={() => copyAnswer(ek, p.a.text)}>
-                              {copied === ek ? "복사됨" : "복사"}
-                            </button>
-                          )}
-                          {latest && !p.q.hist && (
-                            <button disabled={asking} onClick={redoAsk}
-                              className={p.a.err && !p.a.text ? "hot" : undefined}>
-                              다시 답하기
-                            </button>
-                          )}
-                          {!latest && p.a.text && <button onClick={toggle}>{expanded ? "접기" : "펼치기"}</button>}
-                          {/* 누가 답했나 — 떨어진 모델이 있었으면 그 경로까지. 히스토리에는 안 들어간다(text 와 별도 칸) */}
-                          {expanded && (by || p.a.swap) && (
-                            <span className="vb-by">
-                              {by
-                                ? <>{by.trail?.length ? by.trail.map((t) => `${t.label} ${t.why}`).join(" → ") + " → " : ""}{by.label}{by.first ? ` · ${by.first}초` : ""}</>
-                                : `${p.a.swap.wanted}가 붐벼서 ${p.a.swap.model}가 대신 답함`}
-                            </span>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-               </div>
-              </div>
-              {jumpUp && asking && (
-                <button className="vb-jump" onClick={() => panesRef.current?.scrollTo({ top: 0, behavior: "smooth" })}>
-                  ↑ 새 답 보기
-                </button>
-              )}
-              </div>
-            </div>
+            <AskView
+              theme={theme} active={sheetOpen} wideEnter={wide}
+              sessions={sessions} curId={curSess}
+              onPickSess={(id) => commitSess(sessRef.current, id)}
+              onNewSess={() => { newSess("새 대화").catch(() => {}); }}
+              onDelSess={delSess}
+              msgs={askMsgs} imgUrl={imgUrl}
+              value={askVal} onChange={setAskVal} onSend={sendAsk} onStop={stopAsk} busy={asking}
+              placeholder={`${curPage}쪽 내용에 대해 물어보세요`}
+              empty={{
+                title: "이 문서에 대해 물어보세요",
+                text: `짧은 문서는 전체를, 긴 문서는 지금 보는 ${curPage}쪽 주변과 목차를 읽고 답해요. 같은 대화 안에서는 앞의 질문을 기억해요.`,
+                suggestions: [`${curPage}쪽 핵심만 정리해 줘`, "이 문서는 어떤 내용이야?", "이 쪽에서 어려운 개념을 쉽게 설명해 줘"],
+              }}
+              attach={sess?.img && sendFig ? { src: imgUrl(sess.img), label: "첨부한 그림", onRemove: () => setSendFig(false) } : null}
+              capture={{ icon: "crop", label: "영역 오려내기", onClick: () => enterCap(curSessRef.current) }}
+              models={models} askRank={askRank} selModel={cfg.askModel || ""} onPickModel={pickModel}
+              onModelsOpen={refreshHealth} healthOf={healthOf} defLabel={defLabel}
+              run={askRun} lastRun={lastRun}
+              onRedo={redoAsk} canRedo={(p) => !p.q.hist}
+              onImage={pasteFig}
+            />
           )}
 
           {tab === "log" && (

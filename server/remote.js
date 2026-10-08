@@ -41,6 +41,10 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
     const j = JSON.parse(fs.readFileSync(SESS_FILE, "utf8"));
     store = { sessions: Array.isArray(j.sessions) ? j.sessions : [], cur: j.cur || "" };
   } catch {}
+  /* 2026-09-29 부터 아이패드 질문 탭도 이 저장소를 쓴다(예전엔 아이패드는 localStorage, 폰만 여기).
+     메시지 역할은 아이패드 쪽 이름(me/ai)으로 통일한다 — 예전 폰 형식(user/assistant)은 읽을 때 바꾼다. */
+  for (const s of store.sessions)
+    for (const m of s.msgs || []) m.role = m.role === "user" ? "me" : m.role === "assistant" ? "ai" : m.role;
 
   let saveTimer = null;
   function saveSessions() {
@@ -84,7 +88,13 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
   let mode = { on: false, doc: null }; // doc: { id, name, page }
   const relaySeq = Object.create(null); // slot -> 마지막으로 받아들인 seq (새 tap 이 이전 걸 버리는 기준)
 
-  const snapshot = () => ({ mode, sessions: store.sessions, cur: store.cur });
+  /* 기기 출석 — 문서를 연 창(아이패드·PC)이 30초마다 알린다. 폰은 이걸 보고 "지금 답할 기기가 있나"와
+     "아이패드가 몇 쪽을 보고 있나"를 띄운다. 70초 넘게 소식이 없으면 없는 셈. */
+  const presence = new Map(); // device → { device, label, doc, at }
+  const PRESENCE_TTL = 70_000;
+  const presList = () => [...presence.values()].filter((p) => Date.now() - p.at < PRESENCE_TTL);
+
+  const snapshot = () => ({ mode, sessions: store.sessions, cur: store.cur, presence: presList() });
 
   app.get("/api/remote/stream", requireAuth, (req, res) => {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -99,6 +109,25 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
   });
 
   app.get("/api/remote/state", requireAuth, (_req, res) => res.json(snapshot()));
+
+  app.post("/api/remote/presence", requireAuth, (req, res) => {
+    const { device = "", label = "", doc = null, bye = false } = req.body || {};
+    const id = String(device).slice(0, 60);
+    if (!id) return res.status(400).json({ error: "device 가 비었습니다." });
+    if (bye) presence.delete(id);
+    else presence.set(id, {
+      device: id, label: String(label).slice(0, 40), at: Date.now(),
+      doc: doc && { id: String(doc.id || "").slice(0, 100), name: String(doc.name || "").slice(0, 200), page: Math.max(0, Math.floor(Number(doc.page)) || 0) },
+    });
+    broadcast("presence", presList());
+    res.json({ ok: true });
+  });
+  const presTimer = setInterval(() => {
+    let gone = false;
+    for (const [k, p] of presence) if (Date.now() - p.at >= PRESENCE_TTL) { presence.delete(k); gone = true; }
+    if (gone) broadcast("presence", presList());
+  }, 30_000);
+  presTimer.unref?.();
 
   app.post("/api/remote/mode", requireAuth, (req, res) => {
     mode = { on: !!req.body?.on, doc: req.body?.on ? mode.doc : null };
@@ -126,7 +155,8 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
      버려서 막는다. */
   app.post("/api/remote/relay", requireAuth, (req, res) => {
     const { slot = "", seq = 0, payload = null } = req.body || {};
-    if (!slot || !mode.on) return res.json({ ok: true, skipped: true });
+    // ask(질문 답이 흐르는 중)는 리모트 모드와 상관없이 흘린다 — 대화는 모든 기기가 함께 보는 것이라
+    if (!slot || (!mode.on && slot !== "ask")) return res.json({ ok: true, skipped: true });
     const n = Number(seq) || 0;
     if (n < (relaySeq[slot] || 0)) return res.json({ ok: true, stale: true });
     relaySeq[slot] = n;
@@ -194,6 +224,29 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
     saveSessions();
     broadcast("sess-msgs", { id: s.id, from, msgs: clean });
     res.json({ ok: true, from });
+  });
+
+  /* 답 자리 맡기 — 폰이 남긴 질문(pending)을 아이패드·PC 가 여럿 열려 있어도 한 곳만 답하게 한다.
+     맡은 기기가 3분 넘게 아무 말이 없으면(창을 닫았거나 잠듦) 다른 기기가 가져갈 수 있다. */
+  app.post("/api/remote/sessions/:id/msgs/:i/claim", requireAuth, (req, res) => {
+    const s = findSess(req.params.id);
+    const m = s?.msgs[Number(req.params.i)];
+    if (!m) return res.status(404).json({ error: "없는 메시지입니다." });
+    const by = String(req.body?.by || "").slice(0, 60);
+    if (!m.pending) return res.status(409).json({ error: "이미 답한 질문입니다." });
+    if (m.claim && m.claim !== by && Date.now() - (m.claimAt || 0) < 180_000)
+      return res.status(409).json({ error: "다른 기기가 답하는 중입니다." });
+    Object.assign(m, { claim: by, claimAt: Date.now() });
+    saveSessions();
+    broadcast("sess-msg-patch", { id: s.id, i: Number(req.params.i), patch: { claim: by, claimAt: m.claimAt } });
+    res.json({ ok: true });
+  });
+
+  // 폰의 [멈추기] — 답하는 기기에 "그만"을 전한다. 실제로 끊고 정착시키는 건 답하던 기기다.
+  app.post("/api/remote/sessions/:id/msgs/:i/cancel", requireAuth, (req, res) => {
+    if (!findSess(req.params.id)) return res.status(404).json({ error: "없는 대화입니다." });
+    broadcast("ask-cancel", { id: req.params.id, i: Number(req.params.i) });
+    res.json({ ok: true });
   });
 
   // 답이 끝났거나(완성/중단/에러) 별표를 눌렀거나 — 정착된 상태만 여기로 온다

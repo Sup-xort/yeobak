@@ -34,16 +34,16 @@ const FRESH_MS = 5 * 60 * 1000; // 쓰는 동안 이보다 오래된 기록은 1
 
 /* 직접 써 보고 적은 성격. 상태("몇 초", "무응답")는 적지 마라 — 금세 거짓말이 된다. */
 const NOTES = {
-  "gemini/gemini-3.8-flash": "조용히 생각한 뒤 한 번에 쓴다. 굵은 글씨와 소제목으로 구조를 잘 잡는다.",
-  "gemini/gemini-3.6-flash": "3.8 과 비슷한 문체로 조금 짧게 쓴다. 탭에선 생각을 끄고 바로 쓴다.",
-  "gemini/gemini-3.5-flash": "굵은 글씨와 소제목으로 구조를 잘 잡는다.",
-  "gemini/gemini-3.5-flash-lite": "가장 가벼운 축. 짧고 담백하게 쓴다.",
-  "gemini/gemini-flash-latest": "Google 이 가리키는 최신 Flash — 예고 없이 다른 모델로 바뀔 수 있다.",
-  "deepseek-ai/deepseek-v4.1-flash": "표와 수식을 갖춰 쓰는 촘촘한 편. 속생각이 길게 흐르고 나서 답이 나온다.",
-  "nvidia/nemotron-3-ultra-550b-a55b": "뜻풀이에 한 줄 풀이를 덧붙이는 등 친절하게 쓴다. 표를 즐겨 쓴다.",
-  "nvidia/nemotron-3-super-120b-a12b": "표를 가장 많이 쓴다. 답 전에 속생각이 한참 흐른다.",
-  "z-ai/glm-5.3-flash": "형식 지시를 잘 지키고 짧게 끝낸다.",
-  "google/gemma-4-31b-it": "그림 속 글자를 정확히 읽고 한국어가 자연스럽다.",
+  "gemini/gemini-3.8-flash": "잠시 생각한 뒤 한 번에 써요. 소제목과 굵은 글씨로 구조를 잘 잡아요.",
+  "gemini/gemini-3.6-flash": "3.8과 비슷한 문체로 조금 더 짧게 써요.",
+  "gemini/gemini-3.5-flash": "소제목과 굵은 글씨로 구조를 잘 잡아요.",
+  "gemini/gemini-3.5-flash-lite": "가장 가벼운 모델이에요. 짧고 담백하게 답해요.",
+  "gemini/gemini-flash-latest": "Google이 지정한 최신 Flash예요. 예고 없이 바뀔 수 있어요.",
+  "deepseek-ai/deepseek-v4.1-flash": "표와 수식을 촘촘하게 갖춰 써요. 오래 생각한 뒤 답해요.",
+  "nvidia/nemotron-3-ultra-550b-a55b": "풀이를 한 줄씩 덧붙이는 친절한 편이에요. 표를 즐겨 써요.",
+  "nvidia/nemotron-3-super-120b-a12b": "표를 가장 많이 써요. 답하기 전에 한참 생각해요.",
+  "z-ai/glm-5.3-flash": "형식을 잘 지키고 짧게 끝내요.",
+  "google/gemma-4-31b-it": "그림 속 글자를 정확히 읽고 한국어가 자연스러워요.",
 };
 
 /* 첫 실행(아직 models.json 이 없을 때) 찾기가 끝나기 전에 쓸 목록 — 2026-09-28 실측으로 살아 있던 것 */
@@ -238,8 +238,14 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
   function chain({ kind, picked, gemOnly, ask }) {
     const base = order(kind);
     if (gemOnly) {
+      /* 질문(문제풀이·그림 딸린 질문)이면 **질문 탭 순위**를 따른다 — 사용자가 보는 자동 선택 목록이 그것이고,
+         문제를 푸는 데는 빠른 것보다 똑똑한 게 맞다. 예전엔 캡처 순위(빠른 순)를 써서 목록 1위가 3.8 Flash 인데
+         실제로는 맨 밑의 Flash Lite 가 풀었다(2026-10-06 실기기). 고른 모델이 Gemini 면 맨 앞. */
+      const src = ask ? order("ask").filter((id) => isVision(reg.get(id))) : base;
       const lead = [];
-      for (const id of base) { if (!isGem(id)) break; lead.push(id); }
+      for (const id of src) { if (!isGem(id)) break; lead.push(id); }
+      if (ask && picked && isGem(picked) && reg.get(picked) && isVision(reg.get(picked)))
+        lead.splice(0, lead.length, picked, ...lead.filter((id) => id !== picked));
       return lead.filter((id) => !(st.get(id)?.quotaUntil > Date.now()));
     }
     const m = picked && reg.get(picked);
@@ -503,8 +509,8 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
   function describe(m, lane = "main") {
     // 속도는 답의 첫 글자 기준(속생각 제외). 탭 목록은 속생각을 끈 탭 설정으로 잰 값.
     const ms = lane === "tap" ? speed(m.id, "tap") : speed(m.id);
-    const kindTxt = lane === "tap" ? "속생각 끔" : m.think ? "추론 모델" : "일반 모델";
-    const measured = `${kindTxt}${ms && ms < 60_000 ? ` · 첫 글자 약 ${(ms / 1000).toFixed(1)}초` : ""}`;
+    const kindTxt = lane === "tap" ? "빠른 응답" : m.think ? "추론 모델" : "일반 모델";
+    const measured = `${kindTxt}${ms && ms < 60_000 ? ` · 응답 시작 약 ${(ms / 1000).toFixed(1)}초` : ""}`;
     return { id: m.id, label: m.label || labelOf(m.id), think: lane === "tap" ? false : !!m.think, vision: !!(isGem(m.id) || m.vision),
       note: NOTES[m.id] ? `${NOTES[m.id]} (${measured})` : measured };
   }
@@ -512,13 +518,13 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
   function rankNote(id) {
     const s = st.get(id);
     const now = Date.now();
-    if (s?.quotaUntil > now) return { cls: "jam", text: `한도 초과 · ${Math.ceil((s.quotaUntil - now) / 60000)}분 쉼` };
-    if (recentBad(id)) return { cls: "jam", text: "방금 실패" };
-    if (providerDown(isGem(id))) return { cls: "busy", text: isGem(id) ? "Google 쪽 막힘" : "NIM 쪽 막힘" };
-    if (reliab(id) < 0.5) return { cls: "busy", text: "자주 실패" };
+    if (s?.quotaUntil > now) return { cls: "jam", text: `한도 초과 · ${Math.ceil((s.quotaUntil - now) / 60000)}분 뒤 재개` };
+    if (recentBad(id)) return { cls: "jam", text: "최근 실패" };
+    if (providerDown(isGem(id))) return { cls: "busy", text: isGem(id) ? "Google 불안정" : "NVIDIA 불안정" };
+    if (reliab(id) < 0.5) return { cls: "busy", text: "실패 잦음" };
     const ms = speed(id);
     if (ms > 30000) return { cls: "busy", text: "느림" };
-    return { cls: "ok", text: s?.lanes?.main || s?.msEw ? `첫 글자 ${(ms / 1000).toFixed(1)}초` : "대기" };
+    return { cls: "ok", text: s?.lanes?.main || s?.msEw ? `${(ms / 1000).toFixed(1)}초` : "대기" };
   }
 
   function publicList() {

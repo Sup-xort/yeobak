@@ -1047,9 +1047,9 @@ app.post("/api/chat", requireAuth, async (req, res) => {
      줄줄이 막혀도 그 줄 그대로 Gemini 만 두드리다 끝났다. 매번 다시 고르면 방금 깎인 점수(그 모델의
      벌점, "Google 전체가 막힘" 벌점)가 곧바로 반영돼 두세 번 실패하면 NIM 으로 넘어간다. */
   const tried = new Set();
-  // visionDirect: 그림째 Gemini 에게만(models.chain 의 gemOnly 참고). 고른 모델은 상관하지 않는다.
+  // visionDirect: 그림째 Gemini 에게만(models.chain 의 gemOnly 참고). 질문이면 질문 탭 순위·고른 모델(Gemini 일 때)을 따른다.
   const gemOnly = !!(image && visionDirect);
-  const nextModel = () => models.chain({ kind, picked: gemOnly ? "" : picked, gemOnly, ask }).find((id) => !tried.has(id));
+  const nextModel = () => models.chain({ kind, picked, gemOnly, ask }).find((id) => !tried.has(id));
   if (!warm) models.touch();
   const firstMs = ask ? FIRST_MS.ask : FIRST_MS.tap;
   const lane = kind === "tap" ? "tap" : "main"; // 같은 모델도 탭(속생각 끔)과 질문(켬)은 속도가 전혀 다르다
@@ -1133,8 +1133,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   if (!got) {
     console.error(`[여백] 전부 실패 — ${fails.join(" / ")}`);
     const error = fails.length
-      ? `모든 모델이 답하지 못했습니다 — ${[...new Set(fails)].join(", ")}. 잠시 뒤 다시 시도하세요.`
-      : "쓸 수 있는 모델이 없습니다 — API 키를 확인하세요.";
+      ? `지금은 답할 수 있는 모델이 없어요 (${[...new Set(fails)].join(", ")}). 잠시 후 다시 시도해 주세요.`
+      : "사용할 수 있는 모델이 없어요. API 키를 확인해 주세요.";
     if (progress) { note("error", { error }); return res.end(); }
     return res.status(502).json({ error });
   }
@@ -1205,7 +1205,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     try {
       const fin = await pump(cur);
       if (fin && fin !== "stop" && fin !== "length")
-        res.write(sseEvent({ content: `\n\n_(답이 도중에 막혔습니다 — ${fin}. 다시 물어보거나 다른 모델을 골라 보세요.)_` }));
+        res.write(sseEvent({ content: `\n\n_(답변이 중간에 멈췄어요 (${fin}). 다시 시도하거나 다른 모델을 골라 주세요.)_` }));
       break;
     } catch (e) {
       if (ac.signal.aborted) return;
@@ -1227,7 +1227,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       }
       if (!next) {
         if (ac.signal.aborted) return;
-        res.write(sseEvent({ content: "\n\n_(연결이 끊겨 답이 여기서 멈췄습니다 — 다시 물어보세요.)_" }));
+        res.write(sseEvent({ content: "\n\n_(연결이 끊겨 여기서 멈췄어요. 다시 시도해 주세요.)_" }));
         break;
       }
       console.warn(`[여백] ${next.id} 가 이어서 씀`);
