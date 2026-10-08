@@ -1249,3 +1249,47 @@
 /* 폰의 질문 탭 — 팝오버가 화면 밖으로 안 나가게 */
 .vb-rp .vb-ak-pop{max-width:calc(100vw - 28px)}
 .vb-rp .vb-ak-head{padding-top:4px}
+
+/* ───────── 작은 노트(MiniNote.jsx) ─────────
+   아래에서 올라오는 떠 있는 창. 세로 3:4 고정(화면에 다 들어가게 폭을 줄인다), 손잡이 줄(.vb-mhead)을
+   끌어 옮긴다(style 의 left·top). 닫히면 화면 아래로 내려가 숨는다. */
+.vb-mini{--mw:min(480px,calc(100vw - 24px),calc((100dvh - 96px) * .75));
+  position:fixed;z-index:31;width:var(--mw);height:calc(var(--mw) * 4 / 3);
+  left:calc(50vw - var(--mw) / 2);bottom:12px;display:flex;flex-direction:column;
+  background:var(--t-menu);border:1px solid var(--t-line2);border-radius:16px;overflow:hidden;
+  box-shadow:var(--t-shadow);transition:transform .3s cubic-bezier(.2,.8,.2,1),visibility 0s}
+.vb-mini.off{transform:translateY(calc(100vh + 40px));visibility:hidden;
+  transition:transform .26s ease-in,visibility 0s .26s}
+.vb-mini.drag{transition:none;opacity:.96}
+.vb-mhead{position:relative;flex:0 0 auto;display:flex;align-items:center;gap:6px;height:48px;
+  padding:10px 8px 0 12px;touch-action:none;cursor:grab;-webkit-user-select:none;user-select:none;
+  border-bottom:1px solid var(--t-line)}
+.vb-mgrip{position:absolute;top:6px;left:50%;width:40px;height:5px;margin-left:-20px;border-radius:3px;
+  background:var(--t-line2)}
+.vb-mname{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:70%;padding:4px 8px;
+  border-radius:9px;font-size:14px;font-weight:600;color:var(--t-ink)}
+.vb-mname span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb-mname svg,.vb-mx svg{width:15px;height:15px;flex:0 0 auto;stroke:currentColor;fill:none;stroke-width:2;
+  stroke-linecap:round;stroke-linejoin:round}
+.vb-mname:active,.vb-mx:active{background:var(--t-fill)}
+.vb-mpg{margin-left:auto;font-size:12px;color:var(--t-muted);font-variant-numeric:tabular-nums}
+.vb-mx{width:34px;height:34px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;
+  color:var(--t-sub);margin-left:auto}
+.vb-mpg + .vb-mx{margin-left:4px}
+.vb-mbody{position:relative;flex:1 1 auto;min-height:0;background:var(--desk2)}
+.vb-mscroll{position:absolute;inset:0;overflow:auto;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch;
+  overscroll-behavior:contain;padding:10px 10px 2px}
+.vb-mpages{transform-origin:0 0}
+.vb-mpage{width:100%;margin:0 0 10px}
+.vb-mini.inv .vb-mpages,.vb-mini.inv .vb-mwet{filter:invert(1) hue-rotate(180deg)}
+.vb-mwet{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+.vb-mpick{position:absolute;inset:0;overflow-y:auto;overscroll-behavior:contain;padding:8px 10px 14px;
+  background:var(--t-menu)}
+.vb-mpick h4{margin:12px 6px 4px;font-size:12px;font-weight:600;color:var(--t-muted)}
+.vb-mrow{display:block;width:100%;text-align:left;padding:10px 10px;border-radius:10px;font-size:14.5px;
+  color:var(--t-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.vb-mrow:active{background:var(--t-fill)}
+.vb-mrow.on{background:var(--t-accBg);color:var(--t-accTx)}
+.vb-mnote{margin:14px 8px;font-size:13.5px;color:var(--t-muted);text-align:center}
+.vb-merr{position:absolute;left:10px;right:10px;bottom:10px;margin:0;padding:8px 10px;border-radius:10px;
+  font-size:13px;background:var(--t-warnBg);border:1px solid var(--t-warnBd);color:var(--t-warnFg)}

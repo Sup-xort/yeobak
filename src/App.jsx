@@ -3,6 +3,7 @@ import "katex/dist/katex.min.css";
 import "./App.css";
 import Rich from "./rich.jsx";
 import AskView, { imageToJpeg } from "./AskView.jsx";
+import MiniNote from "./MiniNote.jsx";
 import { u } from "./paths.js";
 import { drawStroke, hitStroke, strokeInLasso, polyBox, bbox as inkBox, snapLine, tidyPts, strokePath, HL_ALPHA } from "./ink.js";
 
@@ -2846,8 +2847,9 @@ export default function VerbatimReader() {
           lastMid = mid(e.touches);
           return;
         }
-        // 그 밖에 손가락이 2개 이하로 새로 닿았다 — 지난 제스처의 끝을 놓친 것
-        if (e.touches.length <= 2) abort();
+        // 그 밖에 손가락이 2개 이하로 새로 닿았다 — 지난 제스처의 끝을 놓친 것.
+        // 세 번째 손가락이 닿았으면 작은 노트 제스처다 — 핀치를 버린다
+        if (e.touches.length !== 2) abort();
       }
       if (e.touches.length !== 2 || !pdfRef.current) return;
       // 필기 중 손바닥이 닿아 생긴 '두 손가락'은 핀치가 아니다
@@ -3322,6 +3324,40 @@ export default function VerbatimReader() {
   const [inkOn, setInkOn] = useState(false);
   const inkOnRef = useRef(false);
   useEffect(() => { inkOnRef.current = inkOn; }, [inkOn]);
+  /* 작은 노트(src/MiniNote.jsx) — 세 손가락으로 위로 쓸면 열고, 아래로 쓸면 닫는다.
+     창 어디서든(본문·작은 노트 위) 받도록 window 에 건다. 서재 화면에선 안 연다. */
+  const [miniOpen, setMiniOpen] = useState(false);
+  const inLibRef = useRef(true);
+  useEffect(() => {
+    let s0 = null, done = false;
+    const avg = (t) => {
+      let x = 0, y = 0;
+      for (const p of t) { x += p.clientX; y += p.clientY; }
+      return [x / t.length, y / t.length];
+    };
+    const onS = (e) => {
+      if (e.touches.length === 3) { s0 = avg(e.touches); done = false; }
+      else if (e.touches.length > 3) s0 = null; // 네 손가락 이상은 iPadOS 몫
+    };
+    const onM = (e) => {
+      if (!s0 || done || e.touches.length !== 3 || inLibRef.current) return;
+      const [x, y] = avg(e.touches);
+      const dx = x - s0[0], dy = y - s0[1];
+      if (Math.abs(dy) > 60 && Math.abs(dy) > Math.abs(dx) * 1.5) { done = true; setMiniOpen(dy < 0); }
+    };
+    const onE = (e) => { if (!e.touches.length) s0 = null; };
+    const o = { passive: true, capture: true };
+    window.addEventListener("touchstart", onS, o);
+    window.addEventListener("touchmove", onM, o);
+    window.addEventListener("touchend", onE, o);
+    window.addEventListener("touchcancel", onE, o);
+    return () => {
+      window.removeEventListener("touchstart", onS, o);
+      window.removeEventListener("touchmove", onM, o);
+      window.removeEventListener("touchend", onE, o);
+      window.removeEventListener("touchcancel", onE, o);
+    };
+  }, []);
   useEffect(() => { penCaptureRef.current = penCapture; }, [penCapture]);
   const [penSel, setPenSel] = useState(null); // 펜 드래그 중 미리보기(.vb-view 기준, pointer-events:none)
 
@@ -3489,6 +3525,7 @@ export default function VerbatimReader() {
   const inkTimerRef = useRef(0);
   const wetIdleRef = useRef(null);           // 젖은 캔버스를 비우고 선택 상자만 다시 그린다(이펙트가 채움)
   const [inkErr, setInkErr] = useState("");
+  const miniApiRef = useRef(null);           // 작은 노트(MiniNote)의 실행취소 창구
 
   const setInkCfg = (patch) => {
     const k = { ...inkCfgRef.current, ...patch };
@@ -3614,6 +3651,7 @@ export default function VerbatimReader() {
      del 의 items 는 지운 순서대로 쌓이고, 되돌릴 땐 거꾸로 제자리(i)에 꽂는다 — 그러면 지우개로
      여러 번에 걸쳐 지운 것도 정확히 원래 순서로 돌아온다. */
   const inkApply = (op, dir) => {
+    if (op.mini) { miniApiRef.current?.apply(op, dir); return; } // 작은 노트의 획
     const a = annotsRef.current;
     if (!a) return;
     const list = (a.pages[op.n] ||= []);
@@ -4593,6 +4631,7 @@ export default function VerbatimReader() {
 
   // 서재가 홈 화면인 동안(문서를 안 열었거나 서재를 띄운 동안)은 읽기 도구창을 숨긴다
   const inLib = libOpen || numPages === 0;
+  inLibRef.current = inLib;
 
   return (
     <div className={"vb-root" + (wide ? " wide" : "") + (theme === "light" ? " light" : "")} ref={rootRef}>
@@ -4671,6 +4710,12 @@ export default function VerbatimReader() {
           <button className={"vb-tool" + (inkOn ? " on" : "")} onClick={() => setInkOn((v) => !v)}
             aria-label="필기" title="필기 — 애플펜슬로 쓰고, 손가락으로는 넘기고 단어를 누른다">
             <svg viewBox="0 0 24 24"><path d="M12 20h9" /><path d="M16.5 3.5a2.12 2.12 0 013 3L7 19l-4 1 1-4 12.5-12.5z" /></svg>
+          </button>
+        )}
+        {numPages > 0 && (
+          <button className={"vb-tool" + (miniOpen ? " on" : "")} onClick={() => setMiniOpen((v) => !v)}
+            aria-label="작은 노트" title="작은 노트 — 세 손가락으로 위로 쓸어 올려도 열린다">
+            <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 12h18" /><path d="M10 15.5h4" /></svg>
           </button>
         )}
         {IS_SAFARI && numPages > 0 && !inkOn && (
@@ -4892,6 +4937,12 @@ export default function VerbatimReader() {
               {upProg.pct != null ? ` ${upProg.pct}%` : upProg.loaded ? ` ${fmtSize(upProg.loaded)}` : "…"}
             </span>
           </div>
+        )}
+
+        {!inLib && (
+          <MiniNote open={miniOpen} onClose={() => setMiniOpen(false)} lib={lib} mainId={curFileRef.current?.id}
+            libApi={libApi} cdn={CDN} inkOn={inkOn} inkCfgRef={inkCfgRef} onInkOp={(op) => inkPush(op)}
+            apiRef={miniApiRef} invert={invert} coarse={COARSE} />
         )}
 
         {bubble && (
