@@ -37,11 +37,25 @@ const IS_SAFARI =
   typeof navigator !== "undefined" &&
   /^((?!chrome|android|crios|fxios|edgios).)*safari/i.test(navigator.userAgent);
 
-/* 필기 도구 프리셋 — 굵기는 pt(배율 1 단위). 펜 1.4pt ≈ 0.5mm 볼펜 */
+/* 필기 도구 프리셋 — 굵기는 pt(배율 1 단위 = 종이 위 1/72인치 ≈ 0.353mm). 펜 1.4pt ≈ 0.5mm 볼펜.
+   화면 px 가 아니라 종이 단위라 확대하면 같이 굵어진다(굿노트도 mm). 내보낸 PDF 의 /Ink 굵기도 이 값.
+   세 칸은 기본값일 뿐 — 고른 칸을 한 번 더 누르면 슬라이더로 그 칸의 굵기를 바꾼다(ws 에 저장). */
 const INK_PEN_COLORS = ["#1e1b1b", "#1d4ed8", "#dc2626", "#15803d", "#7c3aed"];
 const INK_HL_COLORS = ["#fde047", "#86efac", "#f9a8d4", "#93c5fd", "#fdba74"];
 const INK_PEN_W = [0.8, 1.4, 2.4];
 const INK_HL_W = [6, 10, 16];
+/* 확대 범위 — 600% 는 사용자 요청(2026-10-08, 필기·작은 첨자 보기). 쪽 캔버스는 MAX_PX 에서 해상도가
+   더 안 오르지만 화면에 보이는 부분은 선명화 조각(renderDetails)이 기기 해상도로 다시 그린다 */
+const ZOOM_MIN = 0.3, ZOOM_MAX = 6;
+const INK_W_RANGE = { pen: [0.3, 6], hl: [2, 30] };
+const PT_MM = 25.4 / 72;
+/* 저장된 도구 설정을 지금 모양({c, w, ws:[3], wi})으로 — 슬라이더 전(ws 없음) 설정도 받는다 */
+const inkToolCfg = (t, def, colors) => {
+  const ws = Array.isArray(t?.ws) && t.ws.length === 3 && t.ws.every((v) => v > 0) ? [...t.ws] : [...def];
+  let wi = Number.isInteger(t?.wi) && t.wi >= 0 && t.wi < 3 ? t.wi : -1;
+  if (wi < 0) { wi = ws.indexOf(t?.w); if (wi < 0) { wi = 1; if (t?.w > 0) ws[1] = t.w; } }
+  return { c: t?.c || colors[0], ws, wi, w: ws[wi] };
+};
 
 /* ── 서재 인사말 ──
    시간대(새벽·아침·낮·저녁·밤) × 맥락(처음·이어읽기·오랜만) 두 축에서 문장을 고른다.
@@ -667,6 +681,8 @@ export default function VerbatimReader() {
       if (typeof s.penCapture === "boolean") setPenCapture(s.penCapture);
       if (s.ink && typeof s.ink === "object") {
         const k = { ...inkCfgRef.current, ...s.ink };
+        k.pen = inkToolCfg(k.pen, INK_PEN_W, INK_PEN_COLORS);
+        k.hl = inkToolCfg(k.hl, INK_HL_W, INK_HL_COLORS);
         inkCfgRef.current = k;
         setInkTool(k.tool); setInkPen(k.pen); setInkHl(k.hl);
       }
@@ -2878,7 +2894,7 @@ export default function VerbatimReader() {
       view.scrollLeft -= m.x - lastMid.x;
       lastMid = m;
       const raw = dist(e.touches) / startD;
-      const next = Math.max(0.3, Math.min(3, startZoom * raw));
+      const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, startZoom * raw));
       factor = next / startZoom;
       stage.style.transform = `scale(${factor})`;
       setZoomPill(Math.round(next * 100) + "%");
@@ -2924,7 +2940,7 @@ export default function VerbatimReader() {
       gestureRef.current = false;
       reset();
       lastMid = null;
-      const next = Math.max(0.3, Math.min(3, startZoom * factor));
+      const next = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, startZoom * factor));
       if (Math.abs(next - zoomRef.current) > 0.01) {
         zoomRef.current = next;
         persist();
@@ -2964,7 +2980,7 @@ export default function VerbatimReader() {
     const stage = stageRef.current;
     if (!view || !stage) return;
     let zooming = false, startZoom = 1, factor = 1, last = null, timer = 0;
-    const clampZoom = (z) => Math.max(0.3, Math.min(3, z));
+    const clampZoom = (z) => Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, z));
     const commit = () => {
       if (!zooming) return;
       zooming = false;
@@ -3459,9 +3475,11 @@ export default function VerbatimReader() {
      입력 이벤트 안에서 곧바로 그리고(rAF 도 안 기다린다), 펜을 떼면 쪽 SVG 에 path 하나로 옮긴다.
      저장은 쪽 단위 PUT 을 800ms 디바운스 — 굿노트에서 온 쪽은 1300획·1MB 가까이 된다. */
   const [inkTool, setInkTool] = useState("pen");               // pen | hl | eraser | lasso
-  const [inkPen, setInkPen] = useState({ c: INK_PEN_COLORS[0], w: INK_PEN_W[1] });
-  const [inkHl, setInkHl] = useState({ c: INK_HL_COLORS[0], w: INK_HL_W[1] });
-  const inkCfgRef = useRef({ tool: "pen", pen: { c: INK_PEN_COLORS[0], w: INK_PEN_W[1] }, hl: { c: INK_HL_COLORS[0], w: INK_HL_W[1] } });
+  const [inkPen, setInkPen] = useState(() => inkToolCfg(null, INK_PEN_W, INK_PEN_COLORS));
+  const [inkHl, setInkHl] = useState(() => inkToolCfg(null, INK_HL_W, INK_HL_COLORS));
+  const inkCfgRef = useRef({ tool: "pen", pen: inkToolCfg(null, INK_PEN_W, INK_PEN_COLORS), hl: inkToolCfg(null, INK_HL_W, INK_HL_COLORS) });
+  const [inkWEdit, setInkWEdit] = useState(false); // 굵기 슬라이더가 열려 있나(고른 칸을 한 번 더 누르면 열린다)
+  useEffect(() => { if (!inkOn) setInkWEdit(false); }, [inkOn]);
   const annotsRef = useRef(null);            // {id, imported, pages:{n:[stroke]}} — null 이면 필기 불가
   const inkHistRef = useRef({ undo: [], redo: [] });
   const [inkHist, setInkHist] = useState({ u: 0, r: 0 });
@@ -4312,7 +4330,7 @@ export default function VerbatimReader() {
 
   const dragRef = useRef(null);
   const zoomBy = (f) => {
-    zoomRef.current = Math.max(0.3, Math.min(3, zoomRef.current * f));
+    zoomRef.current = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, zoomRef.current * f));
     setZoomPill(Math.round(zoomRef.current * 100) + "%");
     setTimeout(() => setZoomPill(null), 900);
     persist();
@@ -4783,13 +4801,18 @@ export default function VerbatimReader() {
           const isHl = inkTool === "hl";
           const cur = isHl ? inkHl : inkPen;
           const colors = isHl ? INK_HL_COLORS : INK_PEN_COLORS;
-          const widths = isHl ? INK_HL_W : INK_PEN_W;
+          const [wMin, wMax] = INK_W_RANGE[isHl ? "hl" : "pen"];
           const setCur = (patch) => setInkCfg(isHl ? { hl: { ...inkHl, ...patch } } : { pen: { ...inkPen, ...patch } });
+          // 칸 점 크기 — 굵기에 비례하되 버튼 안에 들어가게(펜 4~16px, 형광펜 6~18px)
+          const dot = (w) => Math.round(isHl ? 6 + (w - wMin) / (wMax - wMin) * 12 : 4 + (w - wMin) / (wMax - wMin) * 12);
+          const mm = (w) => { const v = w * PT_MM; return (v < 1 ? v.toFixed(2) : v.toFixed(1)) + "mm"; };
+          const showW = inkWEdit && !inkSel && (inkTool === "pen" || inkTool === "hl");
           return (
+            <>
             <div className="vb-inkbar" role="toolbar" aria-label="필기 도구">
               {tools.map(([k, label, icon]) => (
                 <button key={k} className={"vb-inkb" + (inkTool === k ? " on" : "")} aria-label={label} title={label}
-                  onClick={() => setInkCfg({ tool: k })}>
+                  onClick={() => { setInkWEdit(false); setInkCfg({ tool: k }); }}>
                   <svg viewBox="0 0 24 24">{icon}</svg>
                 </button>
               ))}
@@ -4811,10 +4834,14 @@ export default function VerbatimReader() {
                       aria-label={"색 " + c} onClick={() => setCur({ c })} />
                   ))}
                   <i className="vb-inksep" />
-                  {widths.map((w, i) => (
-                    <button key={w} className={"vb-inkw" + (cur.w === w ? " on" : "")} aria-label={["가늘게", "보통", "굵게"][i]}
-                      onClick={() => setCur({ w })}>
-                      <b style={{ width: 4 + i * 4, height: 4 + i * 4, background: cur.c }} />
+                  {cur.ws.map((w, i) => (
+                    <button key={i} className={"vb-inkw" + (cur.wi === i ? " on" : "")}
+                      aria-label={["가늘게", "보통", "굵게"][i] + " " + mm(w) + (cur.wi === i ? " — 한 번 더 누르면 굵기 조절" : "")}
+                      onClick={() => {
+                        if (cur.wi === i) setInkWEdit((v) => !v);
+                        else { setInkWEdit(false); setCur({ wi: i, w }); }
+                      }}>
+                      <b style={{ width: dot(w), height: dot(w), background: cur.c }} />
                     </button>
                   ))}
                 </>
@@ -4833,6 +4860,27 @@ export default function VerbatimReader() {
               </button>
               {inkErr && <span className="vb-inkerr">{inkErr}</span>}
             </div>
+            {showW && (
+              <div className="vb-inkwpop" role="group" aria-label="굵기 조절">
+                <svg className="vb-inkwprev" viewBox="0 0 120 32" aria-hidden="true">
+                  <path d="M8 22C32 6 52 6 64 16S100 28 112 10" stroke={cur.c} fill="none"
+                    strokeWidth={Math.min(28, cur.w * 1.6)} strokeLinecap={isHl ? "butt" : "round"} strokeLinejoin="round"
+                    strokeOpacity={isHl ? HL_ALPHA * 1.6 : 1} />
+                </svg>
+                <input type="range" min={wMin} max={wMax} step={isHl ? 0.5 : 0.1} value={cur.w}
+                  aria-label="굵기" onChange={(e) => {
+                    const w = Math.round(+e.target.value * 10) / 10;
+                    const ws = cur.ws.map((v, j) => (j === cur.wi ? w : v));
+                    setCur({ w, ws });
+                  }} />
+                <span className="vb-inkwval">{mm(cur.w)}</span>
+                <button className="vb-inkwreset" onClick={() => {
+                  const d = (isHl ? INK_HL_W : INK_PEN_W)[cur.wi];
+                  setCur({ w: d, ws: cur.ws.map((v, j) => (j === cur.wi ? d : v)) });
+                }}>기본값</button>
+              </div>
+            )}
+            </>
           );
         })()}
 
