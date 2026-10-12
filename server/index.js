@@ -984,7 +984,7 @@ async function callOAI({ system, user, image, history = [], maxTokens, signal, m
         { role: "user", content },
       ],
       max_tokens: maxTokens,
-      temperature: 0.3,
+      // temperature 는 정하지 않는다 — 각 모델의 기본값(추론 모델은 낮추면 반복·추론 저하). 찾기 시험도 기본값으로 잰다.
       stream: true,
       // 탭용 "속생각 끄기" 설정(찾기 때 모델마다 알아낸 것 — chat_template_kwargs 또는 reasoning_effort)
       ...(gen || {}),
@@ -1017,7 +1017,8 @@ async function callGemini({ system, user, image, history = [], maxTokens, signal
         ...history.map((t) => ({ role: t.role === "assistant" ? "model" : "user", parts: [{ text: t.text }] })),
         { role: "user", parts },
       ],
-      generationConfig: { maxOutputTokens: maxTokens, temperature: 0.3, ...(gen || {}) },
+      // temperature 는 정하지 않는다 — Gemini 3.x 는 기본값 권장(낮추면 반복·추론 저하). 찾기 시험도 기본값으로 잰다.
+      generationConfig: { maxOutputTokens: maxTokens, ...(gen || {}) },
     }),
   });
   if (!res.ok) {
