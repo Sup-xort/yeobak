@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:server": "node --env-file=.env --watch server/index.js",
-    "build": "vite build",
+    "build": "vite build && node scripts/gzip-dist.mjs",
     "start": "node --env-file=.env server/index.js"
   },
   "dependencies": {

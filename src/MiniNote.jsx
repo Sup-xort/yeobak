@@ -3,14 +3,18 @@
    넘겨 보며 필기한다(플렉실의 노트 창을 본뜬 것 — 본문 읽으며 기출 풀기). 손잡이를 끌어 옮기고,
    창 크기는 고정, 안에서 두 손가락으로 확대(1~4배)한다. 고른 적 없으면 본문에서 바로 전에 연 문서를 띄운다.
 
-   본문 뷰어(App.jsx)와 완전히 따로 돈다 — pdf 문서·쪽 DOM·필기 데이터 모두 이 컴포넌트 것이다.
-   본문과 같은 문서는 못 연다(두 곳에서 같은 필기 파일을 덮어쓰게 되므로).
+   본문 뷰어(App.jsx)와 따로 돈다 — pdf 문서·쪽 DOM 은 이 컴포넌트 것이다. 필기 데이터만은 App 의
+   문서별 저장소(acquireAnn)에서 받아, 본문과 같은 문서를 열면 **같은 객체**를 나눠 쓴다(2026-10-09~).
+   그래서 같은 문서의 다른 쪽을 띄워 놓고 양쪽에서 써도 서로의 획을 덮지 않는다 — 한쪽에서 바꾸면
+   다른 쪽은 그 쪽만 다시 그린다(mark → onInkPaint, App 의 markInk → apiRef.repaint).
    필기는 본문의 필기 모드(✎)를 따른다: 켜져 있으면 애플펜슬로 쓰고, 도구·색·굵기도 본문과 같은 것.
    올가미는 여기선 안 된다. 실행취소는 본문의 ↶ 가 같이 맡는다 — 연산에 mini(문서 id)를 달아
    App 의 inkApply 가 apiRef.apply 로 넘긴다.
    좌표·저장 형식은 본문 필기와 같다(src/ink.js 머리말) — 그래서 같은 문서를 본문에서 열면 그대로 보인다. */
 import { useState, useRef, useEffect } from "react";
-import { drawStroke, hitStroke, snapLine, tidyPts, strokePath, HL_ALPHA } from "./ink.js";
+import { drawStroke, hitStroke, isScribble, scribbleHits, snapLine, tidyPts, strokePath, HL_ALPHA } from "./ink.js";
+import { getPdf, pdfSource } from "./pdfCache.js";
+import { u } from "./paths.js";
 
 const LS = "yeobaek-mini";
 const lsLoad = () => { try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; } };
@@ -19,6 +23,7 @@ const SVGNS = "http://www.w3.org/2000/svg";
 const Z_MIN = 1, Z_MAX = 4;
 const MAX_PX = 8e6; // 쪽 캔버스 하나의 픽셀 상한 — 크게 확대해도 사파리 캔버스 한도에 안 걸리게
 const recentOf = (f) => f.lastOpenedAt || f.at || 0;
+const freeCanvas = (c) => { c.width = 0; c.height = 0; c.remove(); }; // App.jsx 의 같은 이름 참고
 
 const inkPathEl = (s) => {
   const p = document.createElementNS(SVGNS, "path");
@@ -32,7 +37,8 @@ const inkPathEl = (s) => {
   return p;
 };
 
-export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkOn, inkCfgRef, onInkOp, apiRef, invert, coarse }) {
+export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkOn, inkCfgRef, onInkOp, apiRef, invert, coarse,
+  acquireAnn, releaseAnn, onInkPaint }) {
   const st = useRef(null);
   if (!st.current) st.current = { pages: {}, ...lsLoad() };
   const [docId, setDocId] = useState(st.current.id || null);
@@ -62,9 +68,9 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
   const files = lib?.files || [];
   const libReady = files.length > 0;
   const missing = docId && libReady && !files.some((f) => f.id === docId);
-  // 고른 문서가 없으면(처음, 지웠음, 본문에 열려 있음) 본문에서 바로 전에 연 문서
+  // 고른 문서가 없으면(처음, 지웠음) 본문에서 바로 전에 연 문서. 본문 문서도 고를 수는 있다
   const recent = files.filter((f) => f.id !== mainId).sort((a, b) => recentOf(b) - recentOf(a));
-  const effId = docId && docId !== mainId && !missing ? docId : recent[0]?.id || null;
+  const effId = docId && !missing ? docId : recent[0]?.id || null;
   const docName = files.find((f) => f.id === effId)?.name?.replace(/\.pdf$/i, "") || "";
   const showPick = picking || !effId;
 
@@ -90,6 +96,7 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
   };
   const mark = (n) => {
     dirtyRef.current.add(n);
+    onInkPaint?.(annRef.current?.id, n); // 본문에 같은 문서가 열려 있으면 그쪽도 다시 그린다
     clearTimeout(timerRef.current);
     timerRef.current = setTimeout(flush, 800);
   };
@@ -124,6 +131,8 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
 
   // 실행취소·다시실행 — App 의 inkApply 가 mini 가 달린 연산을 여기로 넘긴다
   apiRef.current = {
+    id: () => annRef.current?.id || null,
+    repaint: (n) => paint(n),
     apply(op, dir) {
       const a = annRef.current;
       if (!a || a.id !== op.mini) return; // 그새 다른 문서로 바꿨다 — 되돌릴 대상이 없다
@@ -145,22 +154,26 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
   /* ── 문서 받기 ── 처음 열릴 때(shown) 받고, 닫아도 들고 있다가 다시 열면 그 자리 그대로 */
   useEffect(() => {
     if (!effId || !shown || !window.pdfjsLib) return;
-    let dead = false;
+    let dead = false, held = null;
     setErr(""); setLoading(true); setNPages(0);
     (async () => {
       try {
         // 필기는 파일을 한 번 받은 뒤에 읽는다 — 서버가 첫 GET 때 PDF 속 주석을 필기로 가져온다
-        const buf = await (await libApi("/api/library/file/" + effId)).arrayBuffer();
-        const ann = await (await libApi(`/api/library/file/${effId}/annots`)).json();
+        // 본문과 같은 저장소(src/pdfCache.js) — 기기에 있으면 안 받고, 필요한 조각만 읽는다
+        const { blob } = await getPdf(u("/api/library/file/" + effId));
+        const ann = await acquireAnn(effId);
+        if (dead) { if (ann) releaseAnn(effId); return; } // 정리(cleanup)가 먼저 돌았다 — 여기서 놓는다
+        if (!ann) throw new Error("필기를 불러오지 못했어요");
+        held = effId;
         const pdf = await window.pdfjsLib.getDocument({
-          data: new Uint8Array(buf), cMapUrl: cdn + "cmaps/", cMapPacked: true,
+          ...pdfSource(blob), cMapUrl: cdn + "cmaps/", cMapPacked: true,
         }).promise;
         if (dead) { pdf.destroy?.(); return; }
         const v = (await pdf.getPage(1)).getViewport({ scale: 1 });
         sizesRef.current = Array.from({ length: pdf.numPages }, () => [v.width, v.height]);
         pagesRef.current = [];
         pdfRef.current = pdf;
-        annRef.current = { id: effId, imported: !!ann.imported, pages: ann.pages || {} };
+        annRef.current = ann; // 본문과 같은 문서면 본문과 같은 객체
         setPg(Math.min(st.current.pages?.[effId] || 1, pdf.numPages));
         setNPages(pdf.numPages);
       } catch (e) {
@@ -176,6 +189,7 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
       pdfRef.current?.destroy?.();
       pdfRef.current = null;
       annRef.current = null;
+      if (held) releaseAnn(held);
     };
   }, [effId, shown]);
 
@@ -214,7 +228,7 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
           ? window.pdfjsLib.AnnotationMode.DISABLE : window.pdfjsLib.AnnotationMode.ENABLE,
       }).promise;
       if (pdfRef.current !== pdf || el.dataset.st !== tok) return;
-      el.querySelectorAll("canvas").forEach((c) => c.remove());
+      el.querySelectorAll("canvas").forEach(freeCanvas);
       el.insertBefore(cv, el.firstChild);
       if (!el.querySelector("svg.vb-ink")) paint(n);
     } catch {
@@ -225,7 +239,7 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
     const el = pagesRef.current[n - 1];
     if (!el) return;
     delete el.dataset.st;
-    el.querySelectorAll("canvas").forEach((c) => c.remove());
+    el.querySelectorAll("canvas").forEach(freeCanvas);
   };
 
   const observe = () => {
@@ -288,28 +302,74 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
     }
   };
 
-  /* ── 두 손가락 확대 ── 본문 핀치와 같은 두 단계: 손가락이 움직이는 동안은 .vb-mpages 에 CSS scale 만 걸고
-     (중점을 따라 직접 스크롤도 한다), 다 떼면 폭(%)을 바꿔 다시 그린 뒤 마지막 중점 아래 내용이 그 자리에
-     오도록 스크롤을 맞춘다. 첫 touchmove 가 cancelable 이 아니면 네이티브 스크롤이 이미 가져간 것 — 포기한다. */
+  /* ── 두 손가락 확대 ── 본문 핀치(App.jsx '두 손가락 핀치 줌')와 같은 규칙으로 돈다:
+     - 손가락이 움직이는 동안은 .vb-mpages 에 CSS scale 만 걸고 중점을 따라 직접 스크롤한다. 그동안 관찰(IO)을
+       끊는다 — 임시 scale 로 쪽이 600px 여유 밖으로 밀려 캔버스가 치워졌다가 다시 그려지는 걸 막는다.
+     - 앵커는 끝나는 순간 중점 아래의 **쪽 번호 + 쪽 안 비율**로 잡는다. 쪽 사이 간격(10px)은 확대해도 그대로라
+       "내용 좌표 × 배율"로 잡으면 아래쪽 쪽일수록 어긋났다.
+     - 새 폭을 넣은 뒤 목표 위치를 **절대값으로 대입**한다. 예전엔 `scrollTop +=` 상대 보정이라, 축소하면 내용이
+       짧아져 브라우저가 scrollTop 을 끝으로 잘라 둔 만큼이 그대로 오차가 됐다(2026-10-09 "작은 창에서 줌하면 튄다").
+     - 확정은 손가락을 **전부** 뗀 뒤에. 하나만 떼면 남은 손가락이 네이티브 스크롤을 시작해 iOS 가 우리가 넣은
+       scrollTop 을 덮어쓴다 — 남은 손가락의 move 는 막고, 다시 대면 같은 핀치를 이어 간다.
+     - 대입한 자리를 350ms 동안 지킨다(새로 만지면 그만) — iOS 가 관성·손가락 위치로 되덮는 걸 되돌린다.
+     첫 touchmove 가 cancelable 이 아니면 네이티브 스크롤이 이미 가져간 것 — 포기한다. */
   const applyZoom = () => { if (mpRef.current) mpRef.current.style.width = zoomRef.current * 100 + "%"; };
   useEffect(() => {
     const sc = scrollRef.current, mp = mpRef.current;
     if (!sc || !mp || !nPages || showPick) return;
-    let p = null; // {d0, z0, f, o:[ox,oy], m:[x,y]}
+    let p = null; // {d0, z0, f, m:[x,y], ids:Set}
     const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
     const mid = (t) => [(t[0].clientX + t[1].clientX) / 2, (t[0].clientY + t[1].clientY) / 2];
     const reset = () => { mp.style.transform = ""; mp.style.transformOrigin = ""; };
+    const abort = () => {
+      if (!p) return;
+      p = null;
+      reset();
+      observe();
+    };
+    // 화면 y 아래의 쪽(변환이 걸려 있어도 getBoundingClientRect 는 변환 후 좌표라 그대로 쓴다)
+    const pageAtY = (y) => {
+      const els = pagesRef.current;
+      let lo = 0, hi = nPages - 1, at = 0;
+      while (lo <= hi) {
+        const k = (lo + hi) >> 1;
+        const r = els[k]?.getBoundingClientRect();
+        if (!r) break;
+        if (r.top <= y) { at = k; lo = k + 1; } else hi = k - 1;
+      }
+      return at + 1;
+    };
     const onS = (e) => {
-      if (e.touches.length !== 2) { if (p && e.touches.length > 2) { reset(); p = null; } return; }
+      if (p) {
+        // 한 손가락을 남긴 채 다른 손가락을 다시 댔다 — 지금 배율에서 이어 간다
+        const kept = [...e.touches].filter((t) => p.ids.has(t.identifier));
+        if (e.touches.length === 2 && kept.length === 1) {
+          p.ids = new Set([...e.touches].map((t) => t.identifier));
+          p.d0 = dist(e.touches) / p.f;
+          p.m = mid(e.touches);
+          return;
+        }
+        abort(); // 끝을 놓쳤거나 세 번째 손가락 — 버린다
+        return;
+      }
+      if (e.touches.length !== 2) return;
       if ([...e.touches].some((t) => t.touchType === "stylus")) return; // 필기 중 손바닥
       const r = mp.getBoundingClientRect();
       const m = mid(e.touches);
-      p = { d0: dist(e.touches), z0: zoomRef.current, f: 1, o: [m[0] - r.left, m[1] - r.top], m };
-      mp.style.transformOrigin = `${p.o[0]}px ${p.o[1]}px`;
+      p = { d0: dist(e.touches), z0: zoomRef.current, f: 1, m, ids: new Set([...e.touches].map((t) => t.identifier)) };
+      ioRef.current?.disconnect();
+      mp.style.transformOrigin = `${m[0] - r.left}px ${m[1] - r.top}px`;
     };
     const onM = (e) => {
-      if (!p || e.touches.length !== 2) return;
-      if (!e.cancelable) { reset(); p = null; return; }
+      if (!p) return;
+      if (e.touches.length === 1) {
+        // 다 뗄 때까지 확정을 미룬다 — 그동안 남은 손가락의 네이티브 스크롤을 막는다. 못 막으면 지금 확정
+        if (e.cancelable) e.preventDefault();
+        else commit();
+        return;
+      }
+      if (e.touches.length !== 2) return;
+      if (!e.cancelable) { abort(); return; }
       e.preventDefault();
       const m = mid(e.touches);
       sc.scrollLeft -= m[0] - p.m[0];
@@ -320,32 +380,64 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
       mp.style.transform = `scale(${p.f})`;
     };
     const onE = (e) => {
-      if (!p || e.touches.length) return;
-      const { f, o, m } = p;
+      if (!p) return;
+      if (e.touches.length === 0) commit();
+      else p.ids = new Set([...e.touches].map((t) => t.identifier));
+    };
+    const commit = () => {
+      if (!p) return;
+      const { f, z0, m } = p;
       p = null;
+      // 앵커 — 변환이 걸린 채로 잰다: 중점 아래 쪽 n 과 그 쪽 안의 비율
+      const n = pageAtY(m[1]);
+      const el0 = pagesRef.current[n - 1];
+      const r0 = el0?.getBoundingClientRect();
+      const fx = r0 ? (m[0] - r0.left) / r0.width : 0.5;
+      const fy = r0 ? (m[1] - r0.top) / r0.height : 0;
       reset();
-      if (Math.abs(f - 1) < 0.01) return;
-      // 변환 없는 지금 위치 L 에서, 마지막 중점 아래 있던 내용 좌표 u(변환 전 배율 기준)
-      const r = mp.getBoundingClientRect();
-      const ux = o[0] + (m[0] - r.left - o[0]) / f, uy = o[1] + (m[1] - r.top - o[1]) / f;
-      zoomRef.current *= f;
+      const next = Math.max(Z_MIN, Math.min(Z_MAX, z0 * f));
+      if (Math.abs(next - zoomRef.current) < 0.01 || !el0) { observe(); return; }
+      zoomRef.current = next;
       applyZoom();
-      sc.scrollLeft += r.left - m[0] + ux * f;
-      sc.scrollTop += r.top - m[1] + uy * f;
-      remember({ zoom: zoomRef.current });
-      // 새 폭으로 다시 그린다 — 옛 캔버스는 새 것이 나올 때까지 늘어난 채 남는다
-      pagesRef.current.forEach((el) => el && delete el.dataset.st);
+      // 새 폭이 반영된 뒤(getBoundingClientRect 가 레이아웃을 확정시킨다) 목표를 절대값으로 대입
+      const vr = sc.getBoundingClientRect();
+      const er = el0.getBoundingClientRect();
+      const want = {
+        top: er.top - vr.top + sc.scrollTop + fy * er.height - (m[1] - vr.top),
+        left: er.left - vr.left + sc.scrollLeft + fx * er.width - (m[0] - vr.left),
+      };
+      sc.scrollTop = want.top;
+      sc.scrollLeft = want.left;
+      want.top = sc.scrollTop; want.left = sc.scrollLeft; // 끝에 걸려 잘린 값이 기준
+      let touched = false;
+      const off = () => { touched = true; };
+      sc.addEventListener("touchstart", off, { passive: true });
+      const hold = () => {
+        if (touched || zoomRef.current !== next) return;
+        if (Math.abs(sc.scrollTop - want.top) > 4) sc.scrollTop = want.top;
+        if (Math.abs(sc.scrollLeft - want.left) > 4) sc.scrollLeft = want.left;
+      };
+      requestAnimationFrame(() => { hold(); requestAnimationFrame(hold); });
+      setTimeout(hold, 120);
+      setTimeout(() => { hold(); sc.removeEventListener("touchstart", off); }, 350);
+      remember({ zoom: next });
+      // 새 폭으로 다시 그린다 — 옛 캔버스는 새 것이 나올 때까지 늘어난 채 남는다.
+      // 관찰은 스크롤을 고친 다음에 붙인다(본문 relayout 과 같은 이유)
+      pagesRef.current.forEach((x) => x && delete x.dataset.st);
       observe();
     };
+    const onHide = () => { if (document.visibilityState !== "visible") abort(); };
     sc.addEventListener("touchstart", onS, { passive: true });
     sc.addEventListener("touchmove", onM, { passive: false });
     sc.addEventListener("touchend", onE, { passive: true });
-    sc.addEventListener("touchcancel", onE, { passive: true });
+    sc.addEventListener("touchcancel", abort, { passive: true });
+    document.addEventListener("visibilitychange", onHide);
     return () => {
       sc.removeEventListener("touchstart", onS);
       sc.removeEventListener("touchmove", onM);
       sc.removeEventListener("touchend", onE);
-      sc.removeEventListener("touchcancel", onE);
+      sc.removeEventListener("touchcancel", abort);
+      document.removeEventListener("visibilitychange", onHide);
       reset();
     };
   }, [nPages, showPick]);
@@ -477,6 +569,16 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
       if (c.kind === "draw" && a) {
         const s = c.s;
         s.pts = tidyPts(s.pts, 0.04);
+        const gone = s.t === "pen" && isScribble(s.pts) && a.pages[c.n] ? scribbleHits(a.pages[c.n], s) : [];
+        if (gone.length) { // 지그재그로 지웠다 — 지그재그 자신은 남기지 않는다
+          if (!a.pages[c.n].length) delete a.pages[c.n];
+          paint(c.n);
+          onInkOp({ k: "del", n: c.n, items: gone, mini: a.id });
+          mark(c.n);
+          wet.style.mixBlendMode = "";
+          render();
+          return;
+        }
         (a.pages[c.n] ||= []).push(s);
         const svg = pagesRef.current[c.n - 1]?.querySelector("svg.vb-ink." + (s.t === "hl" ? "hl" : "pen"));
         if (svg) svg.appendChild(inkPathEl(s)); else paint(c.n);
@@ -587,14 +689,16 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
     remember({ id });
   };
 
-  // 고르기 목록 — 맨 위에 폴더 밖 문서, 그 다음 폴더별. 본문에 열린 문서는 뺀다
+  // 고르기 목록 — 맨 위에 지금 본문 문서(다른 쪽을 같이 띄워 보기), 그 다음 폴더 밖 문서, 그 다음 폴더별
+  const mainFile = files.find((f) => f.id === mainId);
   const groups = (() => {
     const by = new Map([[null, []]]);
     for (const f of lib?.folders || []) by.set(f.id, []);
     for (const f of files) if (f.id !== mainId) (by.get(f.folder ?? null) || by.get(null)).push(f);
     const name = (id) => (lib?.folders || []).find((f) => f.id === id)?.name || "";
-    const out = [...by].filter(([, l]) => l.length).map(([id, l]) => ({ id, name: id ? name(id) : "", files: l }));
-    return recent.length > 6 ? [{ id: "recent", name: "최근 연 문서", files: recent.slice(0, 4) }, ...out] : out;
+    let out = [...by].filter(([, l]) => l.length).map(([id, l]) => ({ id, name: id ? name(id) : "", files: l }));
+    if (recent.length > 6) out = [{ id: "recent", name: "최근 연 문서", files: recent.slice(0, 4) }, ...out];
+    return mainFile ? [{ id: "main", name: "지금 본문 문서", files: [mainFile] }, ...out] : out;
   })();
 
   const style = pos ? { left: clampPos(pos.x, pos.y).x, top: clampPos(pos.x, pos.y).y, bottom: "auto" } : undefined;
@@ -615,16 +719,15 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
           <svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
         </button>
       </div>
-      <div className="vb-mbody">
+      <div className="vb-mnbody">
         {showPick ? (
           <div className="vb-mpick">
-            {docId && docId === mainId && <p className="vb-mnote">지금 본문에 열린 문서는 여기서 열 수 없어요.</p>}
-            {!groups.length && <p className="vb-mnote">서재에 띄울 다른 문서가 없어요.</p>}
+            {!groups.length && <p className="vb-mnote">서재에 띄울 문서가 없어요.</p>}
             {groups.map((g) => (
               <section key={g.id ?? "root"}>
                 {g.name && <h4>{g.name}</h4>}
                 {g.files.map((f) => (
-                  <button key={f.id} className={"vb-mrow" + (f.id === effId ? " on" : "")} onClick={() => pick(f.id)}>
+                  <button key={g.id + f.id} className={"vb-mrow" + (f.id === effId ? " on" : "")} onClick={() => pick(f.id)}>
                     {f.name.replace(/\.pdf$/i, "")}
                   </button>
                 ))}

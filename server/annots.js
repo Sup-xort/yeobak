@@ -192,7 +192,7 @@ export async function exportWithAnnots(bytes, data) {
       // 화면(drawStroke)과 같은 모양: 고정 굵기, 펜은 둥근 캡, 형광펜은 평평한 캡, 같은 곡선 보정
       body += `${c4} RG ${f2(s.w)} w ${hl ? 0 : 1} J 1 j\n`;
       // 곡선도 화면과 같은 curve()(src/ink.js "필기 보정") — 2차 베지에를 PDF 의 3차 c 로 바꿔 쓴다
-      const cv = curve(s.pts);
+      const cv = curve(s.pts, s.w);
       const P = (x, y) => U(x, y).map(f2).join(" ");
       let [px, py] = cv.m;
       body += `${P(px, py)} m\n`;

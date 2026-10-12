@@ -72,18 +72,27 @@ const NIM_SKIP = new RegExp([
   "calibration",
   "llama-3\\.2-11b-vision", // 2026-07-30 실측: 같은 구절 무한 반복(자동 시험으론 안 잡힌다)
 ].join("|"), "i");
-const sizeB = (id) => { const m = /(\d+(?:\.\d+)?)b(?![a-z])/i.exec(id.split("/").pop()); return m ? Number(m[1]) : 0; };
+// OpenAI 호환 프로바이더 셋(NIM·Groq·OpenRouter)이 같은 순위에서 다툰다(2026-10-09). NIM 은 접두어 없이 —
+// 그 전부터 쌓인 models.json·model-stats.json 의 id 가 그대로 이어지게.
+const SKIP_EXTRA = /orpheus|allam|compound|lfm-|content-safety/i; // Groq·OpenRouter 목록에만 있는 비대화 모델
+const PREFIX = [["gemini/", ""], ["groq/", " · Groq"], ["openrouter/", " · OpenRouter"]];
+const bare = (id) => id.split("/").pop().replace(/:free$/, "");
+const sizeB = (id) => { const m = /(\d+(?:\.\d+)?)b(?![a-z])/i.exec(bare(id)); return m ? Number(m[1]) : 0; };
+/* 그림째 곧바로 푸는(visionDirect) 모델 — Gemini 전부 + 여기 맞는 것. 그림도 보고 추론도 강해야 해서
+   이름으로 고른다(자동 시험으론 "추론이 강한가"를 못 잰다). 2026-10-09 사용자 결정: kimi-k3 까지만.
+   작은 비전 모델(gemma·llama-vision)은 옮겨 적기만 맡는다 — 직접 풀면 수학·과학 추론이 약하다. */
+const DIRECT = /kimi-k3/i;
 
 /* 사람이 읽을 이름 — "deepseek-ai/deepseek-v4.1-flash" → "DeepSeek V4.1 Flash" */
 const WORDS = { glm: "GLM", gpt: "GPT", oss: "OSS", deepseek: "DeepSeek", nemotron: "Nemotron", llama: "Llama",
   qwen: "Qwen", qwq: "QwQ", kimi: "Kimi", gemma: "Gemma", mistral: "Mistral", phi: "Phi", gemini: "Gemini",
   latest: "(최신)", preview: "(미리보기)", lite: "Lite", vl: "VL", minimax: "MiniMax", nim: "NIM" };
 function labelOf(id) {
-  const gem = id.startsWith("gemini/");
-  const toks = id.split("/").pop().split("-").filter((t) => t && !/^(it|instruct|chat|a\d+b|\d{4})$/i.test(t));
+  const tail = (PREFIX.find(([p]) => id.startsWith(p)) || [, " · NIM"])[1];
+  const toks = bare(id).split("-").filter((t) => t && !/^(it|instruct|chat|a\d+b|\d{4})$/i.test(t));
   const out = toks.map((t) => WORDS[t.toLowerCase()] ||
     (/^\d+(\.\d+)?b$/i.test(t) ? t.toUpperCase() : /^v\d/i.test(t) ? t.toUpperCase() : t[0].toUpperCase() + t.slice(1)));
-  return out.join(" ") + (gem ? "" : " · NIM");
+  return out.join(" ") + tail;
 }
 
 /* 비전 테스트용 32×32 빨간 PNG — 이미지 도구가 없는 서버라 zlib 로 직접 만든다 */
@@ -99,7 +108,19 @@ function redPng() {
 }
 const PROBE_PNG = redPng();
 
-export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
+export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE, GROQ_KEY, OPENROUTER_KEY }) {
+  /* 프로바이더. tap:false — 탭(가장 자주 부르는 것)에 안 쓴다. cheap — 하루 요청 한도가 작아(OpenRouter 무료 50회)
+     찾기 때 한 번만 부르고, 그림을 받는지는 목록의 메타데이터를 믿는다. */
+  const GEM = { id: "gemini", name: "Gemini", org: "Google", prefix: "gemini/", key: GEMINI_KEY };
+  const OAI = [
+    { id: "groq", name: "Groq", org: "Groq", prefix: "groq/", base: "https://api.groq.com/openai/v1", key: GROQ_KEY, tap: true },
+    { id: "or", name: "OpenRouter", org: "OpenRouter", prefix: "openrouter/", base: "https://openrouter.ai/api/v1", key: OPENROUTER_KEY, tap: false, cheap: true },
+    { id: "nim", name: "NIM", org: "NVIDIA", prefix: "", base: NIM_BASE, key: NIM_KEY, tap: true },
+  ];
+  const provOf = (id) => (id.startsWith("gemini/") ? GEM : OAI.find((p) => p.prefix && id.startsWith(p.prefix)) || OAI.at(-1));
+  /* index.js 가 부를 곳 — { name, base, key, model(접두어 뺀 업스트림 id) } */
+  const upstream = (id) => { const p = provOf(id); return { name: p.name, gem: p === GEM, base: p.base, key: p.key, model: id.slice(p.prefix.length) }; };
+  const orVision = new Map(); // OpenRouter 목록의 input_modalities 로 안 그림 입력 여부
   const FILE = path.join(DATA_DIR, "models.json");
   /* reg: id → { id, label, think, vision, gen, firstMs, status, checkedAt, dead } — 찾기 결과(저장됨)
      st:  id → { okEw, msEw, lastOk, lastFail, status, at }                       — 실사용 점수(메모리) */
@@ -107,7 +128,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
   let updatedAt = 0;
   let discovering = false;
   const st = new Map();
-  const events = []; // { gem, ok, at } — 프로바이더 단위 판정용 최근 기록
+  const events = []; // { prov, ok, at } — 프로바이더 단위 판정용 최근 기록
   const STATS = path.join(DATA_DIR, "model-stats.json");
   // 점수는 재기동해도 잊지 않는다 — 예전엔 재기동하면 방금 한도가 끝난 모델을 처음부터 다시 두드렸다
   try { for (const [id, v] of Object.entries(JSON.parse(fs.readFileSync(STATS, "utf8")))) st.set(id, v); } catch {}
@@ -135,7 +156,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     fs.renameSync(tmp, FILE);
   };
   const isGem = (id) => id.startsWith("gemini/");
-  const hasKey = (id) => (isGem(id) ? !!GEMINI_KEY : !!NIM_KEY);
+  const hasKey = (id) => !!provOf(id).key;
 
   /* ── 점수 ──
      실패할 때마다 점수를 **깎는다**: 성공률(okEw)은 실패 한 번에 절반이 되고 성공으로 조금씩 회복한다.
@@ -168,7 +189,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     if (ok) s.quotaUntil = 0;
     st.set(id, s);
     statsDirty = true;
-    events.push({ gem: isGem(id), ok, at: Date.now() });
+    events.push({ prov: provOf(id).id, ok, at: Date.now() });
     while (events.length && Date.now() - events[0].at > PROVIDER_WIN) events.shift();
     // 실사용에서 410·404 가 나면 곧바로 목록에서 뺀다 — 다음 찾기까지 기다리지 않는다
     if (!ok && (status === 410 || status === 404) && reg.has(id)) {
@@ -182,9 +203,9 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     return !!s?.lastFail && (!s.lastOk || s.lastFail > s.lastOk) && Date.now() - s.lastFail < RECENT_BAD;
   };
   /* 프로바이더가 지금 막혀 있나 — 최근 5분 실패 3번 이상 + 실패가 성공보다 많음 */
-  function providerDown(gem) {
+  function providerDown(prov) {
     let f = 0, o = 0;
-    for (const e of events) if (e.gem === gem && Date.now() - e.at < PROVIDER_WIN) e.ok ? o++ : f++;
+    for (const e of events) if (e.prov === prov && Date.now() - e.at < PROVIDER_WIN) e.ok ? o++ : f++;
     return f >= 3 && f > o;
   }
   const speed = (id, lane = "main") => {
@@ -194,7 +215,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
   };
   const reliab = (id) => okNow(st.get(id));
   /* 벌점: 0 이면 멀쩡. 정렬의 첫 기준이다. 모델 자신이 방금 실패(2), 성공률이 반 밑(1), 그 프로바이더가 막힘(1). */
-  const penalty = (id) => (recentBad(id) ? 2 : 0) + (reliab(id) < 0.5 ? 1 : 0) + (providerDown(isGem(id)) ? 1 : 0);
+  const penalty = (id) => (recentBad(id) ? 2 : 0) + (reliab(id) < 0.5 ? 1 : 0) + (providerDown(provOf(id).id) ? 1 : 0);
   const version = (id) => Number(/(\d+(?:\.\d+)?)-/.exec(id.split("/").pop().replace(/^gemini-/, ""))?.[1] || 0);
   /* 질문 탭 품질 순위 — 잴 수 없는 것이라 규칙으로 둔다 */
   function quality(id) {
@@ -211,9 +232,10 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
 
   const alive = (m) => !m.dead && hasKey(m.id);
   // 탭 자격 = 찾기 때 "속생각 끈 설정으로 단어 풀이 시험"을 통과하고(tapMs 가 있음) 충분히 빠른 것
-  const isTap = (m) => alive(m) && m.chat !== false && m.tapMs !== undefined && m.tapMs <= TAP_MAX_MS;
+  const isTap = (m) => alive(m) && provOf(m.id).tap !== false && m.chat !== false && m.tapMs !== undefined && m.tapMs <= TAP_MAX_MS;
   const isAsk = (m) => alive(m) && m.chat !== false;
   const isVision = (m) => alive(m) && (isGem(m.id) || m.vision);
+  const canDirect = (id) => !!reg.get(id) && isVision(reg.get(id)) && (isGem(id) || DIRECT.test(id));
 
   function order(kind) {
     const list = [...reg.values()].filter(kind === "tap" ? isTap : kind === "image" ? isVision : isAsk).map((m) => m.id);
@@ -230,23 +252,22 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
 
   /* 한 요청의 시도 순서. picked 가 있으면 맨 앞(질문 탭은 방금 실패했어도 — 고른 의미가 없어지므로,
      탭은 속도가 먼저라 방금 실패했으면 뒤로). 이미지는 그림을 받는 모델만. */
-  /* gemOnly: 그림째 한 번에 푸는 경로(visionDirect). 따로 규칙을 두지 않고 **캡처 순위를 그대로 쓴다** —
-     순위표 맨 앞에서부터 Gemini 가 이어지는 동안만 시도하고, 순위상 NIM 모델이 앞에 서는 순간 멈춘다.
-     그러면 클라이언트가 두 단계(NIM 이 옮겨 적기 → 질문 탭 모델이 풀기)로 넘어간다. Gemini 가 실패할 때마다
-     점수가 깎이고(벌점, "Google 전체가 막힘") 다음 모델을 다시 고르므로, 막혀 있으면 한두 번 만에 NIM 이
-     앞에 서서 저절로 멈춘다. 방금 막힌 게 기록돼 있으면 처음부터 빈 줄 → 곧바로 두 단계. */
+  /* gemOnly: 그림째 한 번에 푸는 경로(visionDirect). 이름은 옛것 — 이제 Gemini 와 DIRECT(kimi-k3)가 시도한다.
+     벌점이 적은 순, 같으면 Gemini 먼저(빠르다). 방금 실패한 모델(벌점 2 이상)은 빼서, Google 이 막혀 있으면
+     곧바로 kimi 로, 둘 다 막혀 있으면 빈 줄 → 클라이언트가 두 단계(작은 비전 모델이 옮겨 적기 → 질문 탭 모델이 풀기)로
+     넘어간다. 예전엔 순위표에서 NIM 이 앞에 서는 순간 멈췄다(Gemini 만 직접 풀었다). */
   function chain({ kind, picked, gemOnly, ask }) {
     const base = order(kind);
     if (gemOnly) {
       /* 질문(문제풀이·그림 딸린 질문)이면 **질문 탭 순위**를 따른다 — 사용자가 보는 자동 선택 목록이 그것이고,
          문제를 푸는 데는 빠른 것보다 똑똑한 게 맞다. 예전엔 캡처 순위(빠른 순)를 써서 목록 1위가 3.8 Flash 인데
          실제로는 맨 밑의 Flash Lite 가 풀었다(2026-10-06 실기기). 고른 모델이 Gemini 면 맨 앞. */
-      const src = ask ? order("ask").filter((id) => isVision(reg.get(id))) : base;
-      const lead = [];
-      for (const id of src) { if (!isGem(id)) break; lead.push(id); }
-      if (ask && picked && isGem(picked) && reg.get(picked) && isVision(reg.get(picked)))
+      const src = ask ? order("ask") : base;
+      const lead = src.filter((id) => canDirect(id) && penalty(id) < 2)
+        .sort((a, b) => penalty(a) - penalty(b) || isGem(b) - isGem(a)); // 안정 정렬 — 그 안에선 원래 순위
+      if (ask && picked && canDirect(picked))
         lead.splice(0, lead.length, picked, ...lead.filter((id) => id !== picked));
-      return lead.filter((id) => !(st.get(id)?.quotaUntil > Date.now()));
+      return lead.slice(0, 5);
     }
     const m = picked && reg.get(picked);
     const ok = m && (kind === "tap" ? alive(m) : kind === "image" ? isVision(m) : isAsk(m));
@@ -284,10 +305,10 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
             body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: "hi" }] }],
               generationConfig: { maxOutputTokens: 1, ...(reg.get(id)?.gen || {}) } }),
           })
-        : await fetch(`${NIM_BASE}/chat/completions`, {
+        : await fetch(`${provOf(id).base}/chat/completions`, {
             method: "POST", signal: AbortSignal.timeout(10_000),
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${NIM_KEY}` },
-            body: JSON.stringify({ model: id, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+            headers: { "Content-Type": "application/json", Authorization: `Bearer ${provOf(id).key}` },
+            body: JSON.stringify({ model: upstream(id).model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
           });
       // 1토큰 응답 시간은 첫 글자 시간과 비슷하지만 같지 않다 — 성공 여부만 믿고 시간은 약하게 반영
       record(id, r.ok, r.status, r.ok ? Date.now() - t0 : 0);
@@ -311,6 +332,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     let n = 0;
     for (const id of cands) {
       if (n >= max) break;
+      if (provOf(id).cheap) continue; // 하루 한도가 작은 곳은 실사용으로만 잰다
       if (Date.now() - (st.get(id)?.at || 0) > FRESH_MS) { ping(id); n++; }
     }
   }
@@ -327,12 +349,16 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
       .filter((n) => n.startsWith("gemini-") && !GEMINI_SKIP.test(n))
       .map((n) => "gemini/" + n);
   }
-  async function listNIM() {
-    if (!NIM_KEY) return [];
-    const r = await fetch(`${NIM_BASE}/models`, { headers: { Authorization: `Bearer ${NIM_KEY}` }, signal: AbortSignal.timeout(20_000) });
-    if (!r.ok) throw new Error("NIM 목록 " + r.status);
-    return ((await r.json()).data || []).map((m) => m.id)
-      .filter((id) => !NIM_SKIP.test(id) && !(sizeB(id) && sizeB(id) < 7));
+  async function listOAI(p) {
+    if (!p.key) return [];
+    const r = await fetch(`${p.base}/models`, { headers: { Authorization: `Bearer ${p.key}` }, signal: AbortSignal.timeout(20_000) });
+    if (!r.ok) throw new Error(`${p.name} 목록 ${r.status}`);
+    // OpenRouter 는 무료(:free)만 — 이 키는 크레딧이 없다
+    const data = ((await r.json()).data || []).filter((m) => !p.cheap || /:free$/.test(m.id));
+    for (const m of data) if (p.cheap) orVision.set(p.prefix + m.id, !!m.architecture?.input_modalities?.includes("image"));
+    return data.map((m) => m.id)
+      .filter((id) => !NIM_SKIP.test(id) && !SKIP_EXTRA.test(id) && !(sizeB(id) && sizeB(id) < 7))
+      .map((id) => p.prefix + id);
   }
 
   /* 스트림을 끝까지(또는 TEST_MS 까지) 읽는다 → { ok, status, firstMs, think, text }.
@@ -410,15 +436,18 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     return { ok: false, status: 400 };
   }
   const NIM_NO_THINK = [{ chat_template_kwargs: { enable_thinking: false } }, { reasoning_effort: "low" }];
-  async function testNIM(id) {
-    const url = `${NIM_BASE}/chat/completions`;
+  async function testOAI(id) {
+    const p = provOf(id);
+    const url = `${p.base}/chat/completions`;
     const call = (content, max = 1500, extra) => streamTest(url, {
-      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${NIM_KEY}` },
-      body: JSON.stringify({ model: id, messages: [{ role: "user", content }], max_tokens: max, stream: true, ...(extra || {}) }),
+      method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${p.key}` },
+      body: JSON.stringify({ model: upstream(id).model, messages: [{ role: "user", content }], max_tokens: max, stream: true, ...(extra || {}) }),
     }, false);
     const r = await call(Q);
     // 추론 모델이 시간 안에 답까지 못 갔으면 품질은 모른다(undefined) — 빼지는 않는다
     if (r.ok) r.quality = r.text ? passes(r.text) : undefined;
+    // 하루 한도가 작은 곳: 이 한 번으로 끝. 탭엔 안 쓰고, 그림은 목록 메타데이터를 믿는다.
+    if (p.cheap) { if (r.ok) r.vision = orVision.get(id) ?? false; return r; }
     /* 탭용: 속생각을 끈 설정을 찾는다. NIM 은 모델마다 받는 방법이 다르다(2026-09-28 실측, 단어 탭 첫 글자):
          chat_template_kwargs.enable_thinking=false — nemotron-3.5-lightning 0.6초, nano-omni 0.5초, ultra 3.3초
          reasoning_effort="low"                      — gpt-oss-20b 0.8초, muse-glimmer 3.8초
@@ -432,7 +461,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
         }
       }
     }
-    /* 그림 시험은 **모든** NIM 대화 모델에 한다 — 이름으로 짐작하면 놓친다(2026-09-28: 이름에 vision 이
+    /* 그림 시험은 **모든** 대화 모델에 한다 — 이름으로 짐작하면 놓친다(2026-09-28: 이름에 vision 이
        없는 muse-glimmer-30b·nemotron-3-nano-omni 가 실제로 그림을 읽었다). 못 받는 모델은 400 으로 곧장 거절한다. */
     if (r.ok) {
       const v = await call([{ type: "text", text: "이 그림은 무슨 색인가? 한국어 한 단어로." },
@@ -452,13 +481,15 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     const t0 = Date.now();
     try {
       const found = [];
-      for (const [name, fn] of [["Gemini", listGemini], ["NIM", listNIM]]) {
-        try { found.push(...(await fn())); } catch (e) { console.warn(`[모델] ${name} 목록 실패: ${e.message}`); }
+      const okProv = new Set(); // 목록을 받은 프로바이더 — 못 받은 곳의 모델을 "목록에서 사라짐"으로 빼지 않게
+      for (const [p, fn] of [[GEM, listGemini], ...OAI.map((p) => [p, () => listOAI(p)])]) {
+        if (!p.key) continue;
+        try { found.push(...(await fn())); okProv.add(p.id); } catch (e) { console.warn(`[모델] ${p.name} 목록 실패: ${e.message}`); }
       }
-      if (!found.length) return; // 두 목록 다 못 받았으면 있던 걸 그대로 둔다
+      if (!found.length) return; // 목록을 하나도 못 받았으면 있던 걸 그대로 둔다
       const listed = new Set(found);
       // 목록에서 사라진 모델은 뺀다
-      for (const m of reg.values()) if (!listed.has(m.id) && hasKey(m.id)) Object.assign(m, { dead: true, status: "unlisted" });
+      for (const m of reg.values()) if (!listed.has(m.id) && hasKey(m.id) && okProv.has(provOf(m.id).id)) Object.assign(m, { dead: true, status: "unlisted" });
       const due = found.filter((id) => {
         const m = reg.get(id);
         if (!m || force) return true;
@@ -468,7 +499,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
       const worker = async () => {
         while (i < due.length) {
           const id = due[i++];
-          const r = isGem(id) ? await testGemini(id) : await testNIM(id);
+          const r = isGem(id) ? await testGemini(id) : await testOAI(id);
           const prev = reg.get(id);
           const m = { ...(prev || {}), id, label: labelOf(id), checkedAt: Date.now(), status: r.status };
           if (r.ok && r.quality === false) {
@@ -481,8 +512,8 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
               pending: !isGem(id) && r.vision === undefined });
             if (!prev || prev.dead) added++;
             record(id, true, 200, r.firstMs);
-          } else if ([400, 404, 410, 422].includes(r.status)) {
-            // 없는 모델·수명 끝·이 계정에서 못 씀·대화 모델이 아님 → 뺀다
+          } else if ([400, 401, 403, 404, 410, 422].includes(r.status)) {
+            // 없는 모델·수명 끝·이 계정에서 못 씀(OpenRouter 의 "에이전트 앱 전용" 무료 모델은 403)·대화 모델이 아님 → 뺀다
             if (prev && !prev.dead) removed++;
             m.dead = true;
             m.pending = false;
@@ -520,7 +551,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     const now = Date.now();
     if (s?.quotaUntil > now) return { cls: "jam", text: `한도 초과 · ${Math.ceil((s.quotaUntil - now) / 60000)}분 뒤 재개` };
     if (recentBad(id)) return { cls: "jam", text: "최근 실패" };
-    if (providerDown(isGem(id))) return { cls: "busy", text: isGem(id) ? "Google 불안정" : "NVIDIA 불안정" };
+    if (providerDown(provOf(id).id)) return { cls: "busy", text: `${provOf(id).org} 불안정` };
     if (reliab(id) < 0.5) return { cls: "busy", text: "실패 잦음" };
     const ms = speed(id);
     if (ms > 30000) return { cls: "busy", text: "느림" };
@@ -540,5 +571,5 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE }) {
     };
   }
 
-  return { record, chain, get, pickable, touch, discover, publicList, isGem, isDiscovering: () => discovering };
+  return { record, chain, get, pickable, touch, discover, publicList, isGem, upstream, isDiscovering: () => discovering };
 }

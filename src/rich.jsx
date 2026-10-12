@@ -14,6 +14,23 @@ import DOMPurify from "dompurify";
 
 marked.setOptions({ gfm: true, breaks: true });
 
+/* 한국어 굵게 — CommonMark 는 닫는 ** 앞이 문장부호(" ) 등)이고 뒤가 글자면 닫힘으로 안 본다.
+   그래서 모델이 늘 쓰는 **"전기 위치 에너지"**에서 · **보존력(conservative force)**이에요 가 별표째 나왔다
+   (영어는 뒤에 띄어쓰기가 와서 안 걸리고, 조사가 바로 붙는 한국어만 걸린다). 같은 줄 안의 **…** 는
+   앞뒤 글자를 따지지 않고 굵게 본다. 안쪽은 보통 인라인 문법(기울임·링크 등)을 그대로 탄다. */
+marked.use({
+  extensions: [{
+    name: "koStrong",
+    level: "inline",
+    start: (src) => src.indexOf("**"),
+    tokenizer(src) {
+      const m = /^\*\*(?![\s*])([^\n]*?[^\s\\*])\*\*(?!\*)/.exec(src);
+      if (!m) return;
+      return { type: "strong", raw: m[0], text: m[1], tokens: this.lexer.inlineTokens(m[1]) };
+    },
+  }],
+});
+
 /* 자리표시자는 마크다운이 건드릴 수 없는 글자만 쓴다(영숫자). */
 const CODE_TOK = (i) => `qqCODE${i}CODEqq`;
 const MATH_TOK = (i) => `qqMATH${i}MATHqq`;

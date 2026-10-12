@@ -19,9 +19,26 @@ export const HL_ALPHA = 0.35;
    내보내기(PDF 외관)가 전부 이 함수 하나를 거치므로 모양이 어디서나 같다.
    1) 이웃 점과 1:2:1 가중 평균 — 손떨림·샘플 지글거림을 걷어낸다(양 끝점은 그대로).
    2) 점과 점의 중점을 잇는 2차 베지에 — 꺾이는 곳 없이 매끈한 곡선이 되고, 원래 점 근처를 지난다.
+   0) 그보다 먼저, 앞 점에서 굵기의 35% 안쪽인 점은 건너뛴다(w 를 넘길 때). 크게 확대해 쓰면 240Hz 샘플 간격이
+      굵기보다 훨씬 짧아 손떨림이 굵기 안에서 **되꺾이는** 점이 줄줄이 생기는데(실측: 한 획 190점에 61번),
+      사파리는 그런 머리핀 곡선을 칠할 때 획 안쪽에 흰 구멍을 낸다(2026-10-09 실기기 사진). 굵기 안의 떨림은
+      어차피 안 보이니 걷어도 모양은 같다.
    반환: {m:[x,y], q:[[cx,cy,ex,ey],…], l:[x,y]|null} — moveTo, quadraticCurveTo 들, 마지막 lineTo. */
-export function curve(pts) {
+export function curve(pts, w = 0) {
   let p = pts;
+  const gap = Math.min(w * 0.35, 1);
+  if (gap > 0 && p.length > 2) {
+    const o = [p[0]];
+    for (let i = 1; i < p.length - 1; i++) {
+      const l = o[o.length - 1];
+      if (Math.hypot(p[i][0] - l[0], p[i][1] - l[1]) >= gap) o.push(p[i]);
+    }
+    const e = p[p.length - 1], l = o[o.length - 1];
+    // 끝점은 늘 남긴다 — 바로 앞 점이 너무 가까우면 그 점을 끝점으로 바꾼다
+    if (o.length > 1 && Math.hypot(e[0] - l[0], e[1] - l[1]) < gap) o[o.length - 1] = e;
+    else o.push(e);
+    p = o;
+  }
   const n = p.length;
   if (n >= 3) {
     const o = [p[0]];
@@ -32,15 +49,27 @@ export function curve(pts) {
   }
   const q = [];
   if (n < 3) return { m: p[0], q, l: n === 2 ? p[1] : null };
-  for (let i = 1; i < n - 1; i++)
-    q.push([p[i][0], p[i][1], (p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2]);
+  /* 90° 넘게 되꺾이는 점은 곡선 대신 두 직선(꼭짓점 경유)으로 잇는다. 그 자리의 2차 곡선은 반지름이 굵기보다
+     훨씬 작은 머리핀이 되는데, 사파리가 그걸 칠하다 획 안쪽을 비운다(위 0번과 같은 흰 구멍). 직선 둘의 이음매는
+     둥근 이음(lineJoin round)으로 채워져 구멍이 안 난다. 소비자 쪽 형식을 안 바꾸려고 직선도 '조절점 = 시작점'인
+     2차 곡선으로 낸다. */
+  let s = p[0];
+  for (let i = 1; i < n - 1; i++) {
+    const e = [(p[i][0] + p[i + 1][0]) / 2, (p[i][1] + p[i + 1][1]) / 2];
+    const ax = p[i][0] - s[0], ay = p[i][1] - s[1], bx = e[0] - p[i][0], by = e[1] - p[i][1];
+    if (ax * bx + ay * by < 0) {
+      q.push([s[0], s[1], p[i][0], p[i][1]]);
+      q.push([p[i][0], p[i][1], e[0], e[1]]);
+    } else q.push([p[i][0], p[i][1], e[0], e[1]]);
+    s = e;
+  }
   return { m: p[0], q, l: p[n - 1] };
 }
 
 /* 캔버스에 획 하나를 그린다. k = 배율 1 → 캔버스 픽셀. (ox, oy) 는 캔버스 픽셀 원점 이동. */
 export function drawStroke(ctx, s, k, ox = 0, oy = 0) {
   if (!s.pts.length) return;
-  const c = curve(s.pts);
+  const c = curve(s.pts, s.w);
   const X = (v) => v * k + ox, Y = (v) => v * k + oy;
   ctx.save();
   ctx.globalAlpha = s.t === "hl" ? (s.a ?? HL_ALPHA) : (s.a ?? 1);
@@ -129,6 +158,68 @@ export const polyBox = (poly) => {
   return [x0, y0, x1, y1];
 };
 
+/* 지그재그로 문지르면 지운다(굿노트의 "긁어서 지우기"). 펜 획을 뗄 때 본다.
+   점들의 주축(PCA)을 잡고 그 축에서 앞뒤로 몇 번 꺾였나를 센다 — 축 폭의 35% 넘게 되돌아가야 한 번.
+   긁는 손은 같은 길을 왔다 갔다 하니 주축이 획 방향이 되고 꺾임이 많다(끝이 둥글어 고리가 져도 상관없다).
+   필기체는 글줄 방향으로 나아가며 위아래로 오르내리니 주축이 글줄이고, 그 축에선 되돌아가는 일이 거의 없다.
+   주축에서 4번 이상 꺾이고(5번 쓸고), 길이가 상자 긴 변의 2배 이상이면 지그재그다. */
+export function isScribble(pts) {
+  if (pts.length < 12) return false;
+  const [x0, y0, x1, y1] = polyBox(pts);
+  let len = 0;
+  for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  if (len < 2 * Math.max(x1 - x0, y1 - y0)) return false;
+  let mx = 0, my = 0;
+  for (const p of pts) { mx += p[0]; my += p[1]; }
+  mx /= pts.length; my /= pts.length;
+  let sxx = 0, syy = 0, sxy = 0;
+  for (const p of pts) { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
+  const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  const ux = Math.cos(th), uy = Math.sin(th);
+  const v = pts.map((p) => (p[0] - mx) * ux + (p[1] - my) * uy);
+  let lo = Infinity, hi = -Infinity;
+  for (const e of v) { if (e < lo) lo = e; if (e > hi) hi = e; }
+  const ext = hi - lo;
+  if (ext < 4) return false; // 4pt 미만의 흔들림은 지그재그가 아니다
+  const h = ext * 0.35;
+  let dir = 0, l = v[0], u = v[0], n = 0;
+  for (const e of v) {
+    if (dir >= 0) {
+      if (e > u) u = e;
+      if (u - e > h) { if (dir > 0) n++; dir = -1; l = e; }
+    }
+    if (dir <= 0) {
+      if (e < l) l = e;
+      if (e - l > h) { if (dir < 0) n++; dir = 1; u = e; }
+    }
+  }
+  return n >= 4;
+}
+
+/* 지그재그 sc 의 상자 안에 절반 넘게 들어 있는 획을 list 에서 빼서 [{s, i}] 로 돌려준다
+   (지우개의 del 과 같은 모양 — 실행취소가 그대로 된다). 지그재그에 닿지 않아도 범위 안이면 지운다.
+   절반 넘게라는 조건은 긴 밑줄 끝을 스친 정도로 밑줄 전체가 날아가지 않게 하려는 것.
+   지울 게 있으면 지그재그 자신도 맨 앞 항목으로 넣는다 — 실행취소 한 번에 지그재그까지 돌아온다(list 에는 안 둔다). */
+export function scribbleHits(list, sc) {
+  const [x0, y0, x1, y1] = polyBox(sc.pts);
+  const pad = sc.w / 2 + 1;
+  const inBox = (p) => p[0] >= x0 - pad && p[0] <= x1 + pad && p[1] >= y0 - pad && p[1] <= y1 + pad;
+  const n0 = list.length;
+  const out = [];
+  for (let i = list.length - 1; i >= 0; i--) {
+    const s = list[i];
+    const b = bbox(s);
+    if (b[2] < x0 - pad || b[0] > x1 + pad || b[3] < y0 - pad || b[1] > y1 + pad) continue;
+    const p = s.pts, k = Math.max(1, Math.floor(p.length / 24));
+    let inN = 0, n = 0;
+    for (let j = 0; j < p.length; j += k, n++) if (inBox(p[j])) inN++;
+    if (inN * 2 < n) continue;
+    out.push({ s: list.splice(i, 1)[0], i });
+  }
+  if (out.length) out.unshift({ s: sc, i: n0 });
+  return out;
+}
+
 /* 형광펜을 긋고 끝에서 잠깐 멈추면 직선으로 편다(굿노트와 같은 동작).
    거의 수평이면 수평으로 맞춘다 — 글줄 긋기가 대부분이라. */
 export function snapLine(pts) {
@@ -194,7 +285,7 @@ export const rgbToHex = (rgb) =>
 export function strokePath(s) {
   if (!s.pts.length) return "";
   const f = (v) => Math.round(v * 100) / 100;
-  const c = curve(s.pts);
+  const c = curve(s.pts, s.w);
   let d = `M${f(c.m[0])} ${f(c.m[1])}`;
   if (!c.l) d += "l0.01 0";
   for (const [cx, cy, ex, ey] of c.q) d += `Q${f(cx)} ${f(cy)} ${f(ex)} ${f(ey)}`;

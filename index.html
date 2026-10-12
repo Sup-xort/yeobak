@@ -22,6 +22,9 @@
     <title>여백</title>
     <style>
       html, body, #root { height: 100%; margin: 0; background: #141312; }
+      /* iOS 26 띠 보정(--vb-gap, main.jsx): 문서 전체를 모자란 만큼 늘리고 스크롤은 막는다.
+         overflow 는 html 에만 — body 에 걸면 body(짧은 뷰포트 높이)가 늘린 부분을 잘라 띠가 그대로 남는다(2026-10-10 실기기). */
+      html { height: calc(100% + var(--vb-gap, 0px)); overflow: hidden; }
     </style>
   </head>
   <body>

@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from "react";
 import { ThinkingOrb } from "thinking-orbs";
 import Rich from "./rich.jsx";
 import Bi from "./icons.jsx";
+import { useLiveText } from "./liveText.js";
 
 /* ───────────────────────── 질문 탭 화면 (아이패드·폰 공용) ─────────────────────────
    대화는 서버 한 곳(server/remote.js 의 세션 저장소)에 있고, 이 컴포넌트는 그리기만 한다.
@@ -142,11 +143,13 @@ export default function AskView({
   placeholder = "물어보세요", empty = {}, notice = null,
   attach = null, capture = null,
   models = [], askRank = [], selModel = "", onPickModel, onModelsOpen, healthOf = () => null, defLabel = "",
-  run = null, lastRun = null,
+  run: runProp = null, lastRun = null,
+  runRef = null, // 실행자(App)가 넘기는 지금 상태 ref — 있으면 초마다 직접 읽는다(부모를 다시 그리지 않게)
   onRedo, canRedo = () => false, wideEnter = false,
   onImage = null, // 붙여넣기·끌어다 놓기로 들어온 그림 파일(File) — 없으면 받지 않는다
 }) {
   const sess = sessions.find((s) => s.id === curId) || null;
+  const run = runRef?.current?.running ? runRef.current : runProp;
 
   /* ── 초 단위 갱신 — 도는 동안만 ── */
   const [, setTick] = useState(0);
@@ -506,7 +509,7 @@ export default function AskView({
                         <div className="vb-ak-trail"><span><b>{a.swap.wanted}</b><em>붐빔</em></span><span className="to">→ 대신 답했어요</span></div>
                       )}
 
-                      {a.text && <div className="vb-ak-body"><Rich text={a.text} live={live} /></div>}
+                      <LiveBody sid={curId} i={p.i + 1} text={a.text} live={live} />
 
                       {failed ? (
                         <div className="vb-ak-error">
@@ -547,4 +550,10 @@ export default function AskView({
       </div>
     </div>
   );
+}
+
+/* 답 본문 — 흐르는 중이면 liveText 저장소를 직접 구독해 이 칸만 다시 그린다(src/liveText.js) */
+function LiveBody({ sid, i, text, live }) {
+  const t = useLiveText(live ? sid : "", i, text);
+  return t ? <div className="vb-ak-body"><Rich text={t} live={live} /></div> : null;
 }

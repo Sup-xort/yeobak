@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pipeline } from "node:stream/promises";
 import { PDFDocument, PDFName, PDFHexString, PDFNumber } from "pdf-lib";
 import { mountRemote } from "./remote.js";
 import { importAnnots, exportWithAnnots } from "./annots.js";
@@ -17,6 +18,9 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const NIM_KEY = process.env.NIM_API_KEY || "";
 const NIM_BASE = process.env.NIM_BASE_URL || "https://integrate.api.nvidia.com/v1";
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
+// 대화 모델 순위에 같이 끼는 OpenAI 호환 프로바이더(2026-10-09~) — 없어도 된다
+const GROQ_KEY = process.env.GROQ_API_KEY || "";
+const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
 
 /* 모델 목록·상태·자동 선택은 server/models.js — 목록은 서버가 스스로 찾는다(그 파일 머리말).
    TAP_MODEL / ASK_MODEL 로 기본값을 고정할 수 있다(비우면 "자동" — 점수로 고른다). */
@@ -198,7 +202,7 @@ fs.mkdirSync(ANNOT_DIR, { recursive: true });
 fs.mkdirSync(THUMB_DIR, { recursive: true });
 fs.mkdirSync(TEXT_DIR, { recursive: true });
 
-const models = createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE });
+const models = createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE, GROQ_KEY, OPENROUTER_KEY });
 const PIN_TAP = process.env.TAP_MODEL || "";
 const PIN_ASK = process.env.ASK_MODEL || "";
 
@@ -209,6 +213,19 @@ try {
   const j = JSON.parse(fs.readFileSync(LIB_FILE, "utf8"));
   lib = { folders: j.folders || [], files: j.files || [] };
 } catch {}
+
+// indexed 가 생기기 전(2026-10-09)에 본문을 올린 책 — 이미 있는 인덱스 파일로 채운다
+{
+  let n = 0;
+  for (const f of lib.files) {
+    if (f.indexed !== undefined) continue;
+    try {
+      const pages = JSON.parse(fs.readFileSync(path.join(TEXT_DIR, f.id + ".json"), "utf8"));
+      if (Array.isArray(pages)) { f.indexed = pages.length; n++; }
+    } catch {}
+  }
+  if (n) process.nextTick(() => saveLib());
+}
 
 function saveLib() {
   // 쓰다가 죽어도 목록 파일이 깨지지 않게 임시 파일에 쓰고 원자적으로 바꾼다
@@ -233,18 +250,28 @@ function snippetAt(text, idx, qLen) {
   if (end < text.length) s = s + "…";
   return s;
 }
-function searchDocText(id, qLower, maxMatches = 3) {
-  let pages;
+/* 검색마다 text/*.json 을 전부 동기로 읽고 파싱했더니, 서버가 swap 에서 막 깨어난 때는 한 번에 1초 넘게
+   이벤트 루프를 막았다(2026-10-09 실측). 쪽 본문과 소문자판을 메모리에 둔다 — 서재 전체가 몇 MB 다.
+   올리기·지우기 때 그 문서만 버린다. */
+const textCache = new Map(); // id → { pages, lower } | null(인덱스 없음)
+function docText(id) {
+  if (textCache.has(id)) return textCache.get(id);
+  let v = null;
   try {
-    pages = JSON.parse(fs.readFileSync(path.join(TEXT_DIR, id + ".json"), "utf8"));
-  } catch {
-    return []; // 아직 한 번도 안 열어서 인덱스가 없다 — 제목 매칭만으로 걸릴 수 있다
-  }
-  if (!Array.isArray(pages)) return [];
+    const pages = JSON.parse(fs.readFileSync(path.join(TEXT_DIR, id + ".json"), "utf8"));
+    if (Array.isArray(pages)) v = { pages, lower: pages.map((t) => String(t || "").toLowerCase()) };
+  } catch {} // 아직 한 번도 안 열어서 인덱스가 없다 — 제목 매칭만으로 걸릴 수 있다
+  textCache.set(id, v);
+  return v;
+}
+function searchDocText(id, qLower, maxMatches = 3) {
+  const d = docText(id);
+  if (!d) return [];
+  const { pages, lower } = d;
   const out = [];
   for (let i = 0; i < pages.length && out.length < maxMatches; i++) {
     const t = pages[i] || "";
-    const idx = t.toLowerCase().indexOf(qLower);
+    const idx = lower[i].indexOf(qLower);
     if (idx >= 0) out.push({ page: i + 1, snippet: snippetAt(t, idx, qLower.length) });
   }
   return out;
@@ -272,32 +299,69 @@ app.get("/api/library/search", requireAuth, (req, res) => {
    PDF 가 아니면 null. 같은 이름·같은 크기면 이미 있는 것으로 보고 그 항목을 돌려준다
    (같은 PDF 를 다시 열 때마다, 단축어를 두 번 눌러도 늘어나지 않게). */
 const isPdf = (buf) => Buffer.isBuffer(buf) && buf.length >= 8 && buf.subarray(0, 1024).includes("%PDF");
-function addPdf(buf, name, folder) {
-  const dup = lib.files.find((f) => f.name === name && f.size === buf.length);
-  if (dup) return { ...dup, existing: true };
+/* src: 바이트(Buffer) 또는 이미 디스크에 받아 둔 임시 파일 { tmp, size }. 임시 파일은 여기서 옮기거나 지운다. */
+function addPdf(src, name, folder) {
+  const size = Buffer.isBuffer(src) ? src.length : src.size;
+  const dup = lib.files.find((f) => f.name === name && f.size === size);
+  if (dup) {
+    if (!Buffer.isBuffer(src)) fs.rm(src.tmp, { force: true }, () => {});
+    return { ...dup, existing: true };
+  }
   const id = crypto.randomUUID();
-  fs.writeFileSync(path.join(PDF_DIR, id + ".pdf"), buf);
+  const dst = path.join(PDF_DIR, id + ".pdf");
+  if (Buffer.isBuffer(src)) fs.writeFileSync(dst, src);
+  else fs.renameSync(src.tmp, dst);
   // lastOpenedAt 을 업로드 시각으로 미리 채워 둔다 — 방금 추가한 책이 서재 인사말에서
   // "오랜만이네요"로 뜨는 걸 막는다(추가 = 사실상 방금 연 것과 같다).
-  const entry = { id, name, folder, size: buf.length, at: Date.now(), lastOpenedAt: Date.now() };
+  const entry = { id, name, folder, size, at: Date.now(), lastOpenedAt: Date.now() };
   lib.files.push(entry);
   saveLib();
   return entry;
 }
 
-/* 업로드 — 본문이 PDF 바이트 그대로 오고, 이름·폴더는 쿼리로 받는다 */
-app.post(
-  "/api/library/upload",
-  requireAuth,
-  express.raw({ type: () => true, limit: "300mb" }),
-  (req, res) => {
-    const buf = req.body;
-    if (!isPdf(buf)) return res.status(400).json({ error: "PDF 파일이 아닙니다." });
-    const name = String(req.query.name || "문서").slice(0, 200);
-    const folder = lib.folders.some((f) => f.id === req.query.folder) ? String(req.query.folder) : "";
-    res.json(addPdf(buf, name, folder));
+/* 본문을 메모리에 모으지 않고 곧장 임시 파일로 흘린다. 예전엔 express.raw 로 통째로 받았는데,
+   300MB 상한이면 버퍼 + 이어 붙인 사본으로 RAM 954MB 서버가 swap 으로 밀리거나 OOM 이 난다
+   (서재에 이미 136MB 짜리 책이 있다). 상한(nginx client_max_body_size 300m 와 같은 값)을 넘으면 413. */
+const UPLOAD_MAX = 300 * 1024 * 1024;
+async function receiveToTmp(req) {
+  const tmp = path.join(PDF_DIR, `.up-${crypto.randomUUID()}.tmp`);
+  let size = 0;
+  try {
+    await pipeline(req, async function* (src) {
+      for await (const c of src) {
+        size += c.length;
+        if (size > UPLOAD_MAX) throw Object.assign(new Error("너무 큰 파일입니다."), { status: 413 });
+        yield c;
+      }
+    }, fs.createWriteStream(tmp));
+    const fd = await fs.promises.open(tmp, "r");
+    const head = Buffer.alloc(1024);
+    const { bytesRead } = await fd.read(head, 0, 1024, 0).finally(() => fd.close());
+    return { tmp, size, head: head.subarray(0, bytesRead) };
+  } catch (e) {
+    fs.rm(tmp, { force: true }, () => {});
+    throw e;
   }
-);
+}
+// 받다가 죽은 임시 파일 정리
+for (const n of fs.readdirSync(PDF_DIR)) if (n.startsWith(".up-")) fs.rmSync(path.join(PDF_DIR, n), { force: true });
+
+/* 업로드 — 본문이 PDF 바이트 그대로 오고, 이름·폴더는 쿼리로 받는다 */
+app.post("/api/library/upload", requireAuth, async (req, res) => {
+  let got;
+  try {
+    got = await receiveToTmp(req);
+  } catch (e) {
+    return res.status(e.status || 400).json({ error: e.status === 413 ? "파일이 너무 큽니다." : "받는 중에 끊겼습니다." });
+  }
+  if (!isPdf(got.head)) {
+    fs.rm(got.tmp, { force: true }, () => {});
+    return res.status(400).json({ error: "PDF 파일이 아닙니다." });
+  }
+  const name = String(req.query.name || "문서").slice(0, 200);
+  const folder = lib.folders.some((f) => f.id === req.query.folder) ? String(req.query.folder) : "";
+  res.json(addPdf(got, name, folder));
+});
 
 /* ── 받은편지함: 단축어·공유 시트로 PDF 넣기 ────────────────────────────────
    아이패드 단축어의 "URL 내용 가져오기", 갤럭시의 HTTP Shortcuts 앱처럼 **쿠키가 없는**
@@ -408,13 +472,18 @@ app.get("/api/library/file/:id", requireAuth, async (req, res) => {
       return res.status(500).json({ error: "필기를 PDF에 넣지 못했습니다: " + e.message });
     }
   }
+  /* 기기 저장소(src/pdfCache.js)는 If-None-Match 를 직접 달아 "바뀌었나"만 묻는다. 그런데 브라우저는 스크립트가
+     조건 헤더를 달면 Fetch 규약대로 Cache-Control: no-cache 도 같이 붙이고, send 는 그걸 보면 ETag 가 같아도
+     무조건 200 으로 전체를 보낸다 — 64MB 책을 열 때마다 다시 받던 원인(2026-10-09). 여기서는 무시하게 한다. */
+  if (req.headers["if-none-match"]) { delete req.headers["cache-control"]; delete req.headers.pragma; }
   const fn = encodeURIComponent(f.name + ".pdf");
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader(
     "Content-Disposition",
     `${"dl" in req.query ? "attachment" : "inline"}; filename*=UTF-8''${fn}`
   );
-  res.sendFile(path.join(PDF_DIR, f.id + ".pdf"));
+  // 로그인한 기기만 볼 책이다 — 중간 캐시에 남지 않게 private. ETag 로 다시 확인하므로 안 바뀌었으면 304
+  res.sendFile(path.join(PDF_DIR, f.id + ".pdf"), { cacheControl: false, headers: { "Cache-Control": "private, no-cache" } });
 });
 
 /* 폴더 이동·이름 변경·마지막으로 읽은 쪽 저장.
@@ -453,6 +522,11 @@ app.get("/api/library/file/:id/text", requireAuth, (req, res) => {
   } catch {
     return res.status(404).json({ error: "본문 인덱스가 없습니다." });
   }
+  // ?all — 책 전체(질문 탭 맥락용 — 클라이언트가 pdf.js 로 모든 쪽을 다시 뽑지 않게). ETag 로 다시 확인
+  if ("all" in req.query) {
+    res.setHeader("Cache-Control", "private, no-cache");
+    return res.json({ pages: Array.isArray(pages) ? pages : [] });
+  }
   const n = Math.max(1, Math.min(5, Number(req.query.pages) || 1));
   res.json({ pages: (Array.isArray(pages) ? pages : []).slice(0, n) });
 });
@@ -471,11 +545,16 @@ app.post("/api/library/file/:id/text", requireAuth, (req, res) => {
   const dst = path.join(TEXT_DIR, f.id + ".json");
   fs.writeFileSync(tmp, JSON.stringify(clean));
   fs.renameSync(tmp, dst);
+  textCache.delete(f.id);
+  // indexed = 올라온 쪽 수. 클라이언트는 이 값이 지금 쪽 수와 같으면 다시 안 올린다
+  let changed = f.indexed !== clean.length;
+  f.indexed = clean.length;
   const total = Number(req.body?.totalPages);
   if (Number.isFinite(total) && total > 0 && f.totalPages !== Math.floor(total)) {
     f.totalPages = Math.floor(total);
-    saveLib();
+    changed = true;
   }
+  if (changed) saveLib();
   res.json({ ok: true, pages: clean.length });
 });
 
@@ -609,10 +688,18 @@ function cleanStroke(s) {
   return out;
 }
 
+/* 기기 진단 한 줄 — 아이패드 콘솔을 볼 수 없어서 클라이언트가 여기로 보낸다(journalctl 에 [기기]) */
+app.post("/api/diag", requireAuth, (req, res) => {
+  console.log("[기기]", String(req.body?.msg || "").slice(0, 2000));
+  res.json({ ok: true });
+});
+
 app.get("/api/library/file/:id/annots", requireAuth, async (req, res) => {
   const f = lib.files.find((x) => x.id === req.params.id);
   if (!f) return res.status(404).json({ error: "없는 파일입니다." });
   try {
+    // 브라우저가 들고 있다가 ETag 로 묻게 — 안 바뀌었으면 304 라 다시 안 받는다
+    res.setHeader("Cache-Control", "private, no-cache");
     res.json(await readAnnots(f.id));
   } catch (e) {
     res.status(500).json({ error: "필기를 읽지 못했습니다: " + e.message });
@@ -651,6 +738,7 @@ app.delete("/api/library/file/:id", requireAuth, (req, res) => {
   fs.rm(path.join(PDF_DIR, f.id + ".pdf"), { force: true }, () => {});
   fs.rm(path.join(THUMB_DIR, f.id + ".jpg"), { force: true }, () => {});
   fs.rm(path.join(TEXT_DIR, f.id + ".json"), { force: true }, () => {});
+  textCache.delete(f.id);
   fs.rm(annotPath(f.id), { force: true }, () => {});
   saveLib();
   res.json({ ok: true });
@@ -875,19 +963,21 @@ function sseEvent(delta, finish) {
   return `data: ${JSON.stringify({ choices: [{ delta, ...(finish ? { finish_reason: finish } : {}) }] })}\n\n`;
 }
 
-async function callNIM({ system, user, image, history = [], maxTokens, signal, model, gen }) {
-  if (!NIM_KEY) throw new Error("NIM 키 없음");
+/* NIM·Groq·OpenRouter 공용(셋 다 OpenAI 형식). id 는 여백 안의 모델 id(접두어 포함) */
+async function callOAI({ system, user, image, history = [], maxTokens, signal, model, gen }) {
+  const up = models.upstream(model);
+  if (!up.key) throw new Error(`${up.name} 키 없음`);
   // 이미지가 있으면 content 를 배열로 보낸다 (OpenAI 표준 멀티모달 형식).
   const content = image
     ? [{ type: "text", text: user },
        { type: "image_url", image_url: { url: `data:image/jpeg;base64,${image}` } }]
     : user;
-  const res = await fetch(`${NIM_BASE}/chat/completions`, {
+  const res = await fetch(`${up.base}/chat/completions`, {
     method: "POST",
     signal,
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${NIM_KEY}` },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${up.key}` },
     body: JSON.stringify({
-      model,
+      model: up.model,
       messages: [
         { role: "system", content: system },
         ...history.map((t) => ({ role: t.role, content: t.text })),
@@ -1047,7 +1137,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
      줄줄이 막혀도 그 줄 그대로 Gemini 만 두드리다 끝났다. 매번 다시 고르면 방금 깎인 점수(그 모델의
      벌점, "Google 전체가 막힘" 벌점)가 곧바로 반영돼 두세 번 실패하면 NIM 으로 넘어간다. */
   const tried = new Set();
-  // visionDirect: 그림째 Gemini 에게만(models.chain 의 gemOnly 참고). 질문이면 질문 탭 순위·고른 모델(Gemini 일 때)을 따른다.
+  // visionDirect: 그림째 Gemini·kimi-k3 에게만(models.chain 의 gemOnly 참고). 질문이면 질문 탭 순위·고른 모델(Gemini 일 때)을 따른다.
   const gemOnly = !!(image && visionDirect);
   const nextModel = () => models.chain({ kind, picked, gemOnly, ask }).find((id) => !tried.has(id));
   if (!warm) models.touch();
@@ -1086,7 +1176,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     try {
       const up = gem
         ? await callGemini({ ...a, model: id.slice(7), gen, signal: sig })
-        : await callNIM({ ...a, model: id, gen, signal: sig });
+        : await callOAI({ ...a, model: id, gen, signal: sig });
       it = events(up, gem)[Symbol.asyncIterator]();
       for (;;) {
         const r = await it.next();
@@ -1140,14 +1230,14 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   }
 
   // ── 여기서부터 이 모델로 확정. 헤더를 보내고 흘린다. ──
-  const gem0 = models.isGem(got.id);
+  const eng0 = models.upstream(got.id).name; // Gemini / NIM / Groq / OpenRouter
   const wanted = !gemOnly && picked && got.id !== picked ? picked : ""; // 자동일 땐 "대신 답했다"가 아니다
   if (progress) {
     // why: 이 모델이 왜 답하나 — 직접 고름 / 자동 1순위 / 앞 모델이 실패해 넘어옴
-    note("pick", { model: got.id, label: label(got.id), engine: gem0 ? "Gemini" : "NIM", wanted,
+    note("pick", { model: got.id, label: label(got.id), engine: eng0, wanted,
       why: fails.length ? "fallback" : got.id === picked ? "picked" : "auto" });
   } else {
-    res.setHeader("X-Engine", gem0 ? "Gemini" : "NIM");
+    res.setHeader("X-Engine", eng0);
     res.setHeader("X-Model", got.id);
     if (wanted) res.setHeader("X-Wanted", wanted);
     res.setHeader("Access-Control-Expose-Headers", "X-Engine, X-Model, X-Wanted");
@@ -1231,7 +1321,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
         break;
       }
       console.warn(`[여백] ${next.id} 가 이어서 씀`);
-      note("pick", { model: next.id, label: label(next.id), engine: models.isGem(next.id) ? "Gemini" : "NIM", wanted: "", why: "cont" });
+      note("pick", { model: next.id, label: label(next.id), engine: models.upstream(next.id).name, wanted: "", why: "cont" });
       cur = next;
     }
   }
@@ -1243,7 +1333,20 @@ app.post("/api/chat", requireAuth, async (req, res) => {
 });
 
 /* ───────────────── 정적 파일 ───────────────── */
-app.use(express.static(path.join(ROOT, "dist")));
+/* /assets/* 는 파일 이름에 내용 해시가 붙어 있어 바뀌면 이름이 바뀐다 — 1년 캐시. 예전엔 max-age=0 이라
+   앱을 열 때마다 719KB 번들을 서버에 다시 물어봤다. index.html 은 늘 새로 확인해야 새 빌드가 보인다. */
+const ASSETS = path.join(ROOT, "dist", "assets");
+// 미리 압축해 둔 .gz(scripts/gzip-dist.mjs)가 있으면 그걸 보낸다 — 압축은 빌드 때 한 번만
+app.use("/assets", (req, res, next) => {
+  if (!/\.(js|css|svg)$/.test(req.path) || !/\bgzip\b/.test(req.headers["accept-encoding"] || "")) return next();
+  if (!fs.existsSync(path.join(ASSETS, path.normalize(req.path) + ".gz"))) return next();
+  res.type(path.extname(req.path));
+  res.setHeader("Content-Encoding", "gzip");
+  res.setHeader("Vary", "Accept-Encoding");
+  res.sendFile(req.path.slice(1) + ".gz", { root: ASSETS, immutable: true, maxAge: "365d" }, (e) => e && next(e));
+});
+app.use("/assets", express.static(path.join(ROOT, "dist", "assets"), { immutable: true, maxAge: "365d", fallthrough: false }));
+app.use(express.static(path.join(ROOT, "dist"), { setHeaders: (res, p) => { if (p.endsWith(".html")) res.setHeader("Cache-Control", "no-cache"); } }));
 app.get("*", (_req, res) => res.sendFile(path.join(ROOT, "dist", "index.html")));
 
 app.listen(PORT, "0.0.0.0", () => {

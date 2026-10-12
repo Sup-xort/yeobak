@@ -18,7 +18,10 @@
   --t-warnBg:rgba(228,113,63,.14);--t-warnBd:rgba(228,113,63,.4);--t-warnFg:#FFB9A3;--t-warnSub:#E4B8AE;--t-warnDot:#FF9A8A;
   --t-stopBg:#FF9A8A;--t-stopFg:#2A1512;--t-engBg:rgba(255,216,77,.16);--t-engFg:#E0C568;
   --t-shadow:0 26px 70px rgba(0,0,0,.6);
-  position:relative;width:100%;height:100vh;height:100dvh;
+  /* 높이는 100dvh 가 아니라 부모(#root → body → html, 전부 100%) 기준. 홈 화면 앱에서 dvh 가 창보다 작게
+     잡히거나 늦게 따라와서 화면 아래에 html 배경(검정) 띠가 남았다(2026-10-09 iPadOS 26 실기기, 서재부터) —
+     html 의 100% 는 창 전체(초기 포함 블록)라 늘 맞는다. */
+  position:relative;width:100%;height:100%; /* iOS 26 띠 보정은 index.html 의 html 높이(--vb-gap) */
   display:flex;flex-direction:column;overflow:hidden;
   font-family:var(--sans);background:var(--desk);color:var(--t-ink);font-size:15px;
   -webkit-font-smoothing:antialiased;overscroll-behavior:none}
@@ -109,6 +112,10 @@
 .vb-oi:active{background:var(--desk3)}
 .vb-orow.d1 .vb-oi{font-size:13px;color:var(--t-muted)}
 .vb-orow.d2 .vb-oi{font-size:12.5px;color:var(--t-faint)}
+/* 지금 보는 절(App.jsx curSec) — 그 절은 강조, 윗단위는 글자만 진하게 */
+.vb-orow.cur{background:var(--t-accBg)}
+.vb-orow.cur .vb-oi{color:var(--t-accInk);font-weight:600}
+.vb-orow.curp .vb-oi{color:var(--t-ink);font-weight:600}
 .vb-ochev{flex:0 0 28px;height:38px;display:flex;align-items:center;justify-content:center;
   color:var(--muted);touch-action:manipulation}
 .vb-ochev svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2;
@@ -171,6 +178,12 @@
 .vb-zoompill{position:absolute;left:50%;top:14px;transform:translateX(-50%);z-index:36;
   padding:6px 14px;border-radius:20px;background:rgba(32,31,29,.9);color:#EDEBE6;
   font-size:13px;font-variant-numeric:tabular-nums;pointer-events:none}
+.vb-root .vb-jumpback{position:absolute;left:50%;bottom:calc(28px + env(safe-area-inset-bottom));
+  transform:translateX(-50%);z-index:36;display:flex;align-items:center;justify-content:center;
+  width:48px;height:48px;border-radius:50%;background:rgba(32,31,29,.92);color:#EDEBE6;
+  font-size:20px;box-shadow:0 6px 18px rgba(0,0,0,.35);
+  animation:vb-jbin .18s ease-out}
+@keyframes vb-jbin{from{opacity:0;transform:translate(-50%,8px)}to{opacity:1;transform:translateX(-50%)}}
 .vb-uppill{position:absolute;left:50%;top:12px;transform:translateX(-50%);z-index:34;
   min-width:250px;max-width:76%;padding:9px 16px;border-radius:12px;background:var(--desk3);
   border:1px solid var(--line);overflow:hidden;font-size:12.5px;color:var(--t-ink);text-align:center;
@@ -836,6 +849,49 @@
 .vb-key.go:disabled{opacity:.35}
 @media (pointer:coarse){.vb-key{height:60px;font-size:22px}}
 
+/* ── 설정 카드 ──
+   iOS 설정처럼 묶음 제목 + 둥근 목록. 한 줄 = [아이콘][이름·작은 설명][스위치·고르기·아이콘 버튼].
+   글 설명은 한 줄 이내로 — 길게 풀어 쓴 안내는 서비스처럼 안 보인다(2026-10-12 사용자). */
+.vb-modal .vb-card.vb-set{width:min(460px,100%);padding:18px 18px 20px}
+.vb-sethead{display:flex;align-items:center;justify-content:space-between;margin:0 2px 6px}
+.vb-sethead h3{margin:0;font-size:19px}
+.vb-setx{width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  background:var(--t-fill);color:var(--t-muted);font-size:13px}
+.vb-setgrp{display:flex;align-items:center;gap:6px;margin:18px 6px 7px;font-size:12px;font-weight:600;
+  color:var(--t-muted);letter-spacing:.02em}
+.vb-sethelp{display:flex;color:var(--t-faint);font-size:14px;padding:2px}
+.vb-sethelp.on{color:var(--mark)}
+.vb-setlist{border-radius:13px;background:var(--t-fill);overflow:hidden}
+.vb-setrow{display:flex;align-items:center;gap:12px;min-height:50px;padding:8px 12px 8px 14px;position:relative}
+.vb-setrow+.vb-setrow::before{content:"";position:absolute;top:0;left:46px;right:0;height:1px;background:var(--line)}
+.vb-setrow > .ic{font-size:18px;color:var(--t-sub);width:20px;justify-content:center}
+.vb-setrow .tx{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.vb-setrow .tx b{font-size:15px;font-weight:500;color:var(--t-ink)}
+.vb-setrow .tx small{font-size:12px;color:var(--t-muted);line-height:1.4;
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.vb-setrow code{font-size:12.5px;color:var(--t-sub);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 고르기 — 고른 값만 글자로 보이고 누르면 시스템 목록이 뜬다 */
+.vb-setsel{position:relative;display:flex;align-items:center;gap:4px;max-width:52%;color:var(--t-muted)}
+.vb-setsel select{appearance:none;-webkit-appearance:none;background:none;border:0;outline:none;
+  color:var(--t-muted);font:inherit;font-size:14px;text-align:right;text-align-last:right;
+  max-width:100%;padding:6px 0;text-overflow:ellipsis}
+.vb-setsel select option{background:var(--t-menu);color:var(--t-ink)}
+.vb-setsel .bi{font-size:13px;flex:none}
+.vb-setic{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+  color:var(--t-sub);font-size:16px;flex:none}
+.vb-setic:active{background:var(--desk3)}
+.vb-setic:disabled{opacity:.35}
+.vb-setic.spin .bi{animation:vb-spin 1s linear infinite}
+@keyframes vb-spin{to{transform:rotate(360deg)}}
+.vb-sw{flex:none;width:46px;height:28px;border-radius:14px;background:var(--desk3);position:relative;
+  transition:background .2s}
+.vb-sw i{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;
+  box-shadow:0 1px 3px rgba(0,0,0,.3);transition:transform .2s}
+.vb-sw.on{background:var(--mark)}
+.vb-sw.on i{transform:translateX(18px)}
+.vb-setnote{margin:8px 8px 0;font-size:12px;color:var(--t-muted);line-height:1.6}
+.vb-setnote b{color:var(--t-sub);font-weight:600}
+
 .vb-row{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--t-sub);margin-bottom:16px}
 .vb-row input{width:19px;height:19px;accent-color:var(--mark);flex:0 0 auto}
 .vb-done{width:100%;padding:13px;border-radius:11px;background:var(--mark);color:#241F00;
@@ -1276,7 +1332,7 @@
 .vb-mx{width:34px;height:34px;border-radius:10px;display:inline-flex;align-items:center;justify-content:center;
   color:var(--t-sub);margin-left:auto}
 .vb-mpg + .vb-mx{margin-left:4px}
-.vb-mbody{position:relative;flex:1 1 auto;min-height:0;background:var(--desk2)}
+.vb-mnbody{position:relative;flex:1 1 auto;min-height:0;background:var(--desk2)}
 .vb-mscroll{position:absolute;inset:0;overflow:auto;touch-action:pan-x pan-y;-webkit-overflow-scrolling:touch;
   overscroll-behavior:contain;padding:10px 10px 2px}
 .vb-mpages{transform-origin:0 0}

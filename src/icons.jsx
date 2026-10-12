@@ -27,12 +27,23 @@ import i_broadcast from "bootstrap-icons/icons/broadcast.svg?raw";
 import i_image_fill from "bootstrap-icons/icons/image-fill.svg?raw";
 import i_plus_lg from "bootstrap-icons/icons/plus-lg.svg?raw";
 import i_book from "bootstrap-icons/icons/book.svg?raw";
+import i_hdd from "bootstrap-icons/icons/hdd.svg?raw";
+import i_link_45deg from "bootstrap-icons/icons/link-45deg.svg?raw";
+import i_key from "bootstrap-icons/icons/key.svg?raw";
+import i_question_circle from "bootstrap-icons/icons/question-circle.svg?raw";
+import i_chevron_expand from "bootstrap-icons/icons/chevron-expand.svg?raw";
+import i_trash3 from "bootstrap-icons/icons/trash3.svg?raw";
+import i_arrow_repeat from "bootstrap-icons/icons/arrow-repeat.svg?raw";
+import i_cpu from "bootstrap-icons/icons/cpu.svg?raw";
+import i_arrow_return_left from "bootstrap-icons/icons/arrow-return-left.svg?raw";
 
 const RAW = {
   crop, stars, "arrow-up": arrowUp, "stop-fill": stopFill, "chevron-down": chevronDown, "chevron-up": chevronUp,
   "pencil-square": pencilSquare, "x-lg": xLg, image, check2, copy, "arrow-clockwise": arrowClockwise,
   "exclamation-circle": exclamationCircle,
   "phone": i_phone, "chat": i_chat, "tablet": i_tablet, "collection": i_collection, "journal-text": i_journal_text, "clock-history": i_clock_history, "star": i_star, "star-fill": i_star_fill, "broadcast": i_broadcast, "image-fill": i_image_fill, "plus-lg": i_plus_lg, "book": i_book, "check-circle-fill": checkCircleFill,
+  "arrow-return-left": i_arrow_return_left,
+  "hdd": i_hdd, "link-45deg": i_link_45deg, "key": i_key, "question-circle": i_question_circle, "chevron-expand": i_chevron_expand, "trash3": i_trash3, "arrow-repeat": i_arrow_repeat, "cpu": i_cpu,
 };
 // width/height 를 떼야 CSS(1em)가 먹는다
 const SVG = Object.fromEntries(Object.entries(RAW).map(([k, v]) =>

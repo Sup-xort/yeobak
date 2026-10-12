@@ -5,7 +5,12 @@ import Rich from "./rich.jsx";
 import AskView, { imageToJpeg } from "./AskView.jsx";
 import MiniNote from "./MiniNote.jsx";
 import { u } from "./paths.js";
-import { drawStroke, hitStroke, strokeInLasso, polyBox, bbox as inkBox, snapLine, tidyPts, strokePath, HL_ALPHA } from "./ink.js";
+import Bi from "./icons.jsx";
+import { liveText } from "./liveText.js";
+import { getPdf, pdfSource, dropPdf, cacheInfo, clearPdfs, CACHE_CAP, setReport } from "./pdfCache.js";
+const sendDiag = (msg) => fetch(u("/api/diag"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ msg }) }).catch(() => {});
+setReport(sendDiag);
+import { drawStroke, hitStroke, isScribble, scribbleHits, strokeInLasso, polyBox, bbox as inkBox, snapLine, tidyPts, strokePath, HL_ALPHA } from "./ink.js";
 
 /* ───────────────────────── 설정 ───────────────────────── */
 const CDN = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/";
@@ -144,6 +149,10 @@ export function pickGreeting(libData, storageKey = "yeobaek.greet") {
 
 /* ───────────────── AI 호출 (Claude → Gemini) ───────────────── */
 /* onEvent: 서버의 이름 있는 이벤트(try·fail·nap·pick·error — server/index.js 의 sseNote). */
+/* 캔버스를 떼어 낼 때는 크기를 0 으로 줄인 뒤에 — iOS 사파리는 떼어 낸 캔버스의 메모리를 GC 가 돌 때까지
+   들고 있고, 쪽 캔버스 하나가 최대 12M 픽셀(약 48MB)이라 확대한 채 스크롤하면 캔버스 한도에 금세 닿는다. */
+const freeCanvas = (c) => { c.width = 0; c.height = 0; c.remove(); };
+
 async function readSSE(res, pick, onDelta, onThink, onStop, onEvent) {
   const ct = res.headers.get("content-type") || "";
   if (!ct.includes("event-stream")) {
@@ -541,7 +550,9 @@ export default function VerbatimReader() {
   const [sendFig, setSendFig] = useState(false);  // 후속 질문에 오려낸 그림을 같이 보낼지
   const [nowTick, setNowTick] = useState(0);      // 세션 남은 시간 표시를 1분마다 갱신
   const [setOpen, setSetOpen] = useState(false);
-  const [inbox, setInbox] = useState(null);       // 단축어 받은편지함 — {enabled, token}, 설정을 열 때 받는다
+  const [pdfStore, setPdfStore] = useState(null); // 기기에 저장된 PDF {n, bytes} — 설정을 열 때 센다
+  const [inbox, setInbox] = useState(null);
+  const [inboxHelp, setInboxHelp] = useState(false); // 설정 — 단축어 만드는 법 펼침       // 단축어 받은편지함 — {enabled, token}, 설정을 열 때 받는다
   const [inboxCopied, setInboxCopied] = useState("");
   const [cfg, setCfg] = useState(DEFAULT_CFG);
   const [busy, setBusy] = useState(false);
@@ -549,6 +560,7 @@ export default function VerbatimReader() {
   const [bubble, setBubble] = useState(null);
   const [wide, setWide] = useState(true);
   const [zoomPill, setZoomPill] = useState(null);
+  const [jumpBack, setJumpBack] = useState(null); // 핀치 뒤 튀었을 때 띄우는 돌아가기 화살표 {page, fy}
   const [authed, setAuthed] = useState(null); // null = 확인 중
   const [pw, setPw] = useState("");
   const [pwErr, setPwErr] = useState("");
@@ -616,6 +628,9 @@ export default function VerbatimReader() {
   const renderedRef = useRef(new Set());
   const queueRef = useRef(new Set());
   const jobsRef = useRef(new Map());          // n → 진행 중인 renderPage 의 {task} — 취소·낡음 판정용
+  const jumpRef = useRef(null);           // 핀치 직후 튐 감시 {page,fy,until,lastTop} — armJump 주석
+  const jumpTimerRef = useRef(0);
+  const holdRef = useRef(null);           // relayout 이 지키는 스크롤 자리 {top,left} — 그동안 syncPages 는 엇나간 위치를 무시한다
   const leftRef = useRef(new Set());          // relayout 뒤 옛 배율 캔버스가 아직 붙어 있는 쪽 — 멀어지면 syncPages 가 치운다
   const ioRef = useRef(null);
   const scaleRef = useRef(1);
@@ -768,6 +783,22 @@ export default function VerbatimReader() {
     if (live === false) rest.pending = false;
     if (live === true) Object.assign(rest, { pending: true, claim: deviceRef.current, claimAt: Date.now() });
     sapi(`/api/remote/sessions/${sid}/msgs/${i}`, "PATCH", { patch: rest }).catch(() => {});
+  };
+
+  /* 흐르는 답은 대화 state 에 넣지 않는다 — sessions 를 바꾸면 App 전체(5000줄)와 대화의 모든 메시지가
+     글자 조각마다 다시 그려졌다(NIM 은 초당 수십 번). 흐르는 동안은 liveText 저장소에만 쓰고, 그걸 구독하는
+     답 본문 칸만 다시 그린다(src/liveText.js). 정착(settle)할 때 최종 글을 state 에 한 번 넣고 저장소에서 지운다. */
+  const streamPatcher = (sid, i) => {
+    let last = "";
+    return {
+      live({ text }) { last = text; liveText.set(sid, i, text); },
+      // 흐르던 글을 같이 싣는다(중단처럼 text 없이 정착하는 경우)
+      settle(patch, sync = true) {
+        const p = last && patch.text === undefined ? { text: last, ...patch } : patch;
+        patchMsg(sid, i, p, sync);
+        liveText.clear(sid, i);
+      },
+    };
   };
 
   const patchSess = (sid, patch) => {
@@ -972,7 +1003,6 @@ export default function VerbatimReader() {
   const jobRef = useRef(null);          // 지금 도는 질문 탭 요청 { ac, sid }
   const statRef = useRef(null);
   const [aiStat, setAiStat] = useState(null);
-  const [statTick, setStatTick] = useState(0);
 
   // ref 만 갱신하고 화면은 아래 타이머가 밀어 준다 — 토큰마다 setState 하면 렌더가 폭주한다.
   const bumpStat = (patch) => { statRef.current = statRef.current && { ...statRef.current, ...patch }; };
@@ -981,14 +1011,8 @@ export default function VerbatimReader() {
     setAiStat(statRef.current && { ...statRef.current });
   };
 
-  useEffect(() => {
-    if (!aiStat?.running) return;
-    const t = setInterval(() => {
-      setAiStat(statRef.current && { ...statRef.current });
-      setStatTick((n) => n + 1);
-    }, 500);
-    return () => clearInterval(t);
-  }, [aiStat?.running]);
+  /* 초 단위 갱신은 AskView 가 스스로 한다(runRef 로 statRef 를 직접 읽는다). 예전엔 여기서 0.5초마다
+     setAiStat 을 해서 답이 도는 내내 App 전체가 초당 두 번 다시 그려졌다. */
 
   /* callServer 가 알려 주는 단계를 상태로 옮긴다. step 은 여러 단계짜리 캡처에서
      지금 어느 대목인지("옮겨적는 중" / "푸는 중") 보여 주기 위한 것. */
@@ -1295,6 +1319,7 @@ export default function VerbatimReader() {
   useEffect(() => {
     if (!setOpen || authed !== true) return;
     libApi("/api/inbox/info").then((r) => r.json()).then(setInbox).catch(() => {});
+    setPdfStore(cacheInfo());
     refreshHealth(); // 모델 드롭다운 옆 "지금 붐빔" 표시용
   }, [setOpen, authed, libApi]);
   const copyInbox = (what, text) => {
@@ -1334,39 +1359,32 @@ export default function VerbatimReader() {
      fetch 는 진행률을 못 주므로 업로드와 같은 이유로 XMLHttpRequest 를 쓰고,
      막대는 업로드가 쓰던 .vb-uppill 을 그대로 재사용한다(z-index 34 > 서재 32).
      xhr.open 은 libApi 를 안 타므로 서브패스 보정 u() 를 직접 걸어야 한다(paths.js). */
-  const fetchPDF = (id, name) =>
-    new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      xhr.open("GET", u("/api/library/file/" + id));
-      xhr.responseType = "arraybuffer";
-      xhr.onprogress = (e) => {
+  /* 서재 PDF 받기 — 기기에 저장해 둔 게 있고 서버 것과 같으면(304) 받지 않는다(src/pdfCache.js).
+     반환은 Blob(디스크에 있다) — loadPDF 가 pdf.js 에 필요한 조각만 잘라 준다. */
+  const fetchPDF = async (id, name) => {
+    setUpProg({ name, what: "확인 중", pct: null, loaded: 0 });
+    try {
+      const { blob } = await getPdf(u("/api/library/file/" + id), (frac, loaded) =>
         // Content-Length 가 없으면(프록시가 청크로 흘리는 경우) 퍼센트 대신 받은 양을 보여준다
-        setUpProg(e.lengthComputable
-          ? { name, what: "받는 중", pct: Math.round((e.loaded / e.total) * 100) }
-          : { name, what: "받는 중", pct: null, loaded: e.loaded });
-      };
-      xhr.onload = () => {
-        if (xhr.status === 401) { setUpProg(null); setAuthed(false); reject(new AuthError()); return; }
-        if (xhr.status < 200 || xhr.status >= 300) {
-          setUpProg(null);
-          reject(new Error("요청 실패 " + xhr.status));
-          return;
-        }
-        /* 다 받았다고 끝이 아니다 — pdf.js 가 813쪽을 파싱하고 buildPages 가 페이지 상자를
-           전부 만드는 동안도 한참 멎어 있다. 막대를 채운 채 "여는 중" 으로 바꿔 두고,
-           openLibFile 의 finally 가 치운다. */
-        setUpProg({ name, what: "여는 중", pct: 100 });
-        resolve(xhr.response);
-      };
-      xhr.onerror = () => { setUpProg(null); reject(new Error("네트워크 오류")); };
-      setUpProg({ name, what: "받는 중", pct: 0 });
-      xhr.send();
-    });
+        setUpProg(frac != null
+          ? { name, what: "받는 중", pct: Math.round(frac * 100) }
+          : { name, what: "받는 중", pct: null, loaded }));
+      /* 다 받았다고 끝이 아니다 — pdf.js 가 파싱하고 buildPages 가 페이지 상자를
+         전부 만드는 동안도 한참 멎어 있다. 막대를 채운 채 "여는 중" 으로 바꿔 두고,
+         openLibFile 의 finally 가 치운다. */
+      setUpProg({ name, what: "여는 중", pct: 100 });
+      return blob;
+    } catch (e) {
+      setUpProg(null);
+      if (e.name === "AuthError") { setAuthed(false); throw new AuthError(); }
+      throw e;
+    }
+  };
 
   const saveToLib = async (buf, name) => {
     try {
       const j = await uploadPDF(buf, name, libFolder);
-      curFileRef.current = { id: j.id, name: j.name };
+      curFileRef.current = { id: j.id, name: j.name, indexed: j.indexed };
       refreshLib();
       if (!j.thumb) sendThumb(j.id);
       attachAnnots(j.id);
@@ -1410,15 +1428,18 @@ export default function VerbatimReader() {
     try {
       setLibErr("");
       await flushInk();
-      annotsRef.current = null;
+      setMainAnn(null);
       resetInk();
       // 필기는 PDF 와 동시에 받는다 — 첫 렌더 전에 있어야 가져온 주석을 두 겹으로 안 그린다
-      const [buf, ann] = await Promise.all([fetchPDF(f.id, f.name), loadAnnots(f.id)]);
+      const annP = acquireAnn(f.id);
+      let buf;
+      try { buf = await fetchPDF(f.id, f.name); } catch (e) { annP.then((a) => a && releaseAnn(f.id)); throw e; }
+      const ann = await annP;
       pageOkRef.current = false; // 로딩 중엔 curRef 가 아직 옛 문서의 쪽이다
-      curFileRef.current = { id: f.id, name: f.name };
-      annotsRef.current = ann;
+      curFileRef.current = { id: f.id, name: f.name, indexed: f.indexed };
+      setMainAnn(ann);
       setLibOpen(false);
-      await loadPDF(new Uint8Array(buf), f.name);
+      await loadPDF(buf, f.name);
       const target = gotoPage || f.lastPage;
       if (target && target > 1) requestAnimationFrame(() => scrollToPage(target, false));
       // 표지가 없던 책은 처음 열 때 만들어진다.
@@ -1663,7 +1684,8 @@ export default function VerbatimReader() {
   const delFile = async (id) => {
     try {
       await libApi("/api/library/file/" + id, { method: "DELETE" });
-      if (curFileRef.current?.id === id) { curFileRef.current = null; annotsRef.current = null; }
+      dropPdf(u("/api/library/file/" + id));
+      if (curFileRef.current?.id === id) { curFileRef.current = null; setMainAnn(null); }
       refreshLib();
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("지우지 못했습니다.");
@@ -1903,7 +1925,7 @@ export default function VerbatimReader() {
       if (stale()) return;
       // 완성 — 이전 캔버스(선명화 조각 포함)와 남아 있던 텍스트 레이어를 걷어낸다.
       // 필기(svg.vb-ink)는 벡터라 배율이 바뀌어도 그대로 두면 된다
-      el.querySelectorAll("canvas").forEach((c) => { if (c !== cv) c.remove(); });
+      el.querySelectorAll("canvas").forEach((c) => { if (c !== cv) freeCanvas(c); });
       drawn = true;
       el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
       el.dataset.w1 = String(vp.width / vp.scale); // 이 쪽의 배율 1 크기 — 필기 좌표 환산 기준
@@ -1922,7 +1944,7 @@ export default function VerbatimReader() {
       if (e?.name !== "RenderingCancelledException") console.error("page " + n, e);
     } finally {
       // 끝까지 못 간 렌더의 흰 캔버스는 걷는다 — 옛 캔버스(흐릿해도 그림)가 다시 보이게
-      if (cv && !drawn) cv.remove();
+      if (cv && !drawn) freeCanvas(cv);
       else if (drawn && !renderedRef.current.has(n)) leftRef.current.add(n); // 다 그렸는데 낡았다 — 그림은 두고 멀어지면 치운다
       if (jobsRef.current.get(n) === job) { jobsRef.current.delete(n); queueRef.current.delete(n); }
     }
@@ -1943,7 +1965,7 @@ export default function VerbatimReader() {
   const dropDetails = () => {
     for (const t of detailRef.current.values()) t.cancel();
     detailRef.current.clear();
-    stageRef.current?.querySelectorAll("canvas.vb-detail").forEach((c) => c.remove());
+    stageRef.current?.querySelectorAll("canvas.vb-detail").forEach(freeCanvas);
   };
   const renderDetails = () => {
     const view = viewRef.current;
@@ -1983,11 +2005,11 @@ export default function VerbatimReader() {
   const renderDetail = async (n, el, reg, dpr) => {
     detailRef.current.get(n)?.cancel();
     const key = layoutKeyRef.current;
-    let task;
+    let task, cv = null, used = false;
     try {
       const page = await pdfRef.current.getPage(n);
       const vp = page.getViewport({ scale: scaleRef.current * zoomRef.current });
-      const cv = document.createElement("canvas");
+      cv = document.createElement("canvas");
       cv.className = "vb-detail";
       cv.width = Math.floor(reg.w * dpr);
       cv.height = Math.floor(reg.h * dpr);
@@ -2008,11 +2030,13 @@ export default function VerbatimReader() {
       if (detailRef.current.get(n) !== task || layoutKeyRef.current !== key || !renderedRef.current.has(n)) return;
       const base = el.querySelector("canvas:not(.vb-detail)");
       if (!base) return;
-      el.querySelectorAll("canvas.vb-detail").forEach((c) => c.remove());
+      el.querySelectorAll("canvas.vb-detail").forEach(freeCanvas);
       base.after(cv);
+      used = true;
     } catch (e) {
       if (e?.name !== "RenderingCancelledException") console.warn("선명화 실패 " + n, e);
     } finally {
+      if (cv && !used) freeCanvas(cv); // 버려진 조각 — 붙인 적이 없어도 메모리는 이미 잡혀 있다
       if (detailRef.current.get(n) === task) detailRef.current.delete(n);
     }
   };
@@ -2046,6 +2070,9 @@ export default function VerbatimReader() {
     const pages = pagesRef.current;
     if (!view || !pages.length || !pdfRef.current || gestureRef.current) return;
     if (document.visibilityState === "hidden") return;
+    // relayout 이 자리를 지키는 중인데 스크롤이 엇나가 있다 — 곧 돌아온다(relayout 의 hold 주석)
+    const h = holdRef.current;
+    if (h && (Math.abs(view.scrollTop - h.top) > 4 || Math.abs(view.scrollLeft - h.left) > 4)) return;
     pickCur();
     const vr = view.getBoundingClientRect();
     const a = pageAt(pages, vr.top - SYNC_M);
@@ -2063,7 +2090,8 @@ export default function VerbatimReader() {
       leftRef.current.delete(n);
       const el = pagesRef.current[n - 1];
       if (el) {
-        el.querySelectorAll("canvas, svg.vb-ink").forEach((cv) => cv.remove());
+        el.querySelectorAll("canvas").forEach(freeCanvas);
+        el.querySelectorAll("svg.vb-ink").forEach((g) => g.remove());
         el.querySelectorAll(".vb-tl").forEach((t) => t.remove());
       }
       detailRef.current.get(n)?.cancel();
@@ -2090,7 +2118,101 @@ export default function VerbatimReader() {
     if (document.visibilityState === "hidden") return;
     const vr = view.getBoundingClientRect();
     const n = pageAt(pages, vr.top + vr.height / 2);
+    watchJump(n);
     if (n !== curRef.current) { curRef.current = n; setCurPage(n); }
+  };
+
+  /* ── 핀치 뒤 튐 → 돌아가기 버튼 ──
+     핀치 확정 뒤 쪽이 엉뚱하게 튀는 건(relayout 의 hold 주석 — iOS 가 우리가 넣은 scrollTop 을 덮어쓴다)
+     여러 번 막았는데도 가끔 남는다(2026-10-12 사용자). 못 막은 경우를 위해 핀치 앞뒤를 지켜보다가
+     튀면 원래 자리로 돌아가는 버튼을 잠깐 띄운다. 잡는 길은 셋:
+     (1) 확정 뒤 몇 초 안에 스크롤 한 번에 화면 0.8배 넘게 움직였고(손가락·관성으론 한 프레임에 못 간다)
+         기준 쪽에서 2쪽 이상 벗어났다
+     (2) 확정할 때 손가락 아래 쪽(앵커)이 핀치를 시작할 때 화면에 보이던 쪽들 밖이다 — 핀치 **도중** 튄 것.
+         첫 버전은 이걸 못 봤다: 앵커를 이미 튄 자리에서 잡아 "튄 자리"를 기준으로 삼았다(13:32 30→44 놓침)
+     (3) 배율이 안 바뀌었거나 네이티브 스크롤이 제스처를 가져가 핀치를 버렸다 — 시작 때 자리를 기준으로 (1)
+     자리는 "쪽 + 그 쪽 안에서 화면 가운데의 비율"로 기억한다 — 배율이 바뀌어도 되돌아갈 수 있게. */
+  const JUMP_WATCH = 6000, JUMP_SHOW = 6000;
+  const pinchAtRef = useRef(null); // 핀치 시작 때 자리 {page, fy, top, lo, hi, at}
+  const jumpLogRef = useRef([]);   // 핀치 앞뒤 기록 — 튀었는데 못 잡았을 때 서버 로그로 보낸다
+  const jlog = (m) => {
+    const L = jumpLogRef.current;
+    L.push(((performance.now() - (pinchAtRef.current?.at || 0)) / 1000).toFixed(2) + "s " + m);
+    if (L.length > 30) L.shift();
+  };
+  const spotNow = () => {
+    const view = viewRef.current, pages = pagesRef.current;
+    const vr = view.getBoundingClientRect();
+    const cy = vr.top + vr.height / 2;
+    const page = pageAt(pages, cy);
+    const r = pages[page - 1]?.getBoundingClientRect();
+    return { page, fy: r && r.height ? (cy - r.top) / r.height : 0, top: view.scrollTop,
+      lo: pageAt(pages, vr.top), hi: pageAt(pages, vr.bottom) };
+  };
+  const markPinch = () => { // 핀치(터치·트랙패드) 시작
+    if (!viewRef.current || !pagesRef.current.length) return;
+    jumpRef.current = null;
+    hideJump();
+    pinchAtRef.current = { ...spotNow(), at: performance.now() };
+    jumpLogRef.current = [];
+    const p = pinchAtRef.current;
+    jlog(`시작 ${p.page}쪽(보임 ${p.lo}~${p.hi}) top ${Math.round(p.top)} 배율 ${zoomRef.current.toFixed(2)}`);
+  };
+  const showJump = (back, why) => {
+    const cur = spotNow().page;
+    jlog(`잡음(${why}) ${cur}쪽 → 버튼 ${back.page}쪽`);
+    sendDiag(`[튐] 잡음 ${why} ${back.page}→${cur}쪽 | ` + jumpLogRef.current.join(" | "));
+    setJumpBack(back);
+    clearTimeout(jumpTimerRef.current);
+    jumpTimerRef.current = setTimeout(() => setJumpBack(null), JUMP_SHOW);
+  };
+  // how: "commit"(배율 바뀜, anchor 있음) | "keep"(배율 그대로·버림 — 시작 자리가 기준)
+  const armJump = (how, anchor) => {
+    const view = viewRef.current, st = pinchAtRef.current;
+    if (!view || !pagesRef.current.length) return;
+    const now = spotNow();
+    jlog(`${how} → ${now.page}쪽 top ${Math.round(now.top)}${anchor ? ` 앵커 ${anchor.page}쪽` : ""} 배율 ${zoomRef.current.toFixed(2)}`);
+    if (how === "commit" && st && anchor && (anchor.page < st.lo - 1 || anchor.page > st.hi + 1)) {
+      showJump({ page: st.page, fy: st.fy }, "도중");
+      return;
+    }
+    const base = how === "keep" && st ? st : now;
+    jumpRef.current = { page: base.page, fy: base.fy, until: Date.now() + JUMP_WATCH,
+      lastTop: how === "keep" && st ? st.top : now.top, reported: false };
+    // 버린 경우엔 이미 튀어 있을 수 있다 — 지금 자리로 곧바로 한 번 본다
+    if (how === "keep") watchJump(now.page);
+  };
+  const hideJump = () => { clearTimeout(jumpTimerRef.current); setJumpBack(null); };
+  const watchJump = (n) => {
+    const w = jumpRef.current, view = viewRef.current;
+    if (!w || !view) return;
+    const far = Math.abs(n - w.page) >= 2;
+    if (!far) hideJump(); // 원래 자리 근처로 돌아왔으면(hold 가 되돌렸거나 직접 돌아갔다) 거둔다
+    if (Date.now() > w.until) {
+      // 지켜보는 동안은 못 잡았는데 끝나고 보니 멀리 가 있다 — 다음에 고칠 재료로 남긴다
+      if (Math.abs(n - w.page) >= 5 && !w.reported) {
+        w.reported = true;
+        jlog(`감시 끝 뒤 ${n}쪽`);
+        sendDiag(`[튐] 놓침? 기준 ${w.page}쪽 → ${n}쪽 | ` + jumpLogRef.current.join(" | "));
+      }
+      if (Date.now() > w.until + 30000) jumpRef.current = null;
+      return;
+    }
+    const dy = view.scrollTop - w.lastTop;
+    const sudden = Math.abs(dy) > view.clientHeight * 0.8;
+    w.lastTop = view.scrollTop;
+    if (n !== w.lastN) { jlog(`${n}쪽 dy ${Math.round(dy)}`); w.lastN = n; }
+    if (sudden && far) showJump({ page: w.page, fy: w.fy }, "뒤");
+  };
+  const goJumpBack = () => {
+    const j = jumpBack, view = viewRef.current;
+    hideJump();
+    jumpRef.current = null;
+    const el = j && pagesRef.current[j.page - 1];
+    if (!el || !view) return;
+    // 그 쪽의 같은 비율 지점을 화면 가운데로 — 배율이 바뀌었어도 맞는다
+    const top = el.getBoundingClientRect().top - view.getBoundingClientRect().top + view.scrollTop;
+    view.scrollTop = top + j.fy * el.offsetHeight - view.clientHeight / 2;
   };
 
   const observe = () => {
@@ -2134,11 +2256,21 @@ export default function VerbatimReader() {
       cancelJobs();
       dataRef.current = [];
       bookTextRef.current = [];
+      // buf: Uint8Array(방금 고른 로컬 파일) 또는 Blob(서재 — 기기에 저장된 것, 조각만 읽는다)
       const pdf = await window.pdfjsLib.getDocument({
-        data: buf, cMapUrl: CDN + "cmaps/", cMapPacked: true,
+        ...pdfSource(buf), cMapUrl: CDN + "cmaps/", cMapPacked: true,
         standardFontDataUrl: CDN + "standard_fonts/",
       }).promise;
+      /* 앞 문서는 워커에서 놓아준다 — 안 그러면 원본 바이트와 파싱한 객체가 워커에 그대로 남아,
+         한 번 쓰는 동안 여러 권을 열면 아이패드 메모리가 계속 쌓인다(작은 노트는 이미 그렇게 한다).
+         새 문서를 받는 동안 옛 쪽 DOM 에서 시작된 렌더가 있을 수 있어 바꿔 끼운 뒤 한 번 더 비운다. */
+      const old = pdfRef.current;
       pdfRef.current = pdf;
+      cancelJobs();
+      dropDetails();
+      renderedRef.current.clear();
+      leftRef.current.clear();
+      if (old && old !== pdf) old.destroy().catch(() => {});
       setDocName(name);
       setNumPages(pdf.numPages);
       const p1 = await pdf.getPage(1);
@@ -2160,6 +2292,7 @@ export default function VerbatimReader() {
       if (out?.length) walk(out, 0);
       setOutline(flat);
       setFolded(new Set());
+      outlinePages(pdf, flat);
       setTimeout(() => extractAll(pdf), 800); // 첫 렌더와 경쟁하지 않게 잠깐 뒤에
     } catch (e) {
       setLoadErr("PDF를 열지 못했습니다: " + e.message);
@@ -2170,10 +2303,26 @@ export default function VerbatimReader() {
 
   /* 질문 탭용 전체 텍스트 — 페이지가 프룬되어도 남도록 별도로 한 번 훑어 둔다 */
   const extractAll = async (pdf) => {
-    if (extractingRef.current) return;
-    extractingRef.current = true;
+    // 문서마다 따로 막는다 — 앞 문서를 뽑던 중에 새 문서를 열면 새 문서 몫이 통째로 건너뛰어졌다
+    if (extractingRef.current === pdf) return;
+    extractingRef.current = pdf;
     try {
       const arr = bookTextRef.current;
+      /* 서버에 이 쪽수 그대로 본문이 올라가 있으면 그걸 받는다. 직접 뽑으면 pdf.js 가 모든 쪽을 읽느라
+         파일 전체를 메모리에 올린다 — 서재 책은 보는 쪽 근처 조각만 읽게 바꿨는데(pdfSource) 그게 소용없어진다. */
+      const id = curFileRef.current?.id;
+      if (id && curFileRef.current?.indexed === pdf.numPages) {
+        try {
+          const j = await (await libApi(`/api/library/file/${id}/text?all`)).json();
+          if (pdfRef.current !== pdf) return;
+          if (Array.isArray(j.pages) && j.pages.length === pdf.numPages) {
+            j.pages.forEach((t, i) => { if (arr[i] == null) arr[i] = typeof t === "string" ? t : ""; });
+            return;
+          }
+        } catch (e) {
+          if (e.name === "AuthError") return;
+        }
+      }
       for (let n = 1; n <= pdf.numPages; n++) {
         if (pdfRef.current !== pdf) return; // 다른 문서로 바뀜 — 중단
         if (arr[n - 1] != null) continue;
@@ -2194,7 +2343,7 @@ export default function VerbatimReader() {
         }
       }
     } finally {
-      extractingRef.current = false;
+      if (extractingRef.current === pdf) extractingRef.current = null;
     }
     // 서재 검색 인덱스 — 이 문서가 서재 파일이고(로컬에서 방금 연 파일이면 아직 id 가
     // 없을 수 있다), 다른 문서로 바뀌지 않았고, 전 쪽이 다 뽑혔을 때만 서버에 올린다.
@@ -2202,7 +2351,10 @@ export default function VerbatimReader() {
     if (pdfRef.current === pdf) {
       const id = curFileRef.current?.id;
       const full = bookTextRef.current;
-      if (id && full.length === pdf.numPages && full.every((t) => t != null)) {
+      // 이미 같은 쪽수로 올라가 있으면 다시 안 보낸다 — 본문은 PDF 가 안 바뀌는 한 그대로인데,
+      // 예전엔 열 때마다 책 전체(큰 책은 1.4MB)를 다시 올렸다
+      const done = curFileRef.current?.indexed === pdf.numPages;
+      if (id && !done && full.length === pdf.numPages && full.every((t) => t != null)) {
         libApi("/api/library/file/" + id + "/text", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -2331,9 +2483,8 @@ export default function VerbatimReader() {
       // 서버 파일이 바뀌었다 — 다시 받아서 pdf.js 가 새 /Outlines 를 그대로 파싱하게 한다.
       // (커스텀 렌더링이 따로 필요 없다: 북마크가 진짜 PDF 구조로 박혀서 기존 목차 패널이 그대로 읽는다.)
       const name = docName;
-      const r = await libApi("/api/library/file/" + id);
-      const nbuf = await r.arrayBuffer();
-      await loadPDF(new Uint8Array(nbuf), name);
+      await loadPDF(await fetchPDF(id, name), name);
+      setUpProg(null);
       refreshLib();
     } catch (e) {
       if (e.name !== "AuthError") setOutlineErr(e.message || "목차를 만들지 못했습니다.");
@@ -2381,7 +2532,7 @@ export default function VerbatimReader() {
      그래서 (1) 1쪽 크기는 buildPages 때 baseRef 에 재 두고, (2) 목표 위치를 **절대값**으로
      계산해 scrollTop 에 직접 대입한다. await 가 없으니 브라우저는 중간 상태를 한 프레임도
      그리지 않는다 — 크기 변경과 스크롤 보정이 같은 페인트에 들어간다. */
-  const relayout = useCallback((keepPage, anchor) => {
+  const relayout = useCallback((keepPage, anchor, keepWidth) => {
     const base = baseRef.current;
     const view = viewRef.current;
     if (!pdfRef.current || !base || !view) return;
@@ -2397,6 +2548,20 @@ export default function VerbatimReader() {
     // 폭도 배율도 그대로면 아무것도 하지 않는다 — 좁은 화면에서 풀이창을 여닫을 때마다
     // 전부 다시 그리면서 페이지가 튀던 문제의 원인이 이 불필요한 재배치였다.
     if (cw === layoutKeyRef.current.cw && zoomRef.current === layoutKeyRef.current.zoom) return;
+    /* 옆 패널(풀이창·목차)을 여닫을 때는 보이던 쪽 너비를 그대로 둔다 — 폭에 맞춰 다시 맞추면 글자 크기가
+       바뀌고 다시 그리느라 스크롤도 조금씩 어긋났다(2026-10-09 사용자). 맞춤 배율(scaleRef)이 바뀐 만큼
+       확대율(zoomRef)을 거꾸로 바꿔 곱이 같게 한다 — 쪽 크기가 그대로라 다시 그릴 것도, 스크롤 고칠 것도 없다.
+       layoutKeyRef 는 새 객체가 아니라 제자리에서 고친다: 새 객체면 그리던 쪽이 낡은 것으로 버려진다. */
+    if (keepWidth && cw !== layoutKeyRef.current.cw) {
+      const z = (scaleRef.current * zoomRef.current) / (cw / base.w);
+      if (z >= ZOOM_MIN && z <= ZOOM_MAX) {
+        scaleRef.current = cw / base.w;
+        zoomRef.current = z;
+        layoutKeyRef.current.cw = cw;
+        layoutKeyRef.current.zoom = z;
+        return;
+      }
+    }
     layoutKeyRef.current = { cw, zoom: zoomRef.current };
     const keep = keepPage || curRef.current;
 
@@ -2460,11 +2625,17 @@ export default function VerbatimReader() {
       const want = { top: view.scrollTop, left: view.scrollLeft };
       const key = layoutKeyRef.current;
       let touched = false;
-      const off = () => { touched = true; };
+      /* 지키는 동안엔 syncPages 가 엇나간 위치로 그리기·치우기를 하지 않는다(holdRef). 안 그러면 iOS 가
+         옛 scrollTop 을 되돌려 놓은 그 한순간의 위치로 범위를 잡아, 정작 보고 있던 쪽의 캔버스를 치웠다가
+         hold 가 제자리로 돌린 뒤 다시 그렸다 — 화면보다 작게 축소한 채 확대·축소하면 쪽이 꺼졌다 켜졌다
+         하던 원인(2026-10-09 실기기). */
+      holdRef.current = want;
+      const done = () => { if (holdRef.current === want) holdRef.current = null; };
+      const off = () => { touched = true; done(); };
       view.addEventListener("touchstart", off, { passive: true });
       view.addEventListener("wheel", off, { passive: true });
       const hold = () => {
-        if (touched || layoutKeyRef.current !== key) return;
+        if (touched || layoutKeyRef.current !== key) return done();
         if (Math.abs(view.scrollTop - want.top) > 4) view.scrollTop = want.top;
         if (Math.abs(view.scrollLeft - want.left) > 4) view.scrollLeft = want.left;
       };
@@ -2472,6 +2643,8 @@ export default function VerbatimReader() {
       setTimeout(hold, 120);
       setTimeout(() => {
         hold();
+        done();
+        syncPages();
         view.removeEventListener("touchstart", off);
         view.removeEventListener("wheel", off);
       }, 350);
@@ -2482,8 +2655,12 @@ export default function VerbatimReader() {
     observe();
   }, []);
 
+  // 패널 여닫기는 쪽 너비를 지킨다(relayout 의 keepWidth). wide 가 뒤집힌 건 창 크기가 바뀐 것이라 다시 맞춘다
+  const wideWasRef = useRef(wide);
   useEffect(() => {
-    const t = setTimeout(() => relayout(), 280);
+    const keepWidth = wideWasRef.current === wide;
+    wideWasRef.current = wide;
+    const t = setTimeout(() => relayout(undefined, undefined, keepWidth), 280);
     return () => clearTimeout(t);
   }, [sheetOpen, outOpen, wide, panelMode, relayout]);
 
@@ -2689,17 +2866,25 @@ export default function VerbatimReader() {
   }, [word]);
 
   /* 리모트(폰)의 단어/문장 탭은 이 값이 스트리밍되는 그대로를 받아 그린다(src/Remote.jsx
-     의 word/sent 슬롯). word/sent state 가 바뀔 때마다(토큰 단위 포함) 그대로 흘려보낸다 —
-     끊어 보내지 않고 최신 state 를 매번 통째로 보내는 게 단순하고, seq 로 낡은 응답만
-     걸러내면 되므로 순서만 지키면 된다. */
+     의 word/sent 슬롯). 최신 state 를 통째로 보내고 seq 로 낡은 응답만 걸러낸다.
+     흐르는 중(live)에는 슬롯마다 0.25초에 한 번만 — 예전엔 글자 조각마다 POST 가 하나씩 나갔다.
+     끝난 것(live 아님)은 기다리던 걸 버리고 곧바로 보낸다. */
   const remoteSeqRef = useRef({ word: 0, sent: 0 });
+  const relayWait = useRef({});
   const relay = (slot, payload) => {
     if (!remoteOnRef.current) return;
-    remoteSeqRef.current[slot] += 1;
-    fetch(u("/api/remote/relay"), {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slot, seq: remoteSeqRef.current[slot], payload }),
-    }).catch(() => {});
+    const w = (relayWait.current[slot] ||= { t: 0, at: 0, last: null });
+    const send = () => {
+      w.t = 0; w.at = Date.now();
+      remoteSeqRef.current[slot] += 1;
+      fetch(u("/api/remote/relay"), {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ slot, seq: remoteSeqRef.current[slot], payload: w.last }),
+      }).catch(() => {});
+    };
+    w.last = payload;
+    if (!payload?.live) { clearTimeout(w.t); send(); return; }
+    if (!w.t) w.t = setTimeout(send, Math.max(0, 250 - (Date.now() - w.at)));
   };
   useEffect(() => {
     if (!word) return;
@@ -2859,6 +3044,7 @@ export default function VerbatimReader() {
          핀치 중 튀는 문제는 아래 onMove 의 e.cancelable 사후 방어로만 다룬다. */
       pinching = true;
       gestureRef.current = true;
+      markPinch();
       hook(e);
       ids = new Set([...e.touches].map((t) => t.identifier));
       startD = dist(e.touches);
@@ -2887,6 +3073,7 @@ export default function VerbatimReader() {
         unhook();
         reset();
         observe();
+        armJump("keep");
         return;
       }
       e.preventDefault();
@@ -2922,6 +3109,7 @@ export default function VerbatimReader() {
       reset();
       lastMid = null;
       observe();
+      armJump("keep");
     };
 
     /* 확정은 손가락이 **전부** 떨어진 뒤에 한다. 예전엔 하나만 떼도 확정했는데, 그러면 남은
@@ -2947,8 +3135,10 @@ export default function VerbatimReader() {
         zoomRef.current = next;
         persist();
         relayout(anchor?.page, anchor);
+        armJump("commit", anchor);
       } else {
         observe();
+        armJump("keep");
       }
     };
     /* 화면이 가려질 때도 제스처를 버린다 — touchcancel 이 항상 오리라고 믿을 수 없다.
@@ -2997,8 +3187,10 @@ export default function VerbatimReader() {
         zoomRef.current = next;
         persist();
         relayout(anchor?.page, anchor);
+        armJump("commit", anchor);
       } else {
         observe();
+        armJump("keep");
       }
     };
     const onWheel = (e) => {
@@ -3007,6 +3199,7 @@ export default function VerbatimReader() {
       if (!zooming) {
         zooming = true;
         gestureRef.current = true;
+        markPinch();
         startZoom = zoomRef.current;
         factor = 1;
         ioRef.current?.disconnect(); // 제스처 중에는 렌더/프룬이 끼어들지 않게
@@ -3131,6 +3324,7 @@ export default function VerbatimReader() {
      opts.img: 딸려 보낼 그림 id(서버에 저장된 것), opts.model: 폰에서 고른 모델(없으면 이 기기의 선택). */
   const answerInto = async (sid, idx, q, history, opts = {}) => {
     setAsking(true);
+    const sp = streamPatcher(sid, idx);
     const s = findSess(sid);
 
     /* 그림이 딸린 질문: 옮겨 적은 글(imgDesc, 같은 그림의 것)이 있으면 그 글로, 없으면 그림째 Gemini 에게(visionDirect).
@@ -3177,7 +3371,7 @@ export default function VerbatimReader() {
       };
       const onDelta = (c) => {
         buf += c;
-        patchMsg(sid, idx, { text: buf }, false); // 흐르는 동안은 로컬만 — 정착할 때 서버에
+        sp.live({ text: buf }); // 흐르는 동안은 답 본문 칸만 — 정착할 때 state 와 서버에
         relayAsk({ sid, i: idx, text: buf, run: statRef.current });
       };
       const onPhaseR = onPhase;
@@ -3207,7 +3401,7 @@ export default function VerbatimReader() {
       });
       // 끊긴 걸 표시해 두지 않으면 답이 원래 그렇게 끝난 줄 안다.
       // swap 은 text 가 아니라 별도 칸에 둔다 — text 에 섞으면 다음 턴 히스토리까지 따라간다.
-      patchMsg(sid, idx, {
+      sp.settle({
         text: buf + (cut ? "\n\n*(답변이 길어 여기서 끊겼어요. \"이어서\"라고 보내면 계속해요.)*" : ""),
         live: false,
         swap: swap && { wanted: modelName(swap.wanted), model: modelName(swap.model) },
@@ -3223,7 +3417,7 @@ export default function VerbatimReader() {
          나갔다 오면 늘 이 경로다. 서버 로그에는 아무것도 안 남는다(연결만 끊긴 것이라). */
       const stopped = e.name === "AbortError";
       if (isCur(ac)) bumpStat({ outcome: stopped ? "stopped" : "error", err: e.message });
-      patchMsg(sid, idx, {
+      sp.settle({
         text: buf,
         live: false,
         stopped: stopped && !!buf,
@@ -3614,6 +3808,9 @@ export default function VerbatimReader() {
   };
   const markInk = (n) => {
     inkDirtyRef.current.add(n);
+    // 작은 노트에 같은 문서가 떠 있으면 그 쪽도 다시 그린다(데이터는 같은 객체라 그리기만)
+    const mini = miniApiRef.current;
+    if (mini && annotsRef.current && mini.id() === annotsRef.current.id) mini.repaint(n);
     clearTimeout(inkTimerRef.current);
     inkTimerRef.current = setTimeout(flushInk, 800);
   };
@@ -3634,12 +3831,40 @@ export default function VerbatimReader() {
       return null;
     }
   };
+
+  /* 필기 데이터는 문서마다 **한 벌**만 메모리에 둔다 — 본문과 작은 노트가 같은 문서를 열면 같은 객체를
+     나눠 쓴다. 따로 받으면 두 곳이 각자 옛 쪽 내용을 PUT 해서 서로의 획을 지운다(그래서 예전엔 작은 노트에서
+     본문 문서를 못 열게 막았다). 같은 객체면 어느 쪽이 보내든 늘 최신 쪽 전체가 간다.
+     쓰는 곳이 하나도 없으면 버린다 — 다음에 열 때 서버에서 새로 받는다. */
+  const annStoreRef = useRef(new Map()); // id → { n: 쓰는 곳 수, p: Promise<ann|null> }
+  const acquireAnn = (id) => {
+    const m = annStoreRef.current;
+    let e = m.get(id);
+    if (!e) {
+      e = { n: 0, p: loadAnnots(id) };
+      m.set(id, e);
+      e.p.then((a) => { if (!a && m.get(id) === e) m.delete(id); }); // 실패는 남기지 않는다 — 다음에 다시 받는다
+    }
+    e.n++;
+    return e.p;
+  };
+  const releaseAnn = (id) => {
+    const m = annStoreRef.current, e = m.get(id);
+    if (e && --e.n <= 0) m.delete(id);
+  };
+  // 본문의 필기 데이터를 바꿔 끼운다(앞 것은 놓는다). ann 은 acquireAnn 으로 받은 것이어야 한다.
+  const setMainAnn = (ann) => {
+    const old = annotsRef.current;
+    if (old && old !== ann) releaseAnn(old.id);
+    annotsRef.current = ann;
+  };
   /* 로컬 파일을 열면 업로드가 끝나야 id 가 생긴다 — 그때 필기를 붙인다(같은 PDF 를 다시 올린 경우
      서재에 있던 필기가 돌아온다). 주석을 가져온 문서면 원본 주석을 끈 채 다시 그려야 한다. */
   const attachAnnots = async (id) => {
-    const ann = await loadAnnots(id);
-    if (!ann || curFileRef.current?.id !== id) return;
-    annotsRef.current = ann;
+    const ann = await acquireAnn(id);
+    if (!ann) return;
+    if (curFileRef.current?.id !== id) { releaseAnn(id); return; }
+    setMainAnn(ann);
     const ns = [...renderedRef.current];
     if (ann.imported) {
       renderedRef.current.clear();
@@ -3934,6 +4159,17 @@ export default function VerbatimReader() {
       if (c.kind === "draw" && a) {
         const s = c.s;
         s.pts = tidyPts(s.pts, 0.04);
+        // 펜으로 지그재그를 그어 그 밑 획을 지웠으면, 지그재그 자신은 남기지 않는다
+        const gone = s.t === "pen" && isScribble(s.pts) && a.pages[c.n] ? scribbleHits(a.pages[c.n], s) : [];
+        if (gone.length) {
+          if (!a.pages[c.n].length) delete a.pages[c.n];
+          paintInk(c.n);
+          inkPush({ k: "del", n: c.n, items: gone });
+          markInk(c.n);
+          wet.style.mixBlendMode = "";
+          render();
+          return;
+        }
         (a.pages[c.n] ||= []).push(s);
         drawInkOne(c.n, s); // 쪽 캔버스에 먼저 그리고, 같은 틱에 젖은 캔버스를 비운다 → 번쩍임 없음
         inkPush({ k: "add", n: c.n, s });
@@ -4250,8 +4486,10 @@ export default function VerbatimReader() {
       { role: "ai", text: "", live: true },
     ]);
     // 흐르는 동안은 로컬만, 끝(extra 가 있을 때)에 서버로 — 다른 기기에는 relay 로
+    const sp = streamPatcher(sid, idx);
     const put = (t, extra) => {
-      patchMsg(sid, idx, { text: t, ...extra }, !!extra);
+      if (extra) sp.settle({ text: t, ...extra });
+      else sp.live({ text: t });
       if (!extra) relayAsk({ sid, i: idx, text: t, run: statRef.current });
     };
 
@@ -4312,7 +4550,7 @@ export default function VerbatimReader() {
       }
     } catch (e) {
       // 중단은 사고가 아니다 — 여기까지 받은 내용을 남기고 조용히 끝낸다.
-      if (e.name === "AbortError") patchMsg(sid, idx, { live: false, stopped: true });
+      if (e.name === "AbortError") sp.settle({ live: false, stopped: true });
       else put("", { live: false, err: e.message, stopped: false });
     } finally {
       endJob(ac);
@@ -4328,7 +4566,7 @@ export default function VerbatimReader() {
       const name = f.name.replace(/\.pdf$/i, "");
       await flushInk();
       curFileRef.current = null;
-      annotsRef.current = null;
+      setMainAnn(null);
       resetInk();
       setLibOpen(false);
       // pdf.js 가 버퍼를 워커로 가져가 비워 버리므로, 업로드용 원본과 분리한 복사본을 넘긴다
@@ -4598,6 +4836,55 @@ export default function VerbatimReader() {
       scrollToPage(it.data.page);
     }
   };
+  /* 목차 항목마다 몇 쪽인지 — "지금 보는 절" 표시용. 목적지(dest)를 쪽 번호로 푸는 건 비동기라
+     목차를 먼저 띄우고 뒤에서 채운다. 문서가 바뀌었으면 버린다. */
+  const outlinePages = async (pdf, flat) => {
+    const pages = await Promise.all(flat.map(async (it) => {
+      try {
+        const d = typeof it.dest === "string" ? await pdf.getDestination(it.dest) : it.dest;
+        if (!d) return 0;
+        const ref = d[0];
+        return (typeof ref === "object" && ref !== null ? await pdf.getPageIndex(ref) : Number(ref)) + 1;
+      } catch { return 0; }
+    }));
+    if (pdfRef.current !== pdf) return;
+    setOutline(flat.map((it, i) => ({ ...it, page: pages[i] || 0 })));
+  };
+  /* 지금 보는 절 = 시작 쪽이 지금 쪽 이하인 항목 중 가장 늦게 시작하는 것(같은 쪽이면 목록에서 뒤 — 더 깊은 절).
+     chain 은 그 절과 윗단위들(목차 순서상 앞쪽의 더 얕은 항목). */
+  const curSec = useMemo(() => {
+    let best = -1;
+    outline.forEach((it, i) => {
+      if (it.page > 0 && it.page <= curPage && (best < 0 || it.page >= outline[best].page)) best = i;
+    });
+    const chain = new Set();
+    if (best >= 0) {
+      chain.add(best);
+      let d = outline[best].depth;
+      for (let i = best - 1; i >= 0 && d > 0; i--) if (outline[i].depth < d) { chain.add(i); d = outline[i].depth; }
+    }
+    return { i: best, chain, top: chain.size ? Math.min(...chain) : -1 };
+  }, [outline, curPage]);
+  /* 목차를 열면 지금 절의 맨 윗단위가 목록 맨 위에 오게 — 접혀 있으면 그 줄기를 편다 */
+  const olistRef = useRef(null);
+  useEffect(() => {
+    if (!outOpen || curSec.top < 0) return;
+    setFolded((f) => {
+      if (![...curSec.chain].some((i) => f.has(i) && i !== curSec.i)) return f;
+      const n = new Set(f);
+      for (const i of curSec.chain) if (i !== curSec.i) n.delete(i);
+      return n;
+    });
+    const raf = requestAnimationFrame(() => {
+      const list = olistRef.current;
+      const row = list?.querySelector(`[data-oi="${curSec.top}"]`);
+      if (row) list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top;
+    });
+    return () => cancelAnimationFrame(raf);
+    // 열 때만 — 읽는 중 절이 바뀔 때마다 목록이 움직이면 산만하다(표시는 따라 바뀐다)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [outOpen, curSec.top >= 0]);
+
   /* 접힌 항목의 하위(depth 가 더 깊은 뒤따르는 항목)는 숨긴다 */
   const visibleOutline = (() => {
     const v = [];
@@ -4781,7 +5068,7 @@ export default function VerbatimReader() {
       <div className="vb-body">
         <aside className={"vb-out" + (wide ? (outOpen ? "" : " closed") : outOpen ? " open" : "")}>
           <h2>목차</h2>
-          <div className="vb-olist">
+          <div className="vb-olist" ref={olistRef}>
             {outline.length === 0 && numPages === 0 && <div className="vb-oempty">PDF를 열면 목차가 나타납니다.</div>}
             {outline.length === 0 && numPages > 0 && (
               <>
@@ -4809,7 +5096,9 @@ export default function VerbatimReader() {
               const it = outline[i];
               const kids = outline[i + 1]?.depth > it.depth; // walk 는 하위 항목을 바로 뒤에 넣는다
               return (
-                <div key={i} className={"vb-orow" + (it.depth ? " d" + it.depth : "")}>
+                <div key={i} data-oi={i}
+                  className={"vb-orow" + (it.depth ? " d" + it.depth : "") +
+                    (curSec.i === i ? " cur" : curSec.chain.has(i) ? " curp" : "")}>
                   <button className={"vb-ochev" + (kids ? "" : " off") + (folded.has(i) ? " fold" : "")}
                     tabIndex={kids ? 0 : -1}
                     onClick={() => setFolded((s) => {
@@ -4835,6 +5124,11 @@ export default function VerbatimReader() {
         </div>
 
         {zoomPill && <div className="vb-zoompill">{zoomPill}</div>}
+        {jumpBack && (
+          <button className="vb-jumpback" onClick={goJumpBack} aria-label={jumpBack.page + "쪽으로 돌아가기"}>
+            <Bi name="arrow-return-left" />
+          </button>
+        )}
 
         {inkOn && numPages > 0 && (() => {
           const tools = [
@@ -4942,7 +5236,9 @@ export default function VerbatimReader() {
         {!inLib && (
           <MiniNote open={miniOpen} onClose={() => setMiniOpen(false)} lib={lib} mainId={curFileRef.current?.id}
             libApi={libApi} cdn={CDN} inkOn={inkOn} inkCfgRef={inkCfgRef} onInkOp={(op) => inkPush(op)}
-            apiRef={miniApiRef} invert={invert} coarse={COARSE} />
+            apiRef={miniApiRef} invert={invert} coarse={COARSE}
+            acquireAnn={acquireAnn} releaseAnn={releaseAnn}
+            onInkPaint={(id, n) => { if (annotsRef.current?.id === id) paintInk(n); }} />
         )}
 
         {bubble && (
@@ -5457,7 +5753,7 @@ export default function VerbatimReader() {
               capture={{ icon: "crop", label: "영역 오려내기", onClick: () => enterCap(curSessRef.current) }}
               models={models} askRank={askRank} selModel={cfg.askModel || ""} onPickModel={pickModel}
               onModelsOpen={refreshHealth} healthOf={healthOf} defLabel={defLabel}
-              run={askRun} lastRun={lastRun}
+              run={askRun} runRef={statRef} lastRun={lastRun}
               onRedo={redoAsk} canRedo={(p) => !p.q.hist}
               onImage={pasteFig}
             />
@@ -5488,104 +5784,131 @@ export default function VerbatimReader() {
           )}
         </section>
 
-        {setOpen && (
-          <div className="vb-modal" onClick={(e) => { if (e.target === e.currentTarget) setSetOpen(false); }}>
-            <div className="vb-card">
-              <h3>엔진 설정</h3>
-              <p className="vb-sub">고른 모델이 붐비거나 답을 못 하면 서버가 다른 모델로 바꿔 대신 답하게 합니다 — 그때는 답 위에 누가 대신 답했는지 뜹니다. API 키는 서버에서 관리합니다. 설정과 배율은 이 기기에 저장됩니다.</p>
-              <label className="vb-row">
-                <input type="checkbox" checked={cfg.useDict}
-                  onChange={(e) => setCfg({ ...cfg, useDict: e.target.checked })} />
-                영어 단어는 사전 API를 먼저 조회 (더 빠름)
-              </label>
-              {tapModels.length > 0 && (
-                <div className="vb-field">
-                  <label>단어·문장 탭 모델</label>
-                  <select value={cfg.tapModel || ""}
-                    onChange={(e) => setCfg({ ...cfg, tapModel: e.target.value })}>
-                    <option value="">
-                      자동{tapModels.find((m) => m.id === tapDef) ? ` — 지금 ${tapModels.find((m) => m.id === tapDef).label}` : ""}
-                    </option>
-                    {tapModels.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.label}{health[m.id] && !health[m.id].ok ? ` (지금 ${healthOf(m.id)?.text})` : ""}
-                      </option>
-                    ))}
-                  </select>
-                  <p className="vb-hint">
-                    {tapModels.find((m) => m.id === (cfg.tapModel || tapDef))?.note || "단어를 탭했을 때와 영역 캡처에 씁니다."}
-                  </p>
-                </div>
-              )}
-              {models.length > 0 && (
-                <div className="vb-field">
-                  <label>질문 탭 모델</label>
-                  <select value={cfg.askModel || ""}
-                    onChange={(e) => setCfg({ ...cfg, askModel: e.target.value })}>
-                    <option value="">
-                      자동{defLabel ? ` — 지금 ${defLabel}` : ""}
-                    </option>
-                    {models.map((m) => (
-                      <option key={m.id} value={m.id}>{m.label}</option>
-                    ))}
-                  </select>
-                  <p className="vb-hint">
-                    {askNote || "단어·문장 탭은 반응 속도 때문에 빠른 모델을 그대로 씁니다. 이 설정은 질문 탭에만 적용됩니다."}
-                  </p>
-                </div>
-              )}
-              <div className="vb-field">
-                <label>리모트 모드</label>
-                <label className="vb-row" style={{ margin: "8px 0 0" }}>
-                  <input type="checkbox" checked={remoteOn} onChange={toggleRemote} />
-                  폰에서 이 책을 따라 보고 질문하기
-                </label>
-                <p className="vb-hint">
-                  켜면 폰에서 같은 주소를 열었을 때 지금 보고 있는 쪽을 따라 보고,
-                  단어·문장·질문을 폰에서 물을 수 있습니다. 답은 이 기기가 만들어 보냅니다.
-                  {remoteOn && <> 지금 <b>켜져 있음</b>.</>}
-                </p>
+        {setOpen && (() => {
+          const tapNow = tapModels.find((m) => m.id === (cfg.tapModel || tapDef));
+          const askNow = models.find((m) => m.id === (cfg.askModel || defModel));
+          const close = () => { persist(); setSetOpen(false); setInboxHelp(false); };
+          const Sw = ({ on, onChange, label }) => (
+            <button className={"vb-sw" + (on ? " on" : "")} role="switch" aria-checked={on} aria-label={label}
+              onClick={onChange}><i /></button>
+          );
+          return (
+          <div className="vb-modal" onClick={(e) => { if (e.target === e.currentTarget) close(); }}>
+            <div className="vb-card vb-set">
+              <div className="vb-sethead">
+                <h3>설정</h3>
+                <button className="vb-setx" onClick={close} aria-label="닫기"><Bi name="x-lg" /></button>
               </div>
-              <div className="vb-field">
-                <label>모델 목록</label>
-                <p className="vb-hint" style={{ marginTop: 0 }}>
-                  서버가 Google·NVIDIA 의 모델 목록을 한 시간마다 보고, 새 모델은 직접 불러 확인한 뒤 목록에 넣고
-                  수명이 끝난 모델은 뺍니다.{" "}
-                  {mdlInfo.discovering ? <b>지금 찾는 중 — 몇 분 걸립니다.</b>
-                    : mdlInfo.updatedAt ? <>마지막 확인 {new Date(mdlInfo.updatedAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} · 질문 {models.length}개 · 탭 {tapModels.length}개.</> : null}
-                </p>
-                <button className="vb-inboxbtn" disabled={mdlInfo.discovering} onClick={async () => {
-                  try { await libApi("/api/models/refresh", { method: "POST" }); } catch {}
-                  setMdlInfo((m) => ({ ...m, discovering: true }));
-                }}>지금 다시 찾기</button>
+
+              <div className="vb-setgrp">AI</div>
+              <div className="vb-setlist">
+                {tapModels.length > 0 && (
+                  <label className="vb-setrow">
+                    <Bi name="stars" className="ic" />
+                    <span className="tx"><b>단어 탭</b>{tapNow?.note && <small>{tapNow.note}</small>}</span>
+                    <span className="vb-setsel">
+                      <select value={cfg.tapModel || ""} onChange={(e) => setCfg({ ...cfg, tapModel: e.target.value })}>
+                        <option value="">자동{tapModels.find((m) => m.id === tapDef) ? ` · ${tapModels.find((m) => m.id === tapDef).label}` : ""}</option>
+                        {tapModels.map((m) => (
+                          <option key={m.id} value={m.id}>
+                            {m.label}{health[m.id] && !health[m.id].ok ? ` (${healthOf(m.id)?.text})` : ""}
+                          </option>
+                        ))}
+                      </select>
+                      <Bi name="chevron-expand" />
+                    </span>
+                  </label>
+                )}
+                {models.length > 0 && (
+                  <label className="vb-setrow">
+                    <Bi name="chat" className="ic" />
+                    <span className="tx"><b>질문</b>{askNow?.note && <small>{askNow.note}</small>}</span>
+                    <span className="vb-setsel">
+                      <select value={cfg.askModel || ""} onChange={(e) => setCfg({ ...cfg, askModel: e.target.value })}>
+                        <option value="">자동{defLabel ? ` · ${defLabel}` : ""}</option>
+                        {models.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+                      </select>
+                      <Bi name="chevron-expand" />
+                    </span>
+                  </label>
+                )}
+                <div className="vb-setrow">
+                  <Bi name="book" className="ic" />
+                  <span className="tx"><b>영어 사전 먼저</b></span>
+                  <Sw on={cfg.useDict} label="영어 사전 먼저" onChange={() => setCfg({ ...cfg, useDict: !cfg.useDict })} />
+                </div>
+                <div className="vb-setrow">
+                  <Bi name="cpu" className="ic" />
+                  <span className="tx">
+                    <b>모델 목록</b>
+                    <small>
+                      {mdlInfo.discovering ? "찾는 중…"
+                        : mdlInfo.updatedAt ? `${new Date(mdlInfo.updatedAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })} · 질문 ${models.length} · 탭 ${tapModels.length}` : ""}
+                    </small>
+                  </span>
+                  <button className={"vb-setic" + (mdlInfo.discovering ? " spin" : "")} disabled={mdlInfo.discovering}
+                    aria-label="다시 찾기" onClick={async () => {
+                      try { await libApi("/api/models/refresh", { method: "POST" }); } catch {}
+                      setMdlInfo((m) => ({ ...m, discovering: true }));
+                    }}><Bi name="arrow-repeat" /></button>
+                </div>
               </div>
-              {inbox?.enabled && (
-                <div className="vb-field">
-                  <label>단축어로 PDF 넣기</label>
-                  <div className="vb-inbox">
-                    <code>{location.origin + u("/api/inbox")}</code>
-                    <button onClick={() => copyInbox("url", location.origin + u("/api/inbox"))}>
-                      {inboxCopied === "url" ? "복사됨" : "주소 복사"}
+
+              <div className="vb-setgrp">기기</div>
+              <div className="vb-setlist">
+                <div className="vb-setrow">
+                  <Bi name="phone" className="ic" />
+                  <span className="tx"><b>폰 리모트</b><small>단어·문장 탭을 폰에 보여요</small></span>
+                  <Sw on={remoteOn} label="폰 리모트" onChange={toggleRemote} />
+                </div>
+                {pdfStore && (
+                  <div className="vb-setrow">
+                    <Bi name="hdd" className="ic" />
+                    <span className="tx"><b>저장된 PDF</b>
+                      <small>{pdfStore.n}권 · {(pdfStore.bytes / 1024 ** 2).toFixed(0)}MB · 이틀 안 열면 지워요</small></span>
+                    <button className="vb-setic" disabled={!pdfStore.n} aria-label="모두 지우기" onClick={async () => {
+                      await clearPdfs();
+                      setPdfStore(cacheInfo());
+                    }}><Bi name="trash3" /></button>
+                  </div>
+                )}
+              </div>
+
+              {inbox?.enabled && (<>
+                <div className="vb-setgrp">
+                  단축어로 PDF 넣기
+                  <button className={"vb-sethelp" + (inboxHelp ? " on" : "")} onClick={() => setInboxHelp((v) => !v)}
+                    aria-label="설정 방법"><Bi name="question-circle" /></button>
+                </div>
+                <div className="vb-setlist">
+                  <div className="vb-setrow">
+                    <Bi name="link-45deg" className="ic" />
+                    <span className="tx"><code>{location.origin + u("/api/inbox")}</code></span>
+                    <button className="vb-setic" aria-label="주소 복사"
+                      onClick={() => copyInbox("url", location.origin + u("/api/inbox"))}>
+                      <Bi name={inboxCopied === "url" ? "check2" : "copy"} />
                     </button>
                   </div>
-                  <div className="vb-inbox">
-                    <code>Bearer {inbox.token.slice(0, 6)}…</code>
-                    <button onClick={() => copyInbox("tok", "Bearer " + inbox.token)}>
-                      {inboxCopied === "tok" ? "복사됨" : "토큰 복사"}
+                  <div className="vb-setrow">
+                    <Bi name="key" className="ic" />
+                    <span className="tx"><code>Bearer {inbox.token.slice(0, 6)}…</code></span>
+                    <button className="vb-setic" aria-label="토큰 복사"
+                      onClick={() => copyInbox("tok", "Bearer " + inbox.token)}>
+                      <Bi name={inboxCopied === "tok" ? "check2" : "copy"} />
                     </button>
                   </div>
-                  <p className="vb-hint">
-                    단축어의 <b>URL 콘텐츠 가져오기</b>에 주소를 넣고, 메소드 <b>POST</b>, 헤더 <b>Authorization</b> 에
-                    토큰(“Bearer …” 통째로), 본문 요청 <b>양식</b>에 파일 필드(키 <b>file</b>)로 PDF 를 보냅니다.
-                    이름은 파일 이름을 그대로 씁니다. 주소 끝에 <b>?folder=폴더이름</b> 을 붙이면 그 폴더로 들어갑니다.
-                    이 토큰으로는 PDF 넣기만 됩니다.
-                  </p>
                 </div>
-              )}
-              <button className="vb-done" onClick={() => { persist(); setSetOpen(false); }}>닫기</button>
+                {inboxHelp && (
+                  <p className="vb-setnote">
+                    <b>URL 콘텐츠 가져오기</b> · 메소드 <b>POST</b> · 헤더 <b>Authorization</b>에 토큰 ·
+                    본문 <b>양식</b>, 키 <b>file</b>에 PDF. 폴더는 주소 끝에 <b>?folder=이름</b>.
+                  </p>
+                )}
+              </>)}
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {/* 이름 정리 — 형식을 적어 제안을 받고, 미리보기에서 고치거나 빼고, 적용을 눌러야 반영된다 */}
         {renOpen && (
