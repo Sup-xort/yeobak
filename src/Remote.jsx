@@ -3,7 +3,7 @@ import "./App.css";
 import { ThinkingOrb } from "thinking-orbs";
 import AskView, { imageToJpeg } from "./AskView.jsx";
 import Bi from "./icons.jsx";
-import { fmtRel } from "./App.jsx";
+import { fmtRel } from "./text.js";
 import { u } from "./paths.js";
 
 /* ───────────────────────── 여백 리모트 (폰) ─────────────────────────
