@@ -162,7 +162,8 @@ export const polyBox = (poly) => {
    점들의 주축(PCA)을 잡고 그 축에서 앞뒤로 몇 번 꺾였나를 센다 — 축 폭의 35% 넘게 되돌아가야 한 번.
    긁는 손은 같은 길을 왔다 갔다 하니 주축이 획 방향이 되고 꺾임이 많다(끝이 둥글어 고리가 져도 상관없다).
    필기체는 글줄 방향으로 나아가며 위아래로 오르내리니 주축이 글줄이고, 그 축에선 되돌아가는 일이 거의 없다.
-   주축에서 4번 이상 꺾이고(5번 쓸고), 길이가 상자 긴 변의 2배 이상이면 지그재그다. */
+   주축에서 4번 이상 꺾이고(5번 쓸고), 길이가 상자 긴 변의 2배 이상이면 지그재그다.
+   2026-10-13 실데이터 2888획 중 부축 규칙에 걸린 건 실패한 긁기 4개뿐이었다. */
 export function isScribble(pts) {
   if (pts.length < 12) return false;
   const [x0, y0, x1, y1] = polyBox(pts);
@@ -176,11 +177,17 @@ export function isScribble(pts) {
   for (const p of pts) { const dx = p[0] - mx, dy = p[1] - my; sxx += dx * dx; syy += dy * dy; sxy += dx * dy; }
   const th = 0.5 * Math.atan2(2 * sxy, sxx - syy);
   const ux = Math.cos(th), uy = Math.sin(th);
+  // 비스듬한 고리를 옆으로 이어 긋는 긁기는 주축이 진행 방향이라 되돌림이 짧은 축에 몰린다 — 길이 4배 이상일 때만 그 축도 본다
+  return turns(pts, mx, my, ux, uy) >= 4 || (len >= 4 * Math.max(x1 - x0, y1 - y0) && turns(pts, mx, my, -uy, ux) >= 5);
+}
+
+// 점들을 (ux,uy) 축에 비췄을 때 축 폭의 35% 넘게 되돌아간 횟수
+function turns(pts, mx, my, ux, uy) {
   const v = pts.map((p) => (p[0] - mx) * ux + (p[1] - my) * uy);
   let lo = Infinity, hi = -Infinity;
   for (const e of v) { if (e < lo) lo = e; if (e > hi) hi = e; }
   const ext = hi - lo;
-  if (ext < 4) return false; // 4pt 미만의 흔들림은 지그재그가 아니다
+  if (ext < 4) return 0; // 4pt 미만의 흔들림은 지그재그가 아니다
   const h = ext * 0.35;
   let dir = 0, l = v[0], u = v[0], n = 0;
   for (const e of v) {
@@ -193,17 +200,17 @@ export function isScribble(pts) {
       if (e - l > h) { if (dir < 0) n++; dir = 1; u = e; }
     }
   }
-  return n >= 4;
+  return n;
 }
 
-/* 지그재그 sc 의 상자 안에 절반 넘게 들어 있는 획을 list 에서 빼서 [{s, i}] 로 돌려준다
-   (지우개의 del 과 같은 모양 — 실행취소가 그대로 된다). 지그재그에 닿지 않아도 범위 안이면 지운다.
-   절반 넘게라는 조건은 긴 밑줄 끝을 스친 정도로 밑줄 전체가 날아가지 않게 하려는 것.
+/* 지그재그 sc 가 덮은 범위(점들의 볼록 껍질)에 점의 1/3 이상이 든 획을 list 에서 빼서 [{s, i}] 로 돌려준다
+   (지우개의 del 과 같은 모양 — 실행취소가 그대로 된다). 지그재그에 직접 닿지 않아도 덮은 범위 안이면 지운다.
+   네모 상자로 재면 비스듬한 지그재그의 빈 귀퉁이에 있는 옆 글자까지 날아간다(2026-10-13 실기기 √29 의 9).
    지울 게 있으면 지그재그 자신도 맨 앞 항목으로 넣는다 — 실행취소 한 번에 지그재그까지 돌아온다(list 에는 안 둔다). */
 export function scribbleHits(list, sc) {
   const [x0, y0, x1, y1] = polyBox(sc.pts);
   const pad = sc.w / 2 + 1;
-  const inBox = (p) => p[0] >= x0 - pad && p[0] <= x1 + pad && p[1] >= y0 - pad && p[1] <= y1 + pad;
+  const hull = convexHull(sc.pts);
   const n0 = list.length;
   const out = [];
   for (let i = list.length - 1; i >= 0; i--) {
@@ -212,12 +219,28 @@ export function scribbleHits(list, sc) {
     if (b[2] < x0 - pad || b[0] > x1 + pad || b[3] < y0 - pad || b[1] > y1 + pad) continue;
     const p = s.pts, k = Math.max(1, Math.floor(p.length / 24));
     let inN = 0, n = 0;
-    for (let j = 0; j < p.length; j += k, n++) if (inBox(p[j])) inN++;
-    if (inN * 2 < n) continue;
+    for (let j = 0; j < p.length; j += k, n++) if (inPolygon(p[j][0], p[j][1], hull)) inN++;
+    if (inN * 3 < n) continue;
     out.push({ s: list.splice(i, 1)[0], i });
   }
   if (out.length) out.unshift({ s: sc, i: n0 });
   return out;
+}
+
+// 단조 사슬 볼록 껍질
+function convexHull(pts) {
+  const q = [...pts].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  const cross = (o, a, b) => (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const half = (arr) => {
+    const h = [];
+    for (const p of arr) {
+      while (h.length >= 2 && cross(h[h.length - 2], h[h.length - 1], p) <= 0) h.pop();
+      h.push(p);
+    }
+    h.pop();
+    return h;
+  };
+  return half(q).concat(half(q.reverse()));
 }
 
 /* 형광펜을 긋고 끝에서 잠깐 멈추면 직선으로 편다(굿노트와 같은 동작).
