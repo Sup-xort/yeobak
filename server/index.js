@@ -31,6 +31,10 @@ const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
 const FIRST_MS = { tap: 15_000, ask: 45_000 };
 /* 이미 쓰기 시작한 뒤 이만큼 아무것도 안 오면 멈춘 것으로 보고 끝낸다(끊겼다는 안내를 붙여서). */
 const STALL_MS = 45_000;
+/* 이만큼 첫 글자가 없으면 기다리는 채로 다음 모델을 하나 더 부르고, 먼저 쓰기 시작한 쪽을 쓴다(최대 3개 동시).
+   붐비는 날 멈춘 모델 셋을 45초씩 차례로 기다려 첫 글자가 140초 걸렸다(2026-10-13). */
+const HEDGE_MS = { tap: 5_000, ask: 10_000 };
+const LOST = new Error("다른 모델이 먼저 답함");
 
 if (!APP_PASSWORD || !SESSION_SECRET) {
   console.error("[여백] APP_PASSWORD 와 SESSION_SECRET 을 .env 에 설정하세요.");
@@ -1168,6 +1172,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     const t0 = Date.now();
     // 이 시도만의 첫 글자 상한 — 넘기면 이 모델만 끊고 다음으로
     const cc = new AbortController();
+    racing.set(id, cc);
     const timer = setTimeout(() => cc.abort(new Error(`${firstMs / 1000}초 동안 첫 글자 없음`)), firstMs);
     const sig = AbortSignal.any([signal, cc.signal]);
     note("try", { model: id, label: label(id) });
@@ -1188,7 +1193,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
     } catch (e) {
       clearTimeout(timer);
       it?.return?.().catch(() => {});
-      if (ac.signal.aborted) return null; // 클라이언트가 떠났다 — 기다리는 상대가 없다
+      if (ac.signal.aborted || cc.signal.reason === LOST) return null; // 클라이언트가 떠났거나 경주에서 졌다 — 실패가 아니다
       const why = cc.signal.aborted ? cc.signal.reason?.message : signal.aborted ? "전체 상한 초과" : e.message;
       if (!warm) models.record(id, false, e.status || (cc.signal.aborted ? 408 : 0), 0, lane);
       console.warn(`[여백] ${id} 실패: ${String(why).slice(0, 160)}`);
@@ -1205,9 +1210,14 @@ app.post("/api/chat", requireAuth, async (req, res) => {
      한 바퀴(쓸 수 있는 모델 전부)가 다 실패해도 곧장 "실패"라고 하지 않는다. 503 은 대개 몇 초면
      풀리므로, 전체 상한이 남아 있는 동안 잠깐 쉬었다가 처음부터 다시 돈다(최대 세 바퀴). */
   let got = null;
+  const racing = new Map(); // id → 그 시도의 AbortController (진 쪽을 끊는다)
+  const live = new Map(); // 아직 첫 글자를 기다리는 시도들
   for (let round = 0; !got && !signal.aborted; ) {
-    const id = nextModel();
-    if (!id) {
+    const id = live.size < (warm ? 1 : 3) ? nextModel() : null;
+    if (id) {
+      tried.add(id);
+      live.set(id, attempt(id, args).then((g) => ({ id, g })));
+    } else if (!live.size) {
       if (warm || gemOnly || round >= 2 || deadline - Date.now() < 20_000) break;
       round++;
       tried.clear();
@@ -1216,9 +1226,19 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       await nap(3000 * round);
       continue;
     }
-    tried.add(id);
-    got = await attempt(id, args);
+    let t;
+    const hedge = id && !warm ? [new Promise((ok) => { t = setTimeout(ok, ask ? HEDGE_MS.ask : HEDGE_MS.tap, null); })] : [];
+    const r = await Promise.race([...live.values(), ...hedge]);
+    clearTimeout(t);
+    if (!r) continue; // 시간이 지났다 — 하나 더 띄운다
+    live.delete(r.id);
+    got = r.g;
     if (warm) break;
+  }
+  // 남은 시도는 끊는다. 그새 첫 글자를 받은 것도 스트림을 닫는다.
+  for (const [id, p] of live) {
+    racing.get(id).abort(LOST);
+    p.then(({ g }) => { g?.cc.abort(LOST); g?.it.return?.().catch(() => {}); });
   }
   if (ac.signal.aborted) return;
   if (!got) {
