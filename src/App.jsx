@@ -70,6 +70,8 @@ export default function VerbatimReader() {
   const [libFolder, setLibFolder] = useState(""); // "" = 최상위
   const [libErr, setLibErr] = useState("");
   const [folInput, setFolInput] = useState(null); // 새 폴더 이름 입력 중이면 문자열
+  const [folParent, setFolParent] = useState(""); // 새 폴더가 들어갈 곳
+  const [folClosed, setFolClosed] = useState(() => new Set()); // 사이드바에서 접은 폴더
   const [dragId, setDragId] = useState("");       // 드래그 중인 파일 id
   const [dropTgt, setDropTgt] = useState("");     // 드래그가 올라가 있는 폴더 id ("" 아니면 강조)
   const [delAsk, setDelAsk] = useState("");       // 한 번 더 누르면 삭제할 대상 id
@@ -1100,7 +1102,7 @@ export default function VerbatimReader() {
       await libApi("/api/library/folder", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: n, parent: libFolder }),
+        body: JSON.stringify({ name: n, parent: folParent }),
       });
       setFolInput(null);
       refreshLib();
@@ -4115,6 +4117,30 @@ export default function VerbatimReader() {
     else if (folDragId && folDragId !== target) moveFolder(folDragId, target);
     setFolDragId("");
   };
+  const hasKids = (id) => folders.some((f) => f.parent === id);
+  const sideTree = (() => {
+    const out = [];
+    let skip = Infinity; // 접힌 폴더의 깊이 — 그보다 깊은 건 숨긴다
+    for (const fo of folderTreeList) {
+      if (fo.depth > skip) continue;
+      skip = folClosed.has(fo.id) ? fo.depth : Infinity;
+      out.push(fo);
+    }
+    return out;
+  })();
+  const newFolForm = (cls, style) => (
+    <form className={cls} style={style} onSubmit={(e) => { e.preventDefault(); makeFolder(folInput); }}>
+      <Bi name="folder2" />
+      <input value={folInput} autoFocus placeholder="새 폴더 이름"
+        onChange={(e) => setFolInput(e.target.value)}
+        onBlur={() => { if (!folInput.trim()) setFolInput(null); }}
+        onKeyDown={(e) => { if (e.key === "Escape") setFolInput(null); }} />
+    </form>
+  );
+  const startNewFol = (parent) => {
+    setFolParent(parent); setFolInput("");
+    if (parent) setFolClosed((s) => { const n = new Set(s); n.delete(parent); return n; });
+  };
   const folCount = (id) =>
     lib.files.filter((f) => f.folder === id).length + lib.folders.filter((f) => f.parent === id).length;
   // 지금 폴더의 하위 폴더 카드 — 끌어서 다른 폴더 위에 놓으면 그 안으로 들어간다
@@ -4832,7 +4858,7 @@ export default function VerbatimReader() {
                   </button>
                 )}
                 {!wide && (
-                  <button className="vb-libbtn" onClick={() => setFolInput(folInput === null ? "" : null)}
+                  <button className="vb-libbtn" onClick={() => { setFolParent(libFolder); setFolInput(folInput === null ? "" : null); }}
                     aria-label="새 폴더" title="새 폴더">
                     <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /><path d="M12 10.5v5M9.5 13h5" /></svg>
                   </button>
@@ -4984,8 +5010,9 @@ export default function VerbatimReader() {
                   </div>
                   {folders.length > 0 && (
                     <div className="vb-folnavlist">
-                      {folderTreeList.map((fo) => (
-                        <div key={fo.id} style={fo.depth ? { paddingLeft: 12 + fo.depth * 14 } : undefined}
+                      {sideTree.map((fo) => (
+                        <Fragment key={fo.id}>
+                        <div style={{ paddingLeft: 4 + fo.depth * 16 }}
                           className={"vb-folnav" +
                             (dropTgt === fo.id ? " over" : "") +
                             (folDragId === fo.id ? " dragging" : "") +
@@ -5014,26 +5041,39 @@ export default function VerbatimReader() {
                             }
                             setFolDragId("");
                           }}>
+                          {hasKids(fo.id) ? (
+                            <button className={"vb-foltog" + (folClosed.has(fo.id) ? "" : " open")} aria-label="펼치기·접기"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setFolClosed((s) => { const n = new Set(s); n.has(fo.id) ? n.delete(fo.id) : n.add(fo.id); return n; });
+                              }}>
+                              <Bi name="chevron-right" />
+                            </button>
+                          ) : <span className="vb-foltog" />}
+                          <Bi name={libFolder === fo.id && libView === "" ? "folder2-open" : "folder2"} className="vb-folico" />
                           <span className="vb-folnavname">{fo.name}</span>
-                          <span className="vb-navn">{folCount(fo.id)}</span>
+                          {libFolder === fo.id && libView === "" ? (
+                            <button className="vb-ib sm vb-foladdin" aria-label="이 안에 새 폴더"
+                              onClick={(e) => { e.stopPropagation(); startNewFol(fo.id); }}>
+                              <Bi name="folder-plus" />
+                            </button>
+                          ) : (
+                            <span className="vb-navn">{folCount(fo.id)}</span>
+                          )}
                           <button className={"vb-ib del sm" + (delAsk === "fo" + fo.id ? " ask" : "")}
                             onClick={(e) => { e.stopPropagation(); tapDel("fo" + fo.id, () => delFolder(fo.id)); }}
                             aria-label="폴더 삭제">
                             {delAsk === "fo" + fo.id ? "삭제?" : "✕"}
                           </button>
                         </div>
+                        {folInput !== null && folParent === fo.id &&
+                          newFolForm("vb-folnewinline", { paddingLeft: 4 + (fo.depth + 1) * 16 + 22 })}
+                        </Fragment>
                       ))}
                     </div>
                   )}
-                  {folInput !== null ? (
-                    <form className="vb-folnewinline" onSubmit={(e) => { e.preventDefault(); makeFolder(folInput); }}>
-                      <input value={folInput} autoFocus placeholder="폴더 이름"
-                        onChange={(e) => setFolInput(e.target.value)}
-                        onBlur={() => { if (!folInput.trim()) setFolInput(null); }}
-                        onKeyDown={(e) => { if (e.key === "Escape") setFolInput(null); }} />
-                    </form>
-                  ) : (
-                    <button className="vb-foladd" onClick={() => setFolInput("")}>＋ 폴더 추가</button>
+                  {folInput !== null && folParent === "" ? newFolForm("vb-folnewinline", { paddingLeft: 26 }) : (
+                    <button className="vb-foladd" onClick={() => startNewFol("")}>＋ 폴더 추가</button>
                   )}
                   <span className="vb-sidespacer" />
                   <button className="vb-sideadd" disabled={!ready} onClick={() => fileRef.current?.click()}>
@@ -5086,7 +5126,31 @@ export default function VerbatimReader() {
                         <span className="div" />
                         <span className="f">{(libView === "recent" ? recentFiles : shownFiles).length}개</span>
                       </div>
-                      {libView === "" && libFolder && folderGrid}
+                      {libView === "" && libFolder && subFolders.length > 0 && (
+                        <div className="vb-subfols">
+                          {subFolders.map((fo) => (
+                            <button key={fo.id}
+                              className={"vb-subfol" + (dropTgt === fo.id ? " over" : "") + (folDragId === fo.id ? " dragging" : "")}
+                              draggable
+                              onClick={() => setLibFolder(fo.id)}
+                              onDragStart={(e) => {
+                                setFolDragId(fo.id);
+                                e.dataTransfer.setData("text/plain", fo.id);
+                                e.dataTransfer.effectAllowed = "move";
+                              }}
+                              onDragEnd={() => setFolDragId("")}
+                              onDragOver={(e) => {
+                                if (dragId || (folDragId && folDragId !== fo.id)) { e.preventDefault(); setDropTgt(fo.id); }
+                              }}
+                              onDragLeave={() => setDropTgt((t) => (t === fo.id ? "" : t))}
+                              onDrop={(e) => { e.preventDefault(); e.stopPropagation(); dropInto(fo.id); }}>
+                              <Bi name="folder2" />
+                              <span className="t">{fo.name}</span>
+                              <span className="vb-navn">{folCount(fo.id)}</span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
                       {(libView === "recent" ? recentFiles : shownFiles).length === 0 ? (
                         libView !== "recent" && libFolder === "" && folders.length === 0 ? (
                           <div className="vb-hero">
