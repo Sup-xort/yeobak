@@ -388,8 +388,9 @@
 .vb-folnav.dragging{opacity:.35}
 .vb-folnavname{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left}
 .vb-ib.sm{width:22px;min-width:22px;height:22px;font-size:11px;padding:0}
-.vb-folnav .vb-ib.del{opacity:0}
-.vb-folnav.on .vb-ib.del{opacity:1} /* 아이패드엔 호버가 없다 — 고른 줄에서는 늘 보인다 */
+/* 안 보이는 ✕ 는 눌리지도 않게 — 아이패드엔 호버가 없어서 빈 자리를 누르다 지운다 */
+.vb-folnav .vb-ib.del{opacity:0;pointer-events:none}
+.vb-folnav.on .vb-ib.del,.vb-folnav .vb-ib.del.ask{opacity:1;pointer-events:auto}
 .vb-folnav{gap:6px}
 .vb-foltog{flex:0 0 16px;width:16px;height:22px;display:grid;place-items:center;font-size:10px;color:var(--t-faint)}
 .vb-foltog .bi{transition:transform .15s}
@@ -462,7 +463,7 @@
 @media (hover:hover){
   .vb-navitem:hover{background:var(--t-fill)}
   .vb-folnav:hover{background:var(--t-fill)}
-  .vb-folnav:hover .vb-ib.del{opacity:1}
+  .vb-folnav:hover .vb-ib.del{opacity:1;pointer-events:auto}
   .vb-sideadd:hover{filter:brightness(1.12)}
   .vb-foladd:hover{background:var(--t-fill);color:var(--t-sub)}
   .vb-mmenu:hover{background:var(--t-fill);color:var(--t-ink)}
