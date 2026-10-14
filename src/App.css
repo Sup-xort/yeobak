@@ -389,6 +389,7 @@
 .vb-folnavname{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left}
 .vb-ib.sm{width:22px;min-width:22px;height:22px;font-size:11px;padding:0}
 .vb-folnav .vb-ib.del{opacity:0}
+.vb-folnav.on .vb-ib.del{opacity:1} /* 아이패드엔 호버가 없다 — 고른 줄에서는 늘 보인다 */
 .vb-folnav{gap:6px}
 .vb-foltog{flex:0 0 16px;width:16px;height:22px;display:grid;place-items:center;font-size:10px;color:var(--t-faint)}
 .vb-foltog .bi{transition:transform .15s}
