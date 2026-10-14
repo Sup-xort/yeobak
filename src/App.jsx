@@ -14,6 +14,7 @@ import { drawStroke, hitStroke, isScribble, scribbleHits, strokeInLasso, polyBox
 import { CDN, DEFAULT_CFG, SESS_MAX, WIDE, SLOT_H, A4_RATIO, COARSE, IS_SAFARI, INK_PEN_COLORS, INK_HL_COLORS, INK_PEN_W, INK_HL_W, ZOOM_MIN, ZOOM_MAX, INK_W_RANGE, PT_MM, inkToolCfg } from "./consts.js";
 import { callServer, AuthError } from "./ai.js";
 import { freeCanvas, wordAt, sentenceAt, pageAt, markSpans, fmtSize, fmtDate, fmtRel, folderPath, folderTree } from "./text.js";
+import { pickGreeting } from "./greeting.js";
 import { REN_MAX, parseNameJSON, cleanRenamed, firstPageText } from "./rename.js";
 import { parseWord, SYS_WORD, SYS_SENT, SYS_ASK, SYS_FOLD, SYS_RENAME, SYS_CAP_READ, SYS_CAP_DESCRIBE, FIG_NOTE, SYS_CAP_SOLVE, SYS_OUTLINE } from "./prompts.js";
 
@@ -69,6 +70,7 @@ export default function VerbatimReader() {
   const [libFolder, setLibFolder] = useState(""); // "" = 최상위
   const [libErr, setLibErr] = useState("");
   const [folInput, setFolInput] = useState(null); // 새 폴더 이름 입력 중이면 문자열
+  const [greet, setGreet] = useState(null);       // 서재 인사말 {stamp, line, sub}, 앱 로드 시 한 번만 고른다
   const [folParent, setFolParent] = useState(""); // 새 폴더가 들어갈 곳
   const [folClosed, setFolClosed] = useState(() => new Set()); // 사이드바에서 접은 폴더
   const [sideOpen, setSideOpen] = useState(() => { try { return localStorage.getItem("yeobaek.side") === "1"; } catch { return false; } });
@@ -769,6 +771,7 @@ export default function VerbatimReader() {
       setLibErr("");
       // 앱을 새로 불러올 때 딱 한 번만 인사말을 고른다 — 이후의 refreshLib 호출(업로드·
       // 이동·삭제 등)마다 다시 고르면 조작할 때마다 인사말이 바뀌어 산만하다.
+      setGreet((g) => g || pickGreeting(j));
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("서재 목록을 불러오지 못했습니다.");
     }
@@ -4928,6 +4931,13 @@ export default function VerbatimReader() {
               )}
 
               <div className="vb-libbody">
+                {!isSearchMode && libView === "" && libFolder === "" && greet && (
+                  <div className="vb-greet">
+                    <div className="vb-greetstamp">{greet.stamp}</div>
+                    <div className="vb-greetline">{greet.line}</div>
+                    <div className="vb-greetsub">{greet.sub}</div>
+                  </div>
+                )}
                 <div className="vb-libtitle">
                   {!isSearchMode && libView === "" && libFolder && (
                     <div className="vb-libpath">

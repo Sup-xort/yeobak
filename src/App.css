@@ -398,6 +398,11 @@
 .vb-docsubmenu .bi{font-size:12px;color:var(--t-faint);flex:none}
 .vb-docsubmenu span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* 서재 인사말 — 시간대 스탬프 + 세리프 헤드라인 + 보조 카피. 서재 최상위에서만, 앱을 불러올 때 한 번 고른다 */
+.vb-greet{padding:32px 2px 8px;max-width:70ch}
+.vb-greetstamp{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--t-faint)}
+.vb-greetline{margin-top:12px;font-family:var(--serif);font-size:32px;line-height:1.35;color:var(--t-ink)}
+.vb-greetsub{margin-top:10px;font-size:14px;line-height:1.75;color:var(--t-sub)}
 /* 제목 줄 — 경로(작게) + 지금 폴더 이름(크게) + 새 폴더·추가 */
 .vb-libtitle{padding:20px 2px 12px}
 .vb-libpath{display:flex;align-items:center;flex-wrap:wrap;gap:1px;margin:0 0 2px -6px;font-size:12.5px;color:var(--t-faint)}
