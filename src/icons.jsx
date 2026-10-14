@@ -40,6 +40,7 @@ import i_folder2 from "bootstrap-icons/icons/folder2.svg?raw";
 import i_folder2_open from "bootstrap-icons/icons/folder2-open.svg?raw";
 import i_folder_plus from "bootstrap-icons/icons/folder-plus.svg?raw";
 import i_chevron_right from "bootstrap-icons/icons/chevron-right.svg?raw";
+import i_layout_sidebar from "bootstrap-icons/icons/layout-sidebar.svg?raw";
 
 const RAW = {
   crop, stars, "arrow-up": arrowUp, "stop-fill": stopFill, "chevron-down": chevronDown, "chevron-up": chevronUp,
@@ -48,7 +49,7 @@ const RAW = {
   "phone": i_phone, "chat": i_chat, "tablet": i_tablet, "collection": i_collection, "journal-text": i_journal_text, "clock-history": i_clock_history, "star": i_star, "star-fill": i_star_fill, "broadcast": i_broadcast, "image-fill": i_image_fill, "plus-lg": i_plus_lg, "book": i_book, "check-circle-fill": checkCircleFill,
   "arrow-return-left": i_arrow_return_left,
   "hdd": i_hdd, "link-45deg": i_link_45deg, "key": i_key, "question-circle": i_question_circle, "chevron-expand": i_chevron_expand, "trash3": i_trash3, "arrow-repeat": i_arrow_repeat, "cpu": i_cpu,
-  "folder2": i_folder2, "folder2-open": i_folder2_open, "folder-plus": i_folder_plus, "chevron-right": i_chevron_right,
+  "folder2": i_folder2, "folder2-open": i_folder2_open, "folder-plus": i_folder_plus, "chevron-right": i_chevron_right, "layout-sidebar": i_layout_sidebar,
 };
 // width/height 를 떼야 CSS(1em)가 먹는다
 const SVG = Object.fromEntries(Object.entries(RAW).map(([k, v]) =>
