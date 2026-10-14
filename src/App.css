@@ -55,8 +55,9 @@
 
 .vb-bar{flex:0 0 auto;display:flex;align-items:center;gap:3px;
   padding:calc(6px + env(safe-area-inset-top)) 10px 6px;
-  background:var(--t-bar);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  border-bottom:1px solid var(--t-line);z-index:40;transition:background .3s,border-color .3s}
+  background:var(--t-bg);border-bottom:1px solid var(--t-line);z-index:40;transition:background .3s,border-color .3s;
+  /* iOS 26+ 홈 화면 앱은 위 가장자리에 흐림을 덮는데, 불투명·sticky·backdrop 없는 막대가 위에 닿아 있으면 그 색으로 대신한다 */
+  position:sticky;top:0}
 .vb-tool{height:36px;min-width:36px;padding:0 10px;border-radius:12px;display:inline-flex;
   align-items:center;justify-content:center;gap:7px;font-size:13px;color:var(--t-sub);flex:0 0 auto;
   touch-action:manipulation}
@@ -220,7 +221,8 @@
 @keyframes vb-fade{from{opacity:0}to{opacity:1}}
 /* 시안 8a: padding:15px 22px, gap:10px, 아래 구분선 1px */
 .vb-libhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
-  padding:calc(15px + env(safe-area-inset-top)) 22px 15px;border-bottom:1px solid var(--line)}
+  padding:calc(15px + env(safe-area-inset-top)) 22px 15px;border-bottom:1px solid var(--line);
+  position:sticky;top:0;z-index:2;background:var(--desk)} /* iOS 위 가장자리 흐림을 피한다 — .vb-bar 참고 */
 /* 브랜드 마크 — 아이콘 + serif "여백" + 세로 구분선 + sans "YEOBAEK".
    여백 로고.dc.html 확정안(5a)의 워드마크 규격 그대로: 아이콘 26px/radius 6,
    서체 19px letter-spacing .05em, 구분선 1×14, 라벨 11px .15em uppercase.
