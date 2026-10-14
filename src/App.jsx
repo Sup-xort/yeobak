@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { Fragment, useState, useRef, useEffect, useCallback, useMemo } from "react";
 import "katex/dist/katex.min.css";
 import "./App.css";
 import Rich from "./rich.jsx";
@@ -14,7 +14,7 @@ import { drawStroke, hitStroke, isScribble, scribbleHits, strokeInLasso, polyBox
 import { CDN, DEFAULT_CFG, SESS_MAX, WIDE, SLOT_H, NARROW_S, A4_RATIO, COARSE, IS_SAFARI, INK_PEN_COLORS, INK_HL_COLORS, INK_PEN_W, INK_HL_W, ZOOM_MIN, ZOOM_MAX, INK_W_RANGE, PT_MM, inkToolCfg } from "./consts.js";
 import { pickGreeting } from "./greeting.js";
 import { callServer, AuthError } from "./ai.js";
-import { freeCanvas, wordAt, sentenceAt, pageAt, markSpans, fmtSize, fmtDate, fmtRel } from "./text.js";
+import { freeCanvas, wordAt, sentenceAt, pageAt, markSpans, fmtSize, fmtDate, fmtRel, folderPath, folderTree } from "./text.js";
 import { REN_MAX, parseNameJSON, cleanRenamed, firstPageText } from "./rename.js";
 import { parseWord, SYS_WORD, SYS_SENT, SYS_ASK, SYS_FOLD, SYS_RENAME, SYS_CAP_READ, SYS_CAP_DESCRIBE, FIG_NOTE, SYS_CAP_SOLVE, SYS_OUTLINE } from "./prompts.js";
 
@@ -1100,12 +1100,25 @@ export default function VerbatimReader() {
       await libApi("/api/library/folder", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: n }),
+        body: JSON.stringify({ name: n, parent: libFolder }),
       });
       setFolInput(null);
       refreshLib();
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("폴더를 만들지 못했습니다.");
+    }
+  };
+
+  const moveFolder = async (id, parent) => {
+    try {
+      await libApi("/api/library/folder/" + id, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parent }),
+      });
+      refreshLib();
+    } catch (e) {
+      if (e.name !== "AuthError") setLibErr("폴더를 옮기지 못했습니다.");
     }
   };
 
@@ -1123,7 +1136,7 @@ export default function VerbatimReader() {
   const delFolder = async (id) => {
     try {
       await libApi("/api/library/folder/" + id, { method: "DELETE" });
-      if (libFolder === id) setLibFolder("");
+      if (libFolder === id) setLibFolder(lib.folders.find((f) => f.id === id)?.parent || "");
       refreshLib();
     } catch (e) {
       if (e.name !== "AuthError") setLibErr("폴더를 지우지 못했습니다.");
@@ -4089,9 +4102,59 @@ export default function VerbatimReader() {
   const recentFiles = [...lib.files]
     .filter((f) => f.lastOpenedAt)
     .sort((a, b) => (b.lastOpenedAt || 0) - (a.lastOpenedAt || 0));
-  const curFolName = lib.folders.find((f) => f.id === libFolder)?.name || "";
+  const curFolName = folderPath(lib.folders, libFolder);
+  const subFolders = folders.filter((fo) => (fo.parent || "") === libFolder);
+  const folderTreeList = folderTree(folders);
+  const crumbs = []; // 서재 › … › 지금 폴더 — 조상부터
+  for (let f = lib.folders.find((x) => x.id === libFolder); f && crumbs.length < 20; f = lib.folders.find((x) => x.id === f.parent))
+    crumbs.unshift(f);
+  // 파일·폴더를 끌어다 놓은 곳으로 옮긴다("" = 최상위)
+  const dropInto = (target) => {
+    setDropTgt("");
+    if (dragId) moveFile(dragId, target);
+    else if (folDragId && folDragId !== target) moveFolder(folDragId, target);
+    setFolDragId("");
+  };
+  const folCount = (id) =>
+    lib.files.filter((f) => f.folder === id).length + lib.folders.filter((f) => f.parent === id).length;
+  // 지금 폴더의 하위 폴더 카드 — 끌어서 다른 폴더 위에 놓으면 그 안으로 들어간다
+  const folderGrid = subFolders.length > 0 && (
+    <>
+      <div className="vb-sect">폴더 {subFolders.length}</div>
+      <div className="vb-grid">
+        {subFolders.map((fo) => (
+          <div key={fo.id}
+            className={"vb-fol" + (dropTgt === fo.id ? " over" : "") + (folDragId === fo.id ? " dragging" : "")}
+            draggable
+            onClick={() => setLibFolder(fo.id)}
+            onDragStart={(e) => {
+              setFolDragId(fo.id);
+              e.dataTransfer.setData("text/plain", fo.id);
+              e.dataTransfer.effectAllowed = "move";
+            }}
+            onDragEnd={() => setFolDragId("")}
+            onDragOver={(e) => {
+              if (dragId || (folDragId && folDragId !== fo.id)) { e.preventDefault(); setDropTgt(fo.id); }
+            }}
+            onDragLeave={() => setDropTgt((t) => (t === fo.id ? "" : t))}
+            onDrop={(e) => { e.preventDefault(); e.stopPropagation(); dropInto(fo.id); }}>
+            <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
+            <div className="vb-fname">{fo.name}</div>
+            <div className="vb-fmeta">{folCount(fo.id)}개</div>
+            <div className="vb-dact">
+              <button className={"vb-ib del" + (delAsk === "fo" + fo.id ? " ask" : "")}
+                onClick={(e) => { e.stopPropagation(); tapDel("fo" + fo.id, () => delFolder(fo.id)); }}
+                aria-label="폴더 삭제">
+                {delAsk === "fo" + fo.id ? "삭제?" : "✕"}
+              </button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </>
+  );
   const isSearchMode = libQuery.trim().length > 0; // 검색어가 있으면 폴더 뷰 대신 검색 결과를 보여준다
-  const folderName = (id) => lib.folders.find((fo) => fo.id === id)?.name || "";
+  const folderName = (id) => folderPath(lib.folders, id);
   const lastMeta = (f) =>
     f.lastPage ? `마지막 ${f.lastPage}쪽${f.totalPages ? " · 총 " + f.totalPages + "쪽" : ""} · ` : "";
   /* 매트 처리 — 칸(슬롯)은 모두 같은 자리를 차지하고, 그 안에서 종이가 원본 비율
@@ -4166,9 +4229,9 @@ export default function VerbatimReader() {
             {moveOpen && (
               <div className="vb-docsubmenu">
                 <button onClick={() => { moveFile(f.id, ""); setDocMenuId(""); setDocMoveId(""); }}>서재(최상위)</button>
-                {folders.map((fo) => (
+                {folderTreeList.map((fo) => (
                   <button key={fo.id} onClick={() => { moveFile(f.id, fo.id); setDocMenuId(""); setDocMoveId(""); }}>
-                    {fo.name}
+                    {folderName(fo.id)}
                   </button>
                 ))}
               </div>
@@ -4713,18 +4776,20 @@ export default function VerbatimReader() {
                   사이드바가 없는 narrow 에서만 남긴다(최상위로 꺼내는 드롭 타깃도 겸한다). */}
               {!wide && (
                 <div className="vb-crumb">
-                  <button className={dropTgt === "__root__" ? "tgt" : ""}
-                    onClick={() => setLibFolder("")}
-                    onDragOver={(e) => { if (dragId && libFolder) { e.preventDefault(); setDropTgt("__root__"); } }}
-                    onDragLeave={() => setDropTgt((t) => (t === "__root__" ? "" : t))}
-                    onDrop={(e) => {
-                      e.preventDefault(); e.stopPropagation();
-                      setDropTgt("");
-                      if (dragId) moveFile(dragId, ""); // 최상위로 꺼내기
-                    }}>
-                    서재
-                  </button>
-                  {libFolder && <><span>›</span><button onClick={() => {}}>{curFolName}</button></>}
+                  {[{ id: "", name: "서재" }, ...crumbs].map((c, i) => (
+                    <Fragment key={c.id || "__root__"}>
+                      {i > 0 && <span>›</span>}
+                      <button className={dropTgt === (c.id || "__root__") ? "tgt" : ""}
+                        onClick={() => setLibFolder(c.id)}
+                        onDragOver={(e) => {
+                          if ((dragId || folDragId) && c.id !== libFolder) { e.preventDefault(); setDropTgt(c.id || "__root__"); }
+                        }}
+                        onDragLeave={() => setDropTgt((t) => (t === (c.id || "__root__") ? "" : t))}
+                        onDrop={(e) => { e.preventDefault(); e.stopPropagation(); dropInto(c.id); }}>
+                        {c.name}
+                      </button>
+                    </Fragment>
+                  ))}
                 </div>
               )}
               <div className="vb-libsearch">
@@ -4836,36 +4901,7 @@ export default function VerbatimReader() {
                         <div className="vb-greetsub">{greet.sub}</div>
                       </div>
                     )}
-                    {libFolder === "" && folders.length > 0 && (
-                      <>
-                        <div className="vb-sect">폴더 {folders.length}</div>
-                        <div className="vb-grid">
-                          {folders.map((fo) => (
-                            <div key={fo.id}
-                              className={"vb-fol" + (dropTgt === fo.id ? " over" : "")}
-                              onClick={() => setLibFolder(fo.id)}
-                              onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTgt(fo.id); } }}
-                              onDragLeave={() => setDropTgt((t) => (t === fo.id ? "" : t))}
-                              onDrop={(e) => {
-                                e.preventDefault(); e.stopPropagation();
-                                setDropTgt("");
-                                if (dragId) moveFile(dragId, fo.id);
-                              }}>
-                              <svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
-                              <div className="vb-fname">{fo.name}</div>
-                              <div className="vb-fmeta">{lib.files.filter((f) => f.folder === fo.id).length}개</div>
-                              <div className="vb-dact">
-                                <button className={"vb-ib del" + (delAsk === "fo" + fo.id ? " ask" : "")}
-                                  onClick={(e) => { e.stopPropagation(); tapDel("fo" + fo.id, () => delFolder(fo.id)); }}
-                                  aria-label="폴더 삭제">
-                                  {delAsk === "fo" + fo.id ? "삭제?" : "✕"}
-                                </button>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </>
-                    )}
+                    {folderGrid}
                     {!(libFolder === "" && folders.length === 0 && shownFiles.length === 0) && (
                       <div className="vb-sect">
                         {libFolder ? "이 폴더의 PDF" : "PDF"} {shownFiles.length}권
@@ -4885,7 +4921,7 @@ export default function VerbatimReader() {
                       ) : (
                         <div className="vb-oempty">
                           {libFolder
-                            ? "이 폴더는 비어 있습니다. 서재에서 PDF를 끌어다 놓으세요."
+                            ? subFolders.length ? "이 폴더에 바로 든 PDF는 없어요." : "이 폴더는 비어 있습니다. 서재에서 PDF를 끌어다 놓으세요."
                             : "아직 저장된 PDF가 없습니다. 'PDF 추가'를 누르거나 파일을 끌어다 놓으세요."}
                         </div>
                       )
@@ -4936,13 +4972,9 @@ export default function VerbatimReader() {
                     <button className={"vb-navitem" + (libFolder === "" && libView === "" ? " on" : "") +
                         (dropTgt === "__root__" ? " over" : "")}
                       onClick={() => { setLibFolder(""); setLibView(""); }}
-                      onDragOver={(e) => { if (dragId) { e.preventDefault(); setDropTgt("__root__"); } }}
+                      onDragOver={(e) => { if (dragId || folDragId) { e.preventDefault(); setDropTgt("__root__"); } }}
                       onDragLeave={() => setDropTgt((t) => (t === "__root__" ? "" : t))}
-                      onDrop={(e) => {
-                        e.preventDefault(); e.stopPropagation();
-                        setDropTgt("");
-                        if (dragId) moveFile(dragId, "");
-                      }}>
+                      onDrop={(e) => { e.preventDefault(); e.stopPropagation(); dropInto(""); }}>
                       <span>전체 문서</span><span className="vb-navn">{lib.files.length}</span>
                     </button>
                     <button className={"vb-navitem" + (libView === "recent" ? " on" : "")}
@@ -4952,8 +4984,8 @@ export default function VerbatimReader() {
                   </div>
                   {folders.length > 0 && (
                     <div className="vb-folnavlist">
-                      {folders.map((fo) => (
-                        <div key={fo.id}
+                      {folderTreeList.map((fo) => (
+                        <div key={fo.id} style={fo.depth ? { paddingLeft: 12 + fo.depth * 14 } : undefined}
                           className={"vb-folnav" +
                             (dropTgt === fo.id ? " over" : "") +
                             (folDragId === fo.id ? " dragging" : "") +
@@ -4971,6 +5003,9 @@ export default function VerbatimReader() {
                           onDrop={(e) => {
                             e.preventDefault(); e.stopPropagation();
                             if (dragId) { setDropTgt(""); moveFile(dragId, fo.id); return; }
+                            const src = folders.find((x) => x.id === folDragId);
+                            // 형제끼리는 순서 바꾸기, 다른 가지의 폴더 위에 놓으면 그 안으로
+                            if (src && (src.parent || "") !== (fo.parent || "")) { dropInto(fo.id); return; }
                             if (folDragId && folDragId !== fo.id) {
                               const ids = folders.map((x) => x.id);
                               const from = ids.indexOf(folDragId), to = ids.indexOf(fo.id);
@@ -4980,7 +5015,7 @@ export default function VerbatimReader() {
                             setFolDragId("");
                           }}>
                           <span className="vb-folnavname">{fo.name}</span>
-                          <span className="vb-navn">{lib.files.filter((f) => f.folder === fo.id).length}</span>
+                          <span className="vb-navn">{folCount(fo.id)}</span>
                           <button className={"vb-ib del sm" + (delAsk === "fo" + fo.id ? " ask" : "")}
                             onClick={(e) => { e.stopPropagation(); tapDel("fo" + fo.id, () => delFolder(fo.id)); }}
                             aria-label="폴더 삭제">
@@ -5036,15 +5071,22 @@ export default function VerbatimReader() {
                       {/* 시안 8a 의 메타 줄 — 경로 / 정렬 / 개수 */}
                       <div className="vb-libmeta">
                         <span className="f">서재</span>
+                        {libView !== "recent" && crumbs.slice(0, -1).map((c) => (
+                          <Fragment key={c.id}>
+                            <span className="f">/</span>
+                            <span className="f" style={{ cursor: "pointer" }} onClick={() => setLibFolder(c.id)}>{c.name}</span>
+                          </Fragment>
+                        ))}
                         <span className="f">/</span>
                         <span className="cur">
-                          {libView === "recent" ? "최근 연 문서" : libFolder ? curFolName : "전체 문서"}
+                          {libView === "recent" ? "최근 연 문서" : libFolder ? crumbs.at(-1)?.name : "전체 문서"}
                         </span>
                         <span className="sp" />
                         <span className="f">{libView === "recent" ? "최근 연 순" : "최근 추가 순"}</span>
                         <span className="div" />
                         <span className="f">{(libView === "recent" ? recentFiles : shownFiles).length}개</span>
                       </div>
+                      {libView === "" && libFolder && folderGrid}
                       {(libView === "recent" ? recentFiles : shownFiles).length === 0 ? (
                         libView !== "recent" && libFolder === "" && folders.length === 0 ? (
                           <div className="vb-hero">
@@ -5061,7 +5103,7 @@ export default function VerbatimReader() {
                             {libView === "recent"
                               ? "아직 연 문서가 없습니다."
                               : libFolder
-                              ? "이 폴더는 비어 있습니다. 서재에서 PDF를 끌어다 놓으세요."
+                              ? subFolders.length ? "이 폴더에 바로 든 PDF는 없어요." : "이 폴더는 비어 있습니다. 서재에서 PDF를 끌어다 놓으세요."
                               : "아직 저장된 PDF가 없습니다. 'PDF 추가'를 누르거나 파일을 끌어다 놓으세요."}
                           </div>
                         )

@@ -15,6 +15,7 @@ import { useState, useRef, useEffect } from "react";
 import { drawStroke, hitStroke, isScribble, scribbleHits, snapLine, tidyPts, strokePath, HL_ALPHA } from "./ink.js";
 import { getPdf, pdfSource } from "./pdfCache.js";
 import { u } from "./paths.js";
+import { folderPath, folderTree } from "./text.js";
 
 const LS = "yeobaek-mini";
 const lsLoad = () => { try { return JSON.parse(localStorage.getItem(LS)) || {}; } catch { return {}; } };
@@ -693,9 +694,9 @@ export default function MiniNote({ open, onClose, lib, mainId, libApi, cdn, inkO
   const mainFile = files.find((f) => f.id === mainId);
   const groups = (() => {
     const by = new Map([[null, []]]);
-    for (const f of lib?.folders || []) by.set(f.id, []);
+    for (const f of folderTree(lib?.folders || [])) by.set(f.id, []);
     for (const f of files) if (f.id !== mainId) (by.get(f.folder ?? null) || by.get(null)).push(f);
-    const name = (id) => (lib?.folders || []).find((f) => f.id === id)?.name || "";
+    const name = (id) => folderPath(lib?.folders || [], id);
     let out = [...by].filter(([, l]) => l.length).map(([id, l]) => ({ id, name: id ? name(id) : "", files: l }));
     if (recent.length > 6) out = [{ id: "recent", name: "최근 연 문서", files: recent.slice(0, 4) }, ...out];
     return mainFile ? [{ id: "main", name: "지금 본문 문서", files: [mainFile] }, ...out] : out;

@@ -781,7 +781,8 @@ app.get("/api/library/thumb/:id", requireAuth, (req, res) => {
 app.post("/api/library/folder", requireAuth, (req, res) => {
   const name = String(req.body?.name || "").trim().slice(0, 80);
   if (!name) return res.status(400).json({ error: "폴더 이름이 비었습니다." });
-  const folder = { id: crypto.randomUUID(), name };
+  const parent = String(req.body?.parent || "");
+  const folder = { id: crypto.randomUUID(), name, parent: lib.folders.some((f) => f.id === parent) ? parent : "" };
   lib.folders.push(folder);
   saveLib();
   res.json(folder);
@@ -807,6 +808,15 @@ app.patch("/api/library/folder/:id", requireAuth, (req, res) => {
   if (!fo) return res.status(404).json({ error: "없는 폴더입니다." });
   const name = String(req.body?.name || "").trim().slice(0, 80);
   if (name) fo.name = name;
+  const { parent } = req.body || {};
+  if (parent !== undefined) {
+    const p = String(parent || "");
+    if (p && !lib.folders.some((f) => f.id === p)) return res.status(400).json({ error: "없는 폴더입니다." });
+    // 자기 자신이나 자기 하위 폴더 안으로는 못 넣는다 — 고리가 생기면 서재에서 사라진다
+    for (let a = p; a; a = lib.folders.find((f) => f.id === a)?.parent)
+      if (a === fo.id) return res.status(400).json({ error: "자기 안으로는 옮길 수 없습니다." });
+    fo.parent = p;
+  }
   saveLib();
   res.json(fo);
 });
@@ -814,8 +824,10 @@ app.patch("/api/library/folder/:id", requireAuth, (req, res) => {
 app.delete("/api/library/folder/:id", requireAuth, (req, res) => {
   const i = lib.folders.findIndex((x) => x.id === req.params.id);
   if (i < 0) return res.status(404).json({ error: "없는 폴더입니다." });
-  lib.folders.splice(i, 1);
-  for (const f of lib.files) if (f.folder === req.params.id) f.folder = ""; // 안의 파일은 최상위로
+  const [gone] = lib.folders.splice(i, 1);
+  // 안의 파일·폴더는 한 단계 위로
+  for (const f of lib.files) if (f.folder === gone.id) f.folder = gone.parent || "";
+  for (const f of lib.folders) if (f.parent === gone.id) f.parent = gone.parent || "";
   saveLib();
   res.json({ ok: true });
 });

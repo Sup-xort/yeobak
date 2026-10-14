@@ -85,3 +85,15 @@ export const fmtRel = (t) => {
   if (day < 7) return `${day}일 전`;
   return fmtDate(t);
 };
+
+/* 하위 폴더까지 이은 이름 "A › B" — 폴더는 parent 로 이어진다 */
+export const folderPath = (folders, id) => {
+  const out = [];
+  for (let f = folders.find((x) => x.id === id); f && out.length < 20; f = folders.find((x) => x.id === f.parent))
+    out.unshift(f.name);
+  return out.join(" › ");
+};
+/* 폴더를 나무 순서(부모 바로 뒤에 자식, 형제끼리는 배열 순서)로 펼치고 깊이를 붙인다 */
+export const folderTree = (folders, parent = "", depth = 0) =>
+  depth > 20 ? [] : folders.filter((f) => (f.parent || "") === parent)
+    .flatMap((f) => [{ ...f, depth }, ...folderTree(folders, f.id, depth + 1)]);
