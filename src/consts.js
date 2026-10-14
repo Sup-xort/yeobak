@@ -18,7 +18,6 @@ export const WIDE = 880;
 /* 서재 카드의 "매트" 규격 — 슬롯 높이(px)와 좁은 화면 축소율, 비율을 모를 때 쓰는 A4 세로.
    SLOT_H 는 App.css 의 .vb-slot / .vb-slot.sm 높이와 같이 움직여야 한다. */
 export const SLOT_H = 132;
-export const NARROW_S = 114 / SLOT_H; // .vb-slot.sm 이 114px
 export const A4_RATIO = 210 / 297;
 /* 터치 기기 여부 — 로그인 키패드에서 OS 키보드를 언제 띄울지 정하는 데만 쓴다 */
 export const COARSE = typeof window !== "undefined" && !!window.matchMedia?.("(pointer:coarse)").matches;

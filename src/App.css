@@ -291,32 +291,8 @@
 .vb-seg .vb-libbtn{background:transparent}
 .vb-libbtn.pri{background:var(--mark);color:#241F00;font-weight:650}
 .vb-libbtn:disabled{opacity:.45}
-.vb-newfol{display:flex;gap:8px;padding:10px 20px 0}
-.vb-newfol input{flex:1;max-width:280px;padding:10px 12px;border-radius:10px;border:1px solid var(--line);
-  background:var(--t-input);color:var(--t-ink);font-size:15px;outline:none;font-family:inherit}
 .vb-libbody{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
   padding:2px 20px calc(30px + env(safe-area-inset-bottom))}
-/* 서재 인사말 — 시간대 스탬프 + 세리프 헤드라인 + 보조 카피. 서재 최상위(폴더 밖)에서만,
-   앱을 새로 불러올 때 한 번 고른 문장을 보여준다 */
-.vb-greet{padding:32px 2px 26px;max-width:70ch}
-.vb-greetstamp{font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--t-faint)}
-.vb-greetline{margin-top:12px;font-family:var(--serif);font-size:32px;line-height:1.35;color:var(--t-ink)}
-.vb-greetsub{margin-top:10px;font-size:14px;line-height:1.75;color:var(--t-sub)}
-.vb-sect{font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px}
-/* 좁은 화면 그리드 — 칸 최소폭은 좁은 화면 종이 폭 상한(160×0.86≈138)에 좌우 여백을 더한 값 */
-.vb-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(158px,1fr));gap:18px 14px}
-.vb-fol{position:relative;border:1px solid var(--line);border-radius:12px;background:var(--desk2);
-  padding:12px;text-align:left;cursor:pointer;touch-action:manipulation;
-  -webkit-user-select:none;user-select:none}
-.vb-fol:active{background:var(--desk3)}
-.vb-fol.over{background:var(--desk3);box-shadow:0 0 0 2px var(--mark)}
-.vb-fol svg{width:26px;height:26px;stroke:var(--mark);fill:none;stroke-width:1.6;
-  stroke-linecap:round;stroke-linejoin:round;margin-bottom:8px}
-/* 책 카드 — 표지(1페이지 썸네일)가 얼굴이다. 좁은 화면도 wide 와 같은 매트 처리를 쓴다
-   (아래 .vb-slot/.vb-paper). 예전의 고정 3:4 표지는 A4·16:9 을 다 잘라먹어서 버렸다. */
-.vb-doc{position:relative;text-align:left;cursor:pointer;touch-action:manipulation;
-  -webkit-user-select:none;user-select:none;-webkit-user-drag:element}
-.vb-doc.drag{opacity:.35}
 /* 제목은 두 줄까지, 넘치면 말줄임(전체 이름은 title 속성에 남긴다).
    line-break:anywhere 가 핵심 — word-break:break-all 만 주면 엔진이 하이픈·언더바 같은
    "기존 줄바꿈 기회"를 우선해서 `Charles_H_Roth_Larry_L_Kinney-` / `Fundamentals_of_...`
@@ -324,14 +300,7 @@
 .vb-fname{font-size:13px;line-height:1.4;color:var(--t-ink);min-width:0;
   line-break:anywhere;word-break:break-all;overflow-wrap:anywhere;
   display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.vb-doc .vb-fname{margin-top:9px}
-.vb-doc:active .vb-slot{transform:scale(.97)}
 .vb-fmeta{margin-top:4px;font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
-.vb-dact{position:absolute;top:6px;right:6px;display:flex;gap:4px;z-index:1}
-/* 표지 위에 얹히던 시절의 어두운 칩이었는데, 이제 종이는 칸 안에서 작아져 대부분 데스크 위에
-   놓인다 — 테마 표면색 + 실선으로 바꿔 라이트/다크 양쪽에서 같은 무게로 읽히게 한다 */
-.vb-doc .vb-dact{background:var(--desk2);border:1px solid var(--line);border-radius:9px;
-  -webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)}
 .vb-ib{min-width:30px;height:30px;padding:0 7px;border-radius:8px;display:inline-flex;align-items:center;
   justify-content:center;font-size:15px;color:var(--muted);background:transparent;text-decoration:none;
   touch-action:manipulation}
@@ -340,24 +309,20 @@
 .vb-hero{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;
   text-align:center;padding:12vh 24px 6vh}
 .vb-hero p{margin:0;max-width:40ch;font-size:14px;line-height:1.8;color:var(--muted)}
-.vb-hint{font-size:12.5px;color:var(--t-faint);line-height:1.8}
-.vb-hint b{color:var(--t-muted);font-weight:600}
 /* 데스크톱(트랙패드 포함)용 호버 */
 @media (hover:hover){
   .vb-tool:hover{background:var(--desk3)}
-  .vb-fol:hover{background:var(--desk3)}
   .vb-libbtn:hover{filter:brightness(1.12)}
   .vb-seg .vb-libbtn:hover{background:var(--desk3);filter:none}
   .vb-seg .vb-libbtn.pri:hover{background:var(--mark);filter:brightness(1.08)}
-  .vb-doc:hover .vb-slot{transform:translateY(-2px)}
   .vb-oi:hover,.vb-pg:hover,.vb-ib:hover{background:var(--desk3)}
 }
 /* 좁은 화면에서는 엔진 배지를 숨겨 툴바 숨통을 틔운다 */
 .vb-root:not(.wide) .vb-eng{display:none}
 
-/* ── wide 서재: 좌측 사이드바 + 매트 그리드 ──
-   design_handoff_yeobaek_library_and_brand/여백 서재.dc.html #8a 를 이 앱의 vb-* 체계로 옮긴 것.
-   좁은 화면은 사이드바를 얹을 폭이 안 나와 위쪽의 기존 폴더 카드 방식을 그대로 쓴다. */
+/* ── 서재: 접히는 사이드바 + 매트 그리드(폴더·문서 한 격자) ──
+   design_handoff_yeobaek_library_and_brand/여백 서재.dc.html #8a 에서 출발해 굿노트처럼 글을 덜었다(2026-10-14).
+   좁은 화면에선 사이드바가 본문 위에 얹힌다. */
 .vb-libwrap{flex:1;min-height:0;display:flex;overflow:hidden}
 .vb-libwrap>.vb-libbody{flex:1;min-width:0}
 .vb-menuscrim{position:fixed;inset:0;z-index:20}
@@ -366,12 +331,6 @@
   padding:16px 12px calc(16px + env(safe-area-inset-bottom));
   background:var(--t-side);border-right:1px solid var(--line);
   overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}
-/* 시안 8a 콘텐츠 메타 줄 — 경로 / (spacer) / 정렬 · 개수. 12.5px */
-.vb-libmeta{display:flex;align-items:center;gap:9px;padding:0 2px 14px;font-size:12.5px}
-.vb-libmeta .f{color:var(--t-faint)}
-.vb-libmeta .cur{color:var(--t-ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.vb-libmeta .sp{flex:1}
-.vb-libmeta .div{width:1px;height:13px;background:var(--line);flex:0 0 auto}
 .vb-navitem.over{box-shadow:0 0 0 2px var(--mark) inset}
 .vb-smartnav{display:flex;flex-direction:column;gap:2px;margin-bottom:10px}
 .vb-navitem{display:flex;align-items:center;gap:8px;height:34px;padding:0 10px;border-radius:9px;
@@ -387,35 +346,13 @@
 .vb-folnav.over{box-shadow:0 0 0 2px var(--mark) inset}
 .vb-folnav.dragging{opacity:.35}
 .vb-folnavname{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:left}
-.vb-ib.sm{width:22px;min-width:22px;height:22px;font-size:11px;padding:0}
-/* 안 보이는 ✕ 는 눌리지도 않게 — 아이패드엔 호버가 없어서 빈 자리를 누르다 지운다 */
-.vb-folnav .vb-ib.del{opacity:0;pointer-events:none}
-.vb-folnav.on .vb-ib.del,.vb-folnav .vb-ib.del.ask{opacity:1;pointer-events:auto}
 .vb-folnav{gap:6px}
 .vb-foltog{flex:0 0 16px;width:16px;height:22px;display:grid;place-items:center;font-size:10px;color:var(--t-faint)}
 .vb-foltog .bi{transition:transform .15s}
 .vb-foltog.open .bi{transform:rotate(90deg)}
 .vb-folico{font-size:14px;color:var(--t-faint)}
 .vb-folnav.on .vb-folico{color:var(--mark)}
-.vb-foladdin{font-size:13px;color:var(--t-sub)}
-/* 넓은 화면 본문의 하위 폴더 — 표지 격자와 겹치지 않게 한 줄짜리 알약 */
-.vb-subfols{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 18px}
-.vb-subfol{display:flex;align-items:center;gap:8px;height:38px;padding:0 14px;border-radius:10px;
-  border:1px solid var(--line);background:var(--desk2);font-size:13px;color:var(--t-ink);touch-action:manipulation}
-.vb-subfol .bi{font-size:15px;color:var(--mark)}
-.vb-subfol.over{box-shadow:0 0 0 2px var(--mark)}
-.vb-subfol.dragging{opacity:.35}
-.vb-folnav .vb-ib.del.ask{opacity:1;font-size:9.5px;padding:0 4px;width:auto}
 
-.vb-folnewinline{display:flex;align-items:center;gap:6px;padding:2px 2px 6px;color:var(--t-faint);font-size:14px}
-.vb-folnewinline input{flex:1;min-width:0;height:30px;padding:0 9px;border-radius:8px;border:1px solid var(--line);
-  background:var(--t-input);color:var(--t-ink);font-size:13px;outline:none;font-family:inherit}
-.vb-foladd{display:flex;align-items:center;gap:6px;height:30px;padding:0 10px;border-radius:9px;
-  font-size:12.5px;color:var(--t-faint);touch-action:manipulation}
-.vb-sidespacer{flex:1}
-.vb-sideadd{display:flex;align-items:center;justify-content:center;gap:6px;height:36px;border-radius:10px;
-  border:1px dashed var(--t-line2);font-size:12.5px;color:var(--t-sub);touch-action:manipulation;margin-top:8px}
-.vb-sideadd:disabled{opacity:.45}
 
 /* 매트 그리드 — 칸(.vb-slot)은 모두 같은 자리를 차지하고, 종이(.vb-paper)는 원본 비율대로
    그 안에서 중앙에 놓인다. 카드 테두리·배경 없이 종이 그림자만, 호버 때만 옅은 판이 뜬다.
@@ -424,10 +361,9 @@
 .vb-mdoc{position:relative;display:flex;flex-direction:column;min-width:0;padding:9px;border-radius:14px;
   background:transparent;cursor:pointer;touch-action:manipulation;-webkit-user-select:none;user-select:none;
   -webkit-user-drag:element}
-/* 높이는 App.jsx 의 SLOT_H / NARROW_S 와 같이 움직여야 한다 */
+/* 높이는 App.jsx 의 SLOT_H 와 같이 움직여야 한다 */
 .vb-slot{position:relative;height:132px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;
   transition:transform .16s}
-.vb-slot.sm{height:114px}
 /* 폭만 inline style 로 받고 높이는 aspect-ratio 가 정한다 — 종이와 그림이 정확히 같은
    비율이라 레터박스(위아래 흰 띠)가 생길 수 없다. 칸이 좁으면 min() 이 같이 줄인다. */
 .vb-paper{position:relative;flex:0 0 auto;background:#FFFEFB;
@@ -438,8 +374,6 @@
 .vb-paper.auto img{width:auto;height:auto;max-width:100%;max-height:100%}
 .vb-paper svg{position:absolute;inset:0;margin:auto;width:26px;height:26px;stroke:#8C877C;fill:none;
   stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
-.vb-ribbon{position:absolute;top:0;right:8px;width:7px;height:15px;background:var(--mark);
-  clip-path:polygon(0 0,100% 0,100% 100%,50% 72%,0 100%)}
 .vb-mbody{padding-top:9px;display:flex;flex-direction:column;gap:3px;min-width:0}
 .vb-mrename{font-size:13px;font-family:inherit;color:var(--t-ink);background:var(--t-input);
   border:1px solid var(--t-line2);border-radius:6px;padding:3px 6px;outline:none}
@@ -448,7 +382,7 @@
   font-size:14px;letter-spacing:1px;touch-action:manipulation;z-index:2}
 
 /* ⋮ 메뉴 — 질문 탭의 vb-dropmenu 와 같은 팝오버 스타일(배경·테두리·그림자·rise 애니메이션) */
-.vb-docmenu{position:absolute;top:38px;right:9px;width:158px;z-index:21;border-radius:11px;
+.vb-docmenu{position:absolute;top:38px;right:9px;width:190px;z-index:21;border-radius:11px;
   background:var(--t-menu);border:1px solid var(--t-line2);box-shadow:0 10px 28px rgba(0,0,0,.32);
   padding:5px;display:flex;flex-direction:column;gap:1px;animation:rise .16s ease-out}
 .vb-docmenu button,.vb-docmenu a{height:32px;padding:0 9px;border-radius:7px;border:0;background:none;
@@ -459,13 +393,44 @@
   border-left:1px solid var(--t-line);margin-left:9px}
 .vb-docsubmenu button{height:28px;font-size:12px;color:var(--t-sub)}
 .vb-docmenu-del{color:#E0644F}
+.vb-docsubmenu button{justify-content:flex-start;gap:7px}
+.vb-docsubmenu button:disabled{opacity:.4}
+.vb-docsubmenu .bi{font-size:12px;color:var(--t-faint);flex:none}
+.vb-docsubmenu span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 제목 줄 — 경로(작게) + 지금 폴더 이름(크게) + 새 폴더·추가 */
+.vb-libtitle{padding:20px 2px 12px}
+.vb-libpath{display:flex;align-items:center;flex-wrap:wrap;gap:1px;margin:0 0 2px -6px;font-size:12.5px;color:var(--t-faint)}
+.vb-libpath button{padding:4px 6px;border-radius:6px;color:var(--t-sub);touch-action:manipulation}
+.vb-libpath button.tgt{box-shadow:0 0 0 2px var(--mark) inset}
+.vb-libpath .bi{font-size:9px}
+.vb-libtrow{display:flex;align-items:center;gap:10px}
+.vb-libtrow h1{margin:0;min-width:0;font-size:26px;font-weight:700;letter-spacing:-.01em;color:var(--t-ink);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.vb-libtrow .sp{flex:1}
+.vb-libbtn .bi{font-size:17px}
+.vb-libbtn .bi svg{width:1em;height:1em;fill:currentColor;stroke:none}
+.vb-libbtn.on{color:var(--mark)}
+
+.vb-libwrap{position:relative}
+.vb-libwrap.narrow .vb-libside{position:absolute;top:0;bottom:0;left:0;width:250px;z-index:15;
+  box-shadow:8px 0 24px rgba(0,0,0,.18)}
+.vb-sidescrim{position:absolute;inset:0;z-index:14;background:rgba(0,0,0,.12)}
+
+/* 카드 글은 이름 + 한 줄, 가운데 — 굿노트처럼 */
+.vb-mbody{align-items:center;text-align:center}
+.vb-mdoc.over{background:var(--t-fill);box-shadow:0 0 0 2px var(--mark) inset}
+.vb-mdoc.drag{opacity:.35}
+.vb-folart{height:100px;width:auto;max-width:100%}
+.vb-folart .b{fill:var(--mark);opacity:.45}
+.vb-folart .f{fill:var(--mark)}
+/* 읽은 만큼 — 표지 밑 얇은 막대 */
+.vb-prog{position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(21,19,15,.1)}
+.vb-prog i{display:block;height:100%;background:var(--mark)}
 
 @media (hover:hover){
   .vb-navitem:hover{background:var(--t-fill)}
   .vb-folnav:hover{background:var(--t-fill)}
-  .vb-folnav:hover .vb-ib.del{opacity:1;pointer-events:auto}
-  .vb-sideadd:hover{filter:brightness(1.12)}
-  .vb-foladd:hover{background:var(--t-fill);color:var(--t-sub)}
   .vb-mmenu:hover{background:var(--t-fill);color:var(--t-ink)}
   .vb-docmenu button:hover,.vb-docmenu a:hover{background:var(--t-fill)}
   .vb-docmenu-del:hover{background:rgba(224,100,79,.12)}
