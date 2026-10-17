@@ -6,7 +6,7 @@ import { useLiveText } from "./liveText.js";
 
 /* ───────────────────────── 질문 탭 화면 (아이패드·폰 공용) ─────────────────────────
    대화는 서버 한 곳(server/remote.js 의 세션 저장소)에 있고, 이 컴포넌트는 그리기만 한다.
-   무엇을 보내고 누가 답하는지는 부르는 쪽(App.jsx = 모델을 부르는 실행자, Remote.jsx = 폰)이 정한다.
+   무엇을 보내고 누가 답하는지는 부르는 쪽(App.jsx — 모델을 부르는 실행자)이 정한다.
 
    run: 지금(또는 방금) 도는 답의 상태 — App.jsx 의 aiStat 모양 그대로
      { running, phase, t0, at, marks, tryLabel, pickLabel, pickWhy, model, trail, chars, think, step,

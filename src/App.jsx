@@ -32,7 +32,6 @@ export default function VerbatimReader() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const [tab, setTab] = useState("word");
   const [engine, setEngine] = useState("");
-  const [remoteOn, setRemoteOn] = useState(false); // 리모트(폰) 모드 — server/remote.js 참고
   const [word, setWord] = useState(null);
   const [sent, setSent] = useState(null);
   const [sessions, setSessions] = useState([]);   // 질문 탭 대화 묶음. 최신이 앞
@@ -169,13 +168,9 @@ export default function VerbatimReader() {
   useEffect(() => { invertRef.current = invert; }, [invert]);
   useEffect(() => { panelModeRef.current = panelMode; }, [panelMode]);
 
-  /* 리모트 모드용 거울 ref — SSE 리스너는 remoteOn 이 켜질 때 한 번 붙고 오래 살아남으므로,
-     그 안에서 docName/outline 을 state 로 직접 읽으면 그 뒤의 리로드·목차 생성 결과를
-     못 보고 낡은 값에 갇힌다(다른 *Ref 거울들과 같은 이유). */
-  const remoteOnRef = useRef(remoteOn);
+  // 오래 사는 리스너·타이머가 낡은 docName/outline 에 갇히지 않게 하는 거울
   const docNameRef = useRef(docName);
   const outlineRef = useRef(outline);
-  useEffect(() => { remoteOnRef.current = remoteOn; }, [remoteOn]);
   useEffect(() => { docNameRef.current = docName; }, [docName]);
   useEffect(() => { outlineRef.current = outline; }, [outline]);
   useEffect(() => {
@@ -212,7 +207,7 @@ export default function VerbatimReader() {
   }, []);
 
   /* ───────── 질문 탭 세션 ─────────
-     2026-09-29 부터 대화는 서버(server/remote.js 의 세션 저장소) 한 곳에 있다 — 아이패드·PC·폰이 같은 대화를 본다.
+     2026-09-29 부터 대화는 서버(server/remote.js 의 세션 저장소) 한 곳에 있다 — 아이패드·PC 가 같은 대화를 본다.
      예전엔 아이패드는 localStorage, 폰은 서버라 둘을 잇는 거울(remoteSessRef·mirrorCaptureToRemote)과
      폰 질문 전용 파이프라인(processRemoteQ)이 따로 있었다. 이제 전부 이 한 벌로 돈다.
 
@@ -358,7 +353,6 @@ export default function VerbatimReader() {
      내가 방금 낙관적으로 넣은 것의 메아리는 길이·id 로 걸러 두 번 들어가지 않게 한다.
      내가 흘리는 중인 답(live)은 서버 값이 덮어쓰지 못하게 지킨다. */
   const [peerLive, setPeerLive] = useState(null); // 다른 기기가 흘리는 답 { sid, i, text, run, device }
-  const [remoteMode, setRemoteMode] = useState({ on: false, doc: null });
   useEffect(() => {
     if (authed !== true) return;
     const es = new EventSource(u("/api/remote/stream"));
@@ -376,14 +370,12 @@ export default function VerbatimReader() {
         if (!ls.some((s) => s.id === cur)) cur = ls[0]?.id || "";
       }
       commitSess(ls, cur);
-      setRemoteMode(d.mode || { on: false, doc: null });
     });
-    es.addEventListener("mode", (e) => setRemoteMode(JSON.parse(e.data)));
     es.addEventListener("sess-new", (e) => {
       const s = JSON.parse(e.data);
       if (findSess(s.id)) return;
       commitSess([s, ...sessRef.current]);
-      // 폰에서 새로 연 대화는 따라가지 않는다 — 아이패드에서 읽던 대화가 멋대로 바뀌면 안 된다
+      // 다른 기기에서 새로 연 대화는 따라가지 않는다 — 아이패드에서 읽던 대화가 멋대로 바뀌면 안 된다
     });
     es.addEventListener("sess-del", (e) => {
       const { id } = JSON.parse(e.data);
@@ -407,10 +399,6 @@ export default function VerbatimReader() {
       if (!s?.msgs[i] || s.msgs[i].live) return; // 내가 흘리는 중인 답은 건드리지 않는다
       mapSess(id, (x) => ({ ...x, msgs: x.msgs.map((m, k) => (k === i ? { ...m, ...patch } : m)) }));
       if (patch.pending === false) setPeerLive((p) => (p && p.sid === id && p.i === i ? null : p));
-    });
-    es.addEventListener("ask-cancel", (e) => {
-      const { id, i } = JSON.parse(e.data);
-      if (jobRef.current?.sid === id && (jobRef.current.i === undefined || jobRef.current.i === i)) stopAsk();
     });
     es.addEventListener("relay:ask", (e) => {
       const { payload } = JSON.parse(e.data);
@@ -436,33 +424,6 @@ export default function VerbatimReader() {
     if (now) { clearTimeout(r.timer); send(); return; }
     if (!r.timer) r.timer = setTimeout(send, Math.max(0, 300 - (Date.now() - r.t)));
   };
-
-  /* 출석 — 폰이 "지금 답할 기기가 있나 · 몇 쪽을 보나"를 알 수 있게 30초마다(쪽이 바뀌면 곧바로) 알린다.
-     문서가 열려 있을 때만 doc 을 싣는다 — 문서 없는 창은 폰 질문에 답하지 못한다(본문이 없다). */
-  const presRef = useRef({ timer: 0 });
-  const sendPresence = (bye = false) => {
-    fetch(u("/api/remote/presence"), {
-      method: "POST", headers: { "Content-Type": "application/json" }, keepalive: bye,
-      body: JSON.stringify({
-        device: deviceRef.current, label: DEVICE_LABEL, bye,
-        doc: pdfRef.current ? { id: curFileRef.current?.id || "", name: docNameRef.current, page: curRef.current } : null,
-      }),
-    }).catch(() => {});
-  };
-  useEffect(() => {
-    if (authed !== true) return;
-    clearTimeout(presRef.current.timer);
-    presRef.current.timer = setTimeout(() => sendPresence(), 800);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed, numPages, curPage, docName]);
-  useEffect(() => {
-    if (authed !== true) return;
-    const t = setInterval(() => { if (!document.hidden) sendPresence(); }, 30_000);
-    const bye = () => sendPresence(true);
-    window.addEventListener("pagehide", bye);
-    return () => { clearInterval(t); window.removeEventListener("pagehide", bye); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [authed]);
 
   /* 남은 시간 표시용 1분 틱(청소는 서버가 한다 — sess-del 로 온다) */
   useEffect(() => {
@@ -680,22 +641,6 @@ export default function VerbatimReader() {
     }, 1200);
     return () => clearTimeout(lastPageTimer.current);
   }, [curPage, libApi]);
-
-  /* 리모트(폰)에 지금 쪽을 흘려준다 — 리모트가 꺼져 있으면 서버가 조용히 무시한다
-     (server/remote.js). remoteOn 이 막 켜졌을 때도 이 effect 가 다시 돌아 즉시 한 번
-     쏘도록 의존성에 넣는다. */
-  const remotePageTimer = useRef(null);
-  useEffect(() => {
-    if (!remoteOn || !curPage) return;
-    clearTimeout(remotePageTimer.current);
-    remotePageTimer.current = setTimeout(() => {
-      fetch(u("/api/remote/page"), {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ docId: curFileRef.current?.id || "", docName: docNameRef.current, page: curRef.current }),
-      }).catch(() => {});
-    }, 300);
-    return () => clearTimeout(remotePageTimer.current);
-  }, [curPage, remoteOn, docName]);
 
   /* 디바운스 타이머가 돌기 전에 탭을 닫거나 앱을 스와이프해 나가면 마지막 몇 쪽이
      안 남는다 — pagehide 에서 한 번 더 즉시 쏜다(keepalive 로 응답을 안 기다려도 전송은 됨).
@@ -2308,42 +2253,6 @@ export default function VerbatimReader() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [word]);
 
-  /* 리모트(폰)의 단어/문장 탭은 이 값이 스트리밍되는 그대로를 받아 그린다(src/Remote.jsx
-     의 word/sent 슬롯). 최신 state 를 통째로 보내고 seq 로 낡은 응답만 걸러낸다.
-     흐르는 중(live)에는 슬롯마다 0.25초에 한 번만 — 예전엔 글자 조각마다 POST 가 하나씩 나갔다.
-     끝난 것(live 아님)은 기다리던 걸 버리고 곧바로 보낸다. */
-  const remoteSeqRef = useRef({ word: 0, sent: 0 });
-  const relayWait = useRef({});
-  const relay = (slot, payload) => {
-    if (!remoteOnRef.current) return;
-    const w = (relayWait.current[slot] ||= { t: 0, at: 0, last: null });
-    const send = () => {
-      w.t = 0; w.at = Date.now();
-      remoteSeqRef.current[slot] += 1;
-      fetch(u("/api/remote/relay"), {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slot, seq: remoteSeqRef.current[slot], payload: w.last }),
-      }).catch(() => {});
-    };
-    w.last = payload;
-    if (!payload?.live) { clearTimeout(w.t); send(); return; }
-    if (!w.t) w.t = setTimeout(send, Math.max(0, 250 - (Date.now() - w.at)));
-  };
-  useEffect(() => {
-    if (!word) return;
-    relay("word", {
-      head: word.head, pos: word.pos, ctx: word.ctx, senses: word.senses,
-      quote: word.quote, page: curRef.current, doc: docNameRef.current,
-      live: !!word.live, err: word.err || "",
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [word]);
-  useEffect(() => {
-    if (!sent) return;
-    relay("sent", { text: sent.trans, live: !!sent.live, err: sent.err || "" });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sent]);
-
   /* 문장/구간 해석은 캔버스로 렌더된 페이지 위에 뜨는 유리 카드로 보여준다 — 드래그 선택
      ("선택 구간 해석" 말풍선)이나 단어 탭의 "문장 해석" 버튼에서 들어온다.
      두 번 탭 제스처는 리디자인에서 뺐다. */
@@ -2391,9 +2300,7 @@ export default function VerbatimReader() {
       setSentPos(null);
       clearMarks();
       setMark(n, off, off + el.textContent.length, "");
-      // 리모트 모드에선 폰이 단어 패널을 보여주므로 아이패드 쪽 시트는 자동으로 열지 않는다 —
-      // 탭 버튼을 직접 누르면 그때는 연다(3533번째 줄 토글은 그대로 동작).
-      if (!remoteOnRef.current) setSheetOpen(true);
+      setSheetOpen(true);
       setTab("word");
       runWord(wordAt(pd.text, off), s.text);
     };
@@ -2929,15 +2836,6 @@ export default function VerbatimReader() {
     }
   };
 
-
-  const toggleRemote = () => {
-    const v = !remoteOn;
-    setRemoteOn(v);
-    fetch(u("/api/remote/mode"), {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ on: v }),
-    }).catch(() => {});
-  };
 
   /* ── 영역 캡처 ──
      모드에 들어가면 .vb-view 위에 오버레이가 덮이고 입력을 독점한다. 그래서 탭 판정·핀치·
@@ -4497,15 +4395,15 @@ export default function VerbatimReader() {
       )}
 
       {!inLib && <div className="vb-bar">
-        <button className={"vb-tool" + (outOpen ? " on" : "")} onClick={() => setOutOpen((v) => !v)} aria-label="목차">
+        <button className={"vb-tool r1" + (outOpen ? " on" : "")} onClick={() => setOutOpen((v) => !v)} aria-label="목차">
           <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10" /></svg>
         </button>
-        <button className={"vb-tool" + (libOpen ? " on" : "")}
+        <button className={"vb-tool r1" + (libOpen ? " on" : "")}
           onClick={() => { setLibOpen(true); refreshLib(); }} aria-label="서재">
           <svg viewBox="0 0 24 24"><path d="M4 4.5h4V20H4zM10 4.5h4V20h-4zM15.6 6l3.9-1L22 19l-3.9 1z" /></svg>
         </button>
         {renaming !== null ? (
-          <input className="vb-nameedit" autoFocus value={renaming}
+          <input className="vb-nameedit r1" autoFocus value={renaming}
             onChange={(e) => setRenaming(e.target.value)}
             onBlur={() => renameCur(renaming)}
             onKeyDown={(e) => {
@@ -4513,13 +4411,13 @@ export default function VerbatimReader() {
               if (e.key === "Escape") { e.preventDefault(); setRenaming(null); }
             }} />
         ) : (
-          <button className="vb-name" disabled={!numPages}
+          <button className="vb-name r1" disabled={!numPages}
             onClick={() => numPages && setRenaming(docName)}
             title={numPages ? "탭해서 이름 바꾸기" : undefined}>
             {busy ? "여는 중…" : docName || "PDF를 열어 시작하세요"}
           </button>
         )}
-        {numPages > 0 && <span className="vb-pill">{curPage} / {numPages}</span>}
+        {numPages > 0 && <span className="vb-pill r1">{curPage} / {numPages}</span>}
         <span className={"vb-eng" + (engine === "NIM" ? " c" : engine === "Gemini" ? " g" : "")}>
           {engine || "대기"}
         </span>
@@ -4536,13 +4434,13 @@ export default function VerbatimReader() {
           </button>
         )}
         {numPages > 0 && (
-          <button className={"vb-tool" + (miniOpen ? " on" : "")} onClick={() => setMiniOpen((v) => !v)}
+          <button className={"vb-tool nph" + (miniOpen ? " on" : "")} onClick={() => setMiniOpen((v) => !v)}
             aria-label="작은 노트" title="작은 노트 — 세 손가락으로 위로 쓸어 올려도 열린다">
             <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 12h18" /><path d="M10 15.5h4" /></svg>
           </button>
         )}
         {IS_SAFARI && numPages > 0 && !inkOn && (
-          <button className={"vb-tool" + (penCapture ? " on" : "")}
+          <button className={"vb-tool nph" + (penCapture ? " on" : "")}
             onClick={() => {
               const v = !penCapture;
               setPenCapture(v); penCaptureRef.current = v; persist();
@@ -4551,15 +4449,12 @@ export default function VerbatimReader() {
             <svg viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 114 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
           </button>
         )}
-        <button className="vb-tool" onClick={() => zoomBy(1 / 1.2)} aria-label="축소">−</button>
-        <button className="vb-tool" onClick={() => zoomBy(1.2)} aria-label="확대">+</button>
-        {/* 리모트는 한 번 켜 두고 마는 것이라 툴바가 아니라 ⚙ 설정 안에 있다.
-            켜져 있는 동안만 ⚙ 에 점 하나로 알린다 */}
-        <button className={"vb-tool" + (remoteOn ? " dot" : "")} onClick={() => setSetOpen(true)}
-          aria-label={remoteOn ? "설정 — 리모트 켜짐" : "설정"}>
+        <button className="vb-tool nph" onClick={() => zoomBy(1 / 1.2)} aria-label="축소">−</button>
+        <button className="vb-tool nph" onClick={() => zoomBy(1.2)} aria-label="확대">+</button>
+        <button className="vb-tool r1" onClick={() => setSetOpen(true)} aria-label="설정">
           <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.6 1.6 0 00.3 1.8 2 2 0 11-2.8 2.8 1.6 1.6 0 00-1.8-.3 1.6 1.6 0 00-1 1.5 2 2 0 11-4 0 1.6 1.6 0 00-1-1.5 1.6 1.6 0 00-1.8.3 2 2 0 11-2.8-2.8 1.6 1.6 0 00.3-1.8 1.6 1.6 0 00-1.5-1 2 2 0 110-4 1.6 1.6 0 001.5-1 1.6 1.6 0 00-.3-1.8 2 2 0 112.8-2.8 1.6 1.6 0 001.8.3 1.6 1.6 0 001-1.5 2 2 0 114 0 1.6 1.6 0 001 1.5 1.6 1.6 0 001.8-.3 2 2 0 112.8 2.8 1.6 1.6 0 00-.3 1.8 1.6 1.6 0 001.5 1 2 2 0 110 4 1.6 1.6 0 00-1.5 1z" /></svg>
         </button>
-        <button className="vb-tool" style={{ background: "var(--t-fill)" }}
+        <button className="vb-tool nph" style={{ background: "var(--t-fill)" }}
           onClick={() => {
             const t = theme === "dark" ? "light" : "dark";
             setTheme(t); themeRef.current = t; persist();
@@ -4576,6 +4471,7 @@ export default function VerbatimReader() {
           </button>
         )}
         <div className="vb-vsep" />
+        <div className="vb-brk" />
         {wide && (
           <div className="vb-seg2" role="group" aria-label="패널·카드 배치">
             <button className={panelMode === "panel" ? "on" : ""}
@@ -4590,7 +4486,7 @@ export default function VerbatimReader() {
             </button>
           </div>
         )}
-        <div className="vb-seg2" style={{ marginLeft: 6 }} role="group" aria-label="단어·질문·기록">
+        <div className="vb-seg2 vb-tabs" role="group" aria-label="단어·질문·기록">
           {[["word", "단어"], ["ask", "질문"], ["log", "기록"]].map(([k, label]) => (
             <button key={k} className={sheetOpen && tab === k ? "on" : ""}
               onClick={() => {
@@ -4760,7 +4656,7 @@ export default function VerbatimReader() {
         })()}
 
         {upProg && (
-          <div className="vb-uppill" role="status">
+          <div className={"vb-uppill" + (inLib ? " lib" : "")} role="status">
             <i style={{ width: (upProg.pct ?? 0) + "%" }} />
             <span>
               {upProg.name} — {upProg.what || "올리는 중"}
@@ -5218,14 +5114,9 @@ export default function VerbatimReader() {
                 </div>
               </div>
 
+              {pdfStore && (<>
               <div className="vb-setgrp">기기</div>
               <div className="vb-setlist">
-                <div className="vb-setrow">
-                  <Bi name="phone" className="ic" />
-                  <span className="tx"><b>폰 리모트</b><small>단어·문장 탭을 폰에 보여요</small></span>
-                  <Sw on={remoteOn} label="폰 리모트" onChange={toggleRemote} />
-                </div>
-                {pdfStore && (
                   <div className="vb-setrow">
                     <Bi name="hdd" className="ic" />
                     <span className="tx"><b>저장된 PDF</b>
@@ -5235,8 +5126,8 @@ export default function VerbatimReader() {
                       setPdfStore(cacheInfo());
                     }}><Bi name="trash3" /></button>
                   </div>
-                )}
               </div>
+              </>)}
 
               {inbox?.enabled && (<>
                 <div className="vb-setgrp">

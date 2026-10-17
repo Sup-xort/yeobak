@@ -17,7 +17,10 @@ const APP_PASSWORD = process.env.APP_PASSWORD || "";
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const NIM_KEY = process.env.NIM_API_KEY || "";
 const NIM_BASE = process.env.NIM_BASE_URL || "https://integrate.api.nvidia.com/v1";
-const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
+// 쉼표로 여러 개 — 다른 프로젝트 키여야 무료 한도가 따로 잡힌다. 429 면 다음 키로.
+const GEMINI_KEYS = (process.env.GEMINI_API_KEY || "").split(",").map((k) => k.trim()).filter(Boolean);
+const GEMINI_KEY = GEMINI_KEYS[0] || "";
+let gemAt = 0; // 마지막으로 통한 키
 // 대화 모델 순위에 같이 끼는 OpenAI 호환 프로바이더(2026-10-09~) — 없어도 된다
 const GROQ_KEY = process.env.GROQ_API_KEY || "";
 const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
@@ -25,7 +28,7 @@ const OPENROUTER_KEY = process.env.OPENROUTER_API_KEY || "";
 /* 모델 목록·상태·자동 선택은 server/models.js — 목록은 서버가 스스로 찾는다(그 파일 머리말).
    TAP_MODEL / ASK_MODEL 로 기본값을 고정할 수 있다(비우면 "자동" — 점수로 고른다). */
 
-/* 첫 글자(또는 속생각)까지 기다리는 상한. 넘기면 그 모델을 버리고 다음으로 넘어간다 —
+/* 답의 첫 글자까지 기다리는 상한(속생각은 안 친다). 넘기면 그 모델을 버리고 다음으로 넘어간다 —
    아직 화면에 한 글자도 안 나갔으니 사용자는 바뀐 걸 모른다. 헤더는 왔는데 글자가 안 오는
    모델(2026-09 NIM 에서 흔했다)이 전체 상한을 혼자 다 쓰던 걸 막는다. */
 const FIRST_MS = { tap: 15_000, ask: 45_000 };
@@ -1015,6 +1018,23 @@ async function callOAI({ system, user, image, history = [], maxTokens, signal, m
   return res;
 }
 
+/* Vertex(구글 클라우드 크레딧) — VERTEX_PROJECT 가 있으면 Gemini 를 먼저 여기로, 안 되면 무료 키로.
+   인증은 gcloud ADC(사용자 로그인)의 refresh_token — 조직 정책이 Vertex API 키를 막는다.
+   실돈은 예산 spend cap(크레딧 뺀 1,000원)이 막는다: 걸리면 Vertex 가 실패하고 무료 키로 넘어간다. */
+const VERTEX_PROJECT = process.env.VERTEX_PROJECT || "";
+let vxTok = { t: "", exp: 0 };
+const vxMiss = new Set(); // Vertex 에 없는 이름(…-latest 등, 404) — 재기동까지 다시 안 두드린다
+async function vertexToken() {
+  if (Date.now() < vxTok.exp) return vxTok.t;
+  const c = JSON.parse(fs.readFileSync(path.join(process.env.HOME || "/home/ubuntu", ".config/gcloud/application_default_credentials.json"), "utf8"));
+  const r = await fetch("https://oauth2.googleapis.com/token", { method: "POST", signal: AbortSignal.timeout(10_000),
+    body: new URLSearchParams({ grant_type: "refresh_token", client_id: c.client_id, client_secret: c.client_secret, refresh_token: c.refresh_token }) });
+  const j = await r.json().catch(() => ({}));
+  if (!j.access_token) throw new Error(`토큰 ${r.status} ${j.error || ""}`);
+  vxTok = { t: j.access_token, exp: Date.now() + ((j.expires_in || 3600) - 120) * 1000 };
+  return vxTok.t;
+}
+
 async function callGemini({ system, user, image, history = [], maxTokens, signal, model, gen }) {
   if (!GEMINI_KEY) throw new Error("Gemini 키 없음");
   const url =
@@ -1022,21 +1042,40 @@ async function callGemini({ system, user, image, history = [], maxTokens, signal
     `:streamGenerateContent?alt=sse`;
   const parts = [{ text: user }];
   if (image) parts.push({ inlineData: { mimeType: "image/jpeg", data: image } });
-  const res = await fetch(url, {
-    method: "POST",
-    signal,
-    headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEY },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: system }] },
-      // Gemini 의 어시스턴트 역할 이름은 "model" 이다.
-      contents: [
-        ...history.map((t) => ({ role: t.role === "assistant" ? "model" : "user", parts: [{ text: t.text }] })),
-        { role: "user", parts },
-      ],
-      // temperature 는 정하지 않는다 — Gemini 3.x 는 기본값 권장(낮추면 반복·추론 저하). 찾기 시험도 기본값으로 잰다.
-      generationConfig: { maxOutputTokens: maxTokens, ...(gen || {}) },
-    }),
+  const body = JSON.stringify({
+    systemInstruction: { parts: [{ text: system }] },
+    // Gemini 의 어시스턴트 역할 이름은 "model" 이다.
+    contents: [
+      ...history.map((t) => ({ role: t.role === "assistant" ? "model" : "user", parts: [{ text: t.text }] })),
+      { role: "user", parts },
+    ],
+    // temperature 는 정하지 않는다 — Gemini 3.x 는 기본값 권장(낮추면 반복·추론 저하). 찾기 시험도 기본값으로 잰다.
+    generationConfig: { maxOutputTokens: maxTokens, ...(gen || {}) },
   });
+  let res;
+  if (VERTEX_PROJECT && !vxMiss.has(model)) {
+    try {
+      res = await fetch(`https://aiplatform.googleapis.com/v1/projects/${VERTEX_PROJECT}/locations/global/publishers/google/models/` +
+        `${encodeURIComponent(model)}:streamGenerateContent?alt=sse`, { method: "POST", signal, body,
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${await vertexToken()}` } });
+    } catch (e) {
+      if (signal?.aborted) throw e;
+      console.warn(`[여백] Vertex ${model} ${e.message} → 무료 키`);
+    }
+    if (res && !res.ok) {
+      if (res.status === 404) vxMiss.add(model);
+      console.warn(`[여백] Vertex ${model} ${res.status} → 무료 키`);
+      await res.body?.cancel();
+      res = null;
+    }
+  }
+  for (let i = 0; !res?.ok && i < GEMINI_KEYS.length; i++) {
+    const k = (gemAt + i) % GEMINI_KEYS.length;
+    res = await fetch(url, { method: "POST", signal, body,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_KEYS[k] } });
+    if (res.status !== 429) { if (res.ok) gemAt = k; break; }
+    if (i < GEMINI_KEYS.length - 1) await res.body?.cancel();
+  }
   if (!res.ok) {
     const d = await res.text().catch(() => "");
     // Gemini 오류 본문은 여러 줄 JSON 이다 — message 한 줄만 남긴다
@@ -1116,7 +1155,7 @@ function trimHistory(h) {
 
 /* ── /api/chat ──
    요청 하나 = "고른 모델 → 대신 답할 모델들" 차례로 시도. 핵심 규칙은 하나다:
-   **첫 글자(또는 속생각)가 실제로 오기 전까지는 아무것도 클라이언트에 보내지 않는다.**
+   **답의 첫 글자가 실제로 오기 전까지는 아무것도 클라이언트에 보내지 않는다.**
    그래서 붐빔(503/529), 헤더만 오고 멈춤, 빈 답(생각만 하다 끝남·SAFETY), 스트림 초반 오류가
    전부 "다음 모델로" 로 조용히 흡수된다. 예전엔 헤더가 오는 순간 그 모델에 묶여서, 그 뒤에
    빈 답이 오면 화면엔 아무것도 없이 끝났고("답도 안 내고 끝난다"), 503 셋이면 곧장 502 였다.
@@ -1156,7 +1195,13 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   const tried = new Set();
   // visionDirect: 그림째 Gemini·kimi-k3 에게만(models.chain 의 gemOnly 참고). 질문이면 질문 탭 순위·고른 모델(Gemini 일 때)을 따른다.
   const gemOnly = !!(image && visionDirect);
-  const nextModel = () => models.chain({ kind, picked, gemOnly, ask }).find((id) => !tried.has(id));
+  /* 덧띄우기(hedge)는 지금 기다리는 것과 **다른 프로바이더**를 먼저 — Google 이 붐비면 Gemini 셋을 나란히 띄워도
+     다 같이 늦었다(2026-10-15 그림 질문: 3.6 은 23초 끌다 503, 3.5 도 503, 셋째 Gemini 가 겨우 답). */
+  const nextModel = () => {
+    const c = models.chain({ kind, picked, gemOnly, ask }).filter((id) => !tried.has(id));
+    const busy = new Set([...live.keys()].map((id) => models.upstream(id).name));
+    return c.find((id) => !busy.has(models.upstream(id).name)) ?? c[0];
+  };
   if (!warm) models.touch();
   const firstMs = ask ? FIRST_MS.ask : FIRST_MS.tap;
   const lane = kind === "tap" ? "tap" : "main"; // 같은 모델도 탭(속생각 끔)과 질문(켬)은 속도가 전혀 다르다
@@ -1178,7 +1223,8 @@ app.post("/api/chat", requireAuth, async (req, res) => {
   const label = (id) => models.get(id)?.label || id;
   const nap = (ms) => new Promise((r) => { const t = setTimeout(r, ms); signal.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true }); });
 
-  /* 모델 하나에 붙어 첫 글자(또는 속생각)까지 받는다 → { id, it, first, cc, t0 }. 실패하면 기록하고 null. */
+  /* 모델 하나에 붙어 답의 첫 글자까지 받는다 → { id, it, first, cc, t0 }. 실패하면 기록하고 null.
+     속생각은 이긴 걸로 치지 않는다 — 0.5초에 생각을 흘린 Nemotron VL 이 경주를 이겨 Gemini 를 끊고 100초 생각만 했다(2026-10-16). */
   async function attempt(id, a) {
     const gem = models.isGem(id);
     const t0 = Date.now();
@@ -1199,7 +1245,7 @@ app.post("/api/chat", requireAuth, async (req, res) => {
       for (;;) {
         const r = await it.next();
         if (r.done) throw new Error("빈 응답");
-        if (r.value.c || r.value.k) { clearTimeout(timer); return { id, it, first: r.value, cc, t0 }; }
+        if (r.value.c) { clearTimeout(timer); return { id, it, first: r.value, cc, t0 }; }
         if (r.value.fin) throw new Error(`빈 응답(${r.value.fin})`); // 한 글자도 없이 끝남
       }
     } catch (e) {
@@ -1386,9 +1432,5 @@ app.listen(PORT, "0.0.0.0", () => {
   const p = models.publicList();
   console.log(`[여백] http://0.0.0.0:${PORT}  모델 ${p.models.length}개(탭 ${p.tapModels.length}) · 지금 자동: 탭 ${p.auto.tap} · 질문 ${p.auto.ask}` +
     `${GEMINI_KEY ? "" : "  (Gemini 키 없음)"}${NIM_KEY ? "" : "  (NIM 키 없음)"}`);
-  // 켜질 때 한 번, 그 뒤 한 시간마다 목록을 본다 — 실제로 불러 보는 건 새 모델·하루 지난 모델·
-  // 붐벼서 미뤄 둔 모델뿐이라 대부분의 시간엔 목록 요청 두 번으로 끝난다.
-  const run = () => models.discover().catch((e) => console.warn("[모델] 찾기 실패:", e.message));
-  setTimeout(run, 5_000);
-  setInterval(run, 60 * 60 * 1000);
+  // 자동 찾기는 멈췄다(2026-10-16) — models.js 의 KEEP 만 쓴다. 설정의 "지금 다시 찾기"는 남아 있다.
 });

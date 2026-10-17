@@ -83,6 +83,16 @@ const sizeB = (id) => { const m = /(\d+(?:\.\d+)?)b(?![a-z])/i.exec(bare(id)); r
    작은 비전 모델(gemma·llama-vision)은 옮겨 적기만 맡는다 — 직접 풀면 수학·과학 추론이 약하다. */
 const DIRECT = /kimi-k3/i;
 
+/* 쓰는 모델은 이것만(2026-10-16 사용자 결정 — 자동 찾기를 멈추고 고른 것만 굴린다). 고르는 근거는 같은 질문에 대한
+   실제 답·속도: 빠지는 것 — deepseek-v4.1-flash(첫 글자 45초+), qwen3.8-27b(한국어에 이탈리아어 섞임),
+   laguna(동시 한도), glm-5.3·gemma·ultra(그날 무응답), …-latest(Vertex 에 없음),
+   nemotron-3.5-super-vl(속생각 55~100초, 줄이면 틀린 답·한국어 용어 지어냄). 바꾸려면 여기만 고친다. */
+const KEEP = new Set([
+  "gemini/gemini-3.8-flash", "gemini/gemini-3.6-flash", "gemini/gemini-3.1-flash-lite",
+  "z-ai/glm-5.3-flash",
+  "groq/openai/gpt-oss-120b",
+]);
+
 /* 사람이 읽을 이름 — "deepseek-ai/deepseek-v4.1-flash" → "DeepSeek V4.1 Flash" */
 const WORDS = { glm: "GLM", gpt: "GPT", oss: "OSS", deepseek: "DeepSeek", nemotron: "Nemotron", llama: "Llama",
   qwen: "Qwen", qwq: "QwQ", kimi: "Kimi", gemma: "Gemma", mistral: "Mistral", phi: "Phi", gemini: "Gemini",
@@ -230,7 +240,7 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE, GROQ_KEY
     return (b >= 100 ? 60 : 20) + Math.log10(b || 1);
   }
 
-  const alive = (m) => !m.dead && hasKey(m.id);
+  const alive = (m) => !m.dead && KEEP.has(m.id) && hasKey(m.id);
   // 탭 자격 = 찾기 때 "속생각 끈 설정으로 단어 풀이 시험"을 통과하고(tapMs 가 있음) 충분히 빠른 것
   const isTap = (m) => alive(m) && provOf(m.id).tap !== false && m.chat !== false && m.tapMs !== undefined && m.tapMs <= TAP_MAX_MS;
   const isAsk = (m) => alive(m) && m.chat !== false;
@@ -285,7 +295,12 @@ export function createModels({ DATA_DIR, GEMINI_KEY, NIM_KEY, NIM_BASE, GROQ_KEY
        뒤에 있던 멀쩡한 모델(NIM 비전 등)이 상한 5개에 잘려 한 번도 안 불렸다(2026-09-28 캡처 "전부 실패").
        전부 한도라면 어쩔 수 없이 그대로 시도한다. */
     const open = out.filter((id) => !(st.get(id)?.quotaUntil > Date.now()));
-    return (open.length ? open : out).slice(0, 8);
+    /* 상한 8개를 Gemini 가 다 채우면 덧띄우기가 기댈 다른 프로바이더가 줄에 없다 — 질문·캡처에서
+       0.3초 만에 답하는 Groq 가 한 번도 안 불렸다(2026-10-15). 빠진 프로바이더는 1등 하나씩 뒤에 붙인다. */
+    const all = open.length ? open : out;
+    const pick = all.slice(0, 8);
+    for (const id of all) if (!pick.some((p) => provOf(p) === provOf(id))) pick.push(id);
+    return pick;
   }
 
   const get = (id) => reg.get(id);

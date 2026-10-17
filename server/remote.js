@@ -3,30 +3,16 @@ import path from "node:path";
 import crypto from "node:crypto";
 import express from "express";
 
-/* ───────────────── 리모트 모드 (아이패드 → 안드로이드 패널 미러링) ─────────────────
+/* ───────────────── 질문 탭 대화 저장소 + 기기 간 중계 ─────────────────
 
-   역할 분담은 끝까지 이렇다:
-     - 아이패드는 유일하게 모델을 부르는 쪽이다. 문서·오프셋·본문 맥락을 쥔 것도
-       아이패드뿐이라 어떤 조회든 결국 아이패드가 실행한다.
-     - 폰은 명령만 던진다(질문 입력, 오려내기 요청, 대화 전환). 직접 /api/chat 을 타지 않는다.
-     - 서버는 상태의 주인이지 실행자가 아니다. 여기 있는 라우트들은 "지금 이렇다"를
-       받아서 저장하고, 붙어 있는 다른 기기에 SSE 로 흘려보내는 일만 한다.
-
-   두 종류의 상태를 분명히 가른다:
-     - 중계(relay) = 흐르는 중인 화면. 단어/문장/오려내기 조회가 토큰 단위로 갱신되는
-       동안의 표시다. 저장하지 않는다 — 다시 붙었을 때 지나간 토큰을 재생할 필요가 없다.
-       slot 별 seq 로 "이미 버려진 이전 조회"만 걸러낸다.
-     - 세션(session) = 질문 탭 대화. 여기는 저장한다 — 아이패드가 잠들어도 폰이
-       지난 대화를 계속 봐야 하기 때문이다. 단, 토큰마다 쓰지 않는다: 스트리밍 중인
-       모습은 relay 로만 보여주고, 세션에는 문답이 "정착"됐을 때(새 메시지 추가,
-       완료/중단/에러 확정)만 반영한다. 그래야 초당 여러 번 파일을 다시 쓰는 일이 없다.
-
-   오려낸 그림은 세션에 속한다 — 세션이 지워지면(수동 삭제든 TTL 만료든) 그림도
-   함께 지운다. 그래서 서재 썸네일처럼 영구 보관하지 않고 세션 id 로 묶인 디렉터리에
-   둔다: data/sessimg/<세션id>/<그림id>.jpg */
+   서버는 상태의 주인이지 실행자가 아니다 — 모델은 아이패드·PC 창이 부르고, 여기는
+   "지금 이렇다"를 받아 저장하고 붙어 있는 다른 창에 SSE 로 흘린다.
+     - 중계(relay "ask") = 흐르는 중인 답. 저장하지 않고 seq 로 낡은 것만 거른다.
+     - 세션 = 질문 탭 대화. 정착했을 때(메시지 추가, 완료/중단/에러)만 쓴다 — 토큰마다 쓰지 않는다.
+   오려낸 그림은 세션에 속한다: data/sessimg/<세션id>/<그림id>.jpg, 세션과 함께 지운다. */
 
 // src/App.jsx 의 SESS_TTL·SESS_MAX 와 반드시 같은 값으로 맞춘다 — 어긋나면
-// "폰에는 남아 있는데 아이패드에는 이미 지워졌다" 같은 어긋남이 생긴다.
+// "한 창에는 남아 있는데 다른 창에는 이미 지워졌다" 같은 어긋남이 생긴다.
 const SESS_TTL = 2 * 60 * 60 * 1000;
 const SESS_MAX = 20;
 const FIELD_CAP = 60_000; // 메시지 한 필드 상한 — 정상 답은 훨씬 짧다, 폭주 방지용 안전판
@@ -84,17 +70,9 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
   }, 20_000);
   heartbeat.unref?.();
 
-  // ── 모드 · 현재 문서 ──
-  let mode = { on: false, doc: null }; // doc: { id, name, page }
   const relaySeq = Object.create(null); // slot -> 마지막으로 받아들인 seq (새 tap 이 이전 걸 버리는 기준)
 
-  /* 기기 출석 — 문서를 연 창(아이패드·PC)이 30초마다 알린다. 폰은 이걸 보고 "지금 답할 기기가 있나"와
-     "아이패드가 몇 쪽을 보고 있나"를 띄운다. 70초 넘게 소식이 없으면 없는 셈. */
-  const presence = new Map(); // device → { device, label, doc, at }
-  const PRESENCE_TTL = 70_000;
-  const presList = () => [...presence.values()].filter((p) => Date.now() - p.at < PRESENCE_TTL);
-
-  const snapshot = () => ({ mode, sessions: store.sessions, cur: store.cur, presence: presList() });
+  const snapshot = () => ({ sessions: store.sessions, cur: store.cur });
 
   app.get("/api/remote/stream", requireAuth, (req, res) => {
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -108,55 +86,10 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
     res.on("close", () => listeners.delete(res));
   });
 
-  app.get("/api/remote/state", requireAuth, (_req, res) => res.json(snapshot()));
-
-  app.post("/api/remote/presence", requireAuth, (req, res) => {
-    const { device = "", label = "", doc = null, bye = false } = req.body || {};
-    const id = String(device).slice(0, 60);
-    if (!id) return res.status(400).json({ error: "device 가 비었습니다." });
-    if (bye) presence.delete(id);
-    else presence.set(id, {
-      device: id, label: String(label).slice(0, 40), at: Date.now(),
-      doc: doc && { id: String(doc.id || "").slice(0, 100), name: String(doc.name || "").slice(0, 200), page: Math.max(0, Math.floor(Number(doc.page)) || 0) },
-    });
-    broadcast("presence", presList());
-    res.json({ ok: true });
-  });
-  const presTimer = setInterval(() => {
-    let gone = false;
-    for (const [k, p] of presence) if (Date.now() - p.at >= PRESENCE_TTL) { presence.delete(k); gone = true; }
-    if (gone) broadcast("presence", presList());
-  }, 30_000);
-  presTimer.unref?.();
-
-  app.post("/api/remote/mode", requireAuth, (req, res) => {
-    mode = { on: !!req.body?.on, doc: req.body?.on ? mode.doc : null };
-    broadcast("mode", mode);
-    res.json({ ok: true, mode });
-  });
-
-  // 아이패드가 페이지를 넘길 때마다 부른다 — 리모트가 꺼져 있으면 조용히 무시한다
-  app.post("/api/remote/page", requireAuth, (req, res) => {
-    if (!mode.on) return res.json({ ok: true, skipped: true });
-    const { docId = "", docName = "", page = 0 } = req.body || {};
-    mode.doc = {
-      id: String(docId).slice(0, 100),
-      name: String(docName).slice(0, 200),
-      page: Math.max(0, Math.floor(Number(page)) || 0),
-    };
-    broadcast("page", mode.doc);
-    res.json({ ok: true });
-  });
-
-  /* 단어/문장/오려내기의 "지금 그려지는 중" 화면을 그대로 흘려보낸다. 서버는 payload
-     의 모양을 모른다 — 그릴 규칙은 클라이언트가 갖고 있다. 서버가 책임지는 건 하나,
-     "이미 버려진 이전 조회가 뒤늦게 와도 덮어쓰지 못하게" 막는 것뿐이다. 단어를 연달아
-     탭하면 이전 탭의 늦게 도착한 토큰이 새 탭의 화면을 덮어쓸 수 있는데, seq 가 낮으면
-     버려서 막는다. */
+  // 흐르는 답을 다른 창에 — 늦게 온 이전 seq 가 새 걸 덮지 못하게만 막는다
   app.post("/api/remote/relay", requireAuth, (req, res) => {
     const { slot = "", seq = 0, payload = null } = req.body || {};
-    // ask(질문 답이 흐르는 중)는 리모트 모드와 상관없이 흘린다 — 대화는 모든 기기가 함께 보는 것이라
-    if (!slot || (!mode.on && slot !== "ask")) return res.json({ ok: true, skipped: true });
+    if (slot !== "ask") return res.json({ ok: true, skipped: true });
     const n = Number(seq) || 0;
     if (n < (relaySeq[slot] || 0)) return res.json({ ok: true, stale: true });
     relaySeq[slot] = n;
@@ -226,7 +159,7 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
     res.json({ ok: true, from });
   });
 
-  /* 답 자리 맡기 — 폰이 남긴 질문(pending)을 아이패드·PC 가 여럿 열려 있어도 한 곳만 답하게 한다.
+  /* 답 자리 맡기 — 답하다 끊긴 질문(pending)을 아이패드·PC 가 여럿 열려 있어도 한 곳만 답하게 한다.
      맡은 기기가 3분 넘게 아무 말이 없으면(창을 닫았거나 잠듦) 다른 기기가 가져갈 수 있다. */
   app.post("/api/remote/sessions/:id/msgs/:i/claim", requireAuth, (req, res) => {
     const s = findSess(req.params.id);
@@ -239,13 +172,6 @@ export function mountRemote(app, { requireAuth, DATA_DIR }) {
     Object.assign(m, { claim: by, claimAt: Date.now() });
     saveSessions();
     broadcast("sess-msg-patch", { id: s.id, i: Number(req.params.i), patch: { claim: by, claimAt: m.claimAt } });
-    res.json({ ok: true });
-  });
-
-  // 폰의 [멈추기] — 답하는 기기에 "그만"을 전한다. 실제로 끊고 정착시키는 건 답하던 기기다.
-  app.post("/api/remote/sessions/:id/msgs/:i/cancel", requireAuth, (req, res) => {
-    if (!findSess(req.params.id)) return res.status(404).json({ error: "없는 대화입니다." });
-    broadcast("ask-cancel", { id: req.params.id, i: Number(req.params.i) });
     res.json({ ok: true });
   });
 
