@@ -7,8 +7,8 @@
   "start_url": "/yeobaek/",
   "scope": "/yeobaek/",
   "display": "standalone",
-  "background_color": "#141312",
-  "theme_color": "#141312",
+  "background_color": "#000000",
+  "theme_color": "#000000",
   "icons": [
     { "src": "/yeobaek/brand/png/icon-128.png", "sizes": "128x128", "type": "image/png", "purpose": "any" },
     { "src": "/yeobaek/brand/png/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },

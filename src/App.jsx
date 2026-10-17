@@ -1885,7 +1885,8 @@ export default function VerbatimReader() {
     const el = pagesRef.current[n - 1];
     const view = viewRef.current;
     if (!el || !view) return;
-    const top = el.getBoundingClientRect().top - view.getBoundingClientRect().top + view.scrollTop - 10;
+    const top = el.getBoundingClientRect().top - view.getBoundingClientRect().top + view.scrollTop
+      - parseFloat(getComputedStyle(view).paddingTop) + 4; // 떠 있는 막대 밑으로
     view.scrollTo({ top, behavior: smooth ? "smooth" : "auto" });
     curRef.current = n;
     setCurPage(n);
@@ -4354,6 +4355,16 @@ export default function VerbatimReader() {
   const inLib = libOpen || numPages === 0;
   inLibRef.current = inLib;
 
+  /* 떠 있는 위 막대·서재 머리의 아래 끝 — 본문이 그 밑으로 지나가므로 CSS 가 이만큼 비켜 둔다 */
+  useEffect(() => {
+    const root = rootRef.current, el = root?.querySelector(inLib ? ".vb-libhead" : ".vb-bar");
+    if (!el) return;
+    const ro = new ResizeObserver(() =>
+      root.style.setProperty("--vb-barh", el.getBoundingClientRect().bottom - root.getBoundingClientRect().top + "px"));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [inLib]);
+
   return (
     <div className={"vb-root" + (wide ? " wide" : "") + (theme === "light" ? " light" : "")} ref={rootRef}>
       {authed === false && (
@@ -5029,7 +5040,7 @@ export default function VerbatimReader() {
                   <button key={it.id} className="vb-litem" onClick={() => openLogItem(it)}>
                     <span className="vb-lrow">
                       <i className="vb-ldot" style={{
-                        background: it.type === "word" ? "var(--t-star)" : it.type === "ask" ? "#FFD84D" : "var(--t-mark2)",
+                        background: it.type === "word" ? "var(--t-star)" : it.type === "ask" ? "var(--acc)" : "var(--t-mark2)",
                       }} />
                       <span className="vb-ltitle" style={it.type === "word" ? { fontFamily: "var(--serif)" } : undefined}>
                         {it.title}

@@ -6,7 +6,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <meta name="apple-mobile-web-app-title" content="여백" />
-    <meta name="theme-color" content="#141312" />
+    <meta name="theme-color" content="#000000" />
     <!-- 브라우저 탭 파비콘 — 작은 크기(≤32px)에서는 여백선이 뭉개지므로 굵은 획의 small 변형을 쓴다.
          .ico 를 맨 앞에 두는 건 사파리가 SVG 파비콘을 아직 지원하지 않아서다(크롬·파이어폭스는
          type 을 보고 SVG 를 골라 간다). PNG 는 그 둘 다 아닌 구형 브라우저용 폴백. -->
@@ -21,7 +21,7 @@
     <link rel="manifest" href="/site.webmanifest" />
     <title>여백</title>
     <style>
-      html, body, #root { height: 100%; margin: 0; background: #141312; }
+      html, body, #root { height: 100%; margin: 0; background: #000000; }
       /* iOS 26 띠 보정(--vb-gap, main.jsx): 문서 전체를 모자란 만큼 늘리고 스크롤은 막는다.
          overflow 는 html 에만 — body 에 걸면 body(짧은 뷰포트 높이)가 늘린 부분을 잘라 띠가 그대로 남는다(2026-10-10 실기기). */
       html { height: calc(100% + var(--vb-gap, 0px)); overflow: hidden; }
